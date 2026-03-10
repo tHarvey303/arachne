@@ -1,18 +1,25 @@
 """JAX/Equinox reimplementation of synference normalising flow emulators.
 
+.. deprecated::
+    ``JAXFlowEmulator`` is the **legacy** emulator path.  The preferred
+    approach is :class:`~arachne.emulator.jax_mlp_emulator.SPSMLPEmulator`,
+    which trains a native JAX/Equinox MLP (Alsing et al. 2020 Speculator
+    architecture) directly from a synference HDF5 model library.  This avoids
+    the fragile PyTorch weight-export and gives a fully JAX-native pipeline.
+
+    Use ``JAXFlowEmulator`` only if you have a pre-trained lampe flow checkpoint
+    and cannot regenerate the library.
+
 Design note — emulator direction
 ---------------------------------
 synference trains ``p(params | photometry)`` (NPE posterior, params are the
 *output* of the flow). arachne needs the **forward** direction:
 ``photometry = f(params)``.
 
-For v1, the recommended approach is to train a separate forward-direction model
-in synference (swap training inputs/outputs so photometry is the target).
-``JAXFlowEmulator.from_synference_checkpoint`` therefore expects a checkpoint
-where the flow maps *params → photometry*, not the default posterior direction.
-
-If you load a checkpoint trained in the standard NPE direction you will obtain
-wrong predictions — the ``direction`` attribute documents which was used.
+``JAXFlowEmulator.from_synference_checkpoint`` expects a checkpoint where the
+flow maps *params → photometry*.  If you load a checkpoint trained in the
+standard NPE direction you will obtain wrong predictions — the ``direction``
+attribute documents which was used.
 
 Weight export strategy
 -----------------------

@@ -4,6 +4,7 @@ from arachne.data.observation import ObservationCube
 from arachne.data.psf import PSFModel
 from arachne.emulator.base import SPSEmulator
 from arachne.emulator.jax_emulator import JAXFlowEmulator
+from arachne.emulator.jax_mlp_emulator import SPSMLPEmulator
 from arachne.forward_model.pipeline import ForwardModel
 from arachne.inference.nuts_sampler import NUTSResult, NUTSSampler
 from arachne.likelihood.gaussian import GaussianLikelihood
@@ -20,6 +21,7 @@ __all__ = [
     "ObservationCube",
     "PSFModel",
     "SPSEmulator",
+    "SPSMLPEmulator",
     "JAXFlowEmulator",
     "ForwardModel",
     "NUTSSampler",

@@ -19,9 +19,16 @@ Emulator
    :members:
    :undoc-members:
 
+.. autoclass:: arachne.SPSMLPEmulator
+   :members:
+   :undoc-members:
+
 .. autoclass:: arachne.JAXFlowEmulator
    :members:
    :undoc-members:
+
+   .. deprecated::
+      Prefer :class:`~arachne.SPSMLPEmulator` for all new work.
 
 Spatial Models
 --------------

@@ -51,7 +51,8 @@ All source lives in `src/arachne/`. The package exports the key public API from 
 |---|---|
 | `data/observation.py` | `ObservationCube` — multi-band FITS image container |
 | `data/psf.py` | `PSFModel` — per-band PSF kernels, padded for FFT |
-| `emulator/jax_emulator.py` | `JAXFlowEmulator` — exports synference weights to JAX/Equinox; the PyTorch↔JAX bridge |
+| `emulator/jax_mlp_emulator.py` | `SPSMLPEmulator` — **preferred emulator**; Alsing et al. 2020 MLP trained directly from synference HDF5 library; fully JAX-native |
+| `emulator/jax_emulator.py` | `JAXFlowEmulator` — **legacy**; exports synference normalising flow weights to JAX/Equinox; use only if a lampe checkpoint is the only available artefact |
 | `spatial/pixel_map.py` | `FreeFormPixelMap` — per-pixel SPS parameters with L2 smoothness prior |
 | `spatial/gmm.py` | `GaussianMixtureSpatialModel` — K-component GMM with per-component SPS parameters |
 | `psf/convolution.py` | `PSFConvolver` — FFT-based differentiable PSF convolution, pre-computed PSF FFTs |
@@ -89,10 +90,24 @@ All `SpatialModel` subclasses implement exactly two methods called by `ForwardMo
 
 New spatial models are drop-in replacements if they satisfy this interface.
 
-### 6. Emulator direction
-synference trains `p(params | photometry)` (NPE posterior). arachne needs the forward direction
-`photometry = f(params)`. For v1: train a separate forward-direction model in synference.
-Document clearly in any `JAXFlowEmulator` instance which direction was used.
+### 6. Emulator: use SPSMLPEmulator, not JAXFlowEmulator
+The preferred emulator is `SPSMLPEmulator` — a native JAX/Equinox MLP (Alsing et al. 2020
+Speculator architecture) trained directly on `Grid/Parameters` → `Grid/Photometry` from a
+synference HDF5 model library.  This avoids the fragile PyTorch weight-export and works
+entirely within JAX.
+
+Train with:
+
+```python
+emulator = SPSMLPEmulator.from_synference_library(
+    "galaxy_library.h5", param_names=[...], band_names=[...]
+)
+emulator.save("emulator.eqx")
+```
+
+`JAXFlowEmulator` is retained for cases where only a trained lampe checkpoint is available,
+but should not be used for new work.  The synference library (HDF5) is always preferred as
+the training data source — it is already generated as part of the synference workflow.
 
 ## Conventions
 
