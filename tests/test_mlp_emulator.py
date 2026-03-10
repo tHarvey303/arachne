@@ -111,8 +111,10 @@ class TestSPSMLPEmulator:
         assert jnp.all(jnp.isfinite(grad))
 
     def test_predict_jit(self, tiny_emulator):
-        """jax.jit compiles predict()."""
-        predict_jit = jax.jit(tiny_emulator.predict)
+        """eqx.filter_jit compiles predict() (correct Equinox JIT pattern)."""
+        import equinox as eqx
+
+        predict_jit = eqx.filter_jit(tiny_emulator.predict)
         params = jnp.zeros((8, N_PARAMS))
         out = predict_jit(params)
         assert out.shape == (8, N_BANDS)

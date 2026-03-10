@@ -118,8 +118,8 @@ class ObservationCube:
 
             if cutout_center is not None and cutout_size is not None:
                 if wcs_ref is not None and i == 0:
-                    from astropy.coordinates import SkyCoord
                     import astropy.units as u
+                    from astropy.coordinates import SkyCoord
 
                     coord = SkyCoord(ra=cutout_center[0] * u.deg, dec=cutout_center[1] * u.deg)
                     cutout = Cutout2D(flux_data, coord, cutout_size, wcs=wcs_ref)

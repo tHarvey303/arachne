@@ -118,10 +118,14 @@ class GaussianMixtureSpatialModel(SpatialModel):
         sps_params = self._lows + (self._highs - self._lows) * jax.nn.sigmoid(sps_raw)
         return mu, sigma, rho, sps_params
 
-    def _gaussian_weights(
+    def _gaussian_log_weights(
         self, mu: jnp.ndarray, sigma: jnp.ndarray, rho: jnp.ndarray
     ) -> jnp.ndarray:
-        """Evaluate bivariate Gaussian at all pixel coordinates.
+        """Evaluate log of unnormalised bivariate Gaussian at all pixel coordinates.
+
+        Returning log-weights rather than weights avoids float32 underflow when
+        components are far from pixels.  Normalisation is done via
+        ``jax.nn.softmax`` in ``decode()``, which is numerically stable.
 
         Args:
             mu: Component centre (y, x), shape (2,).
@@ -129,15 +133,14 @@ class GaussianMixtureSpatialModel(SpatialModel):
             rho: Correlation coefficient, scalar.
 
         Returns:
-            Unnormalised Gaussian weights at each pixel, shape (H*W,).
+            Log unnormalised Gaussian weights at each pixel, shape (H*W,).
         """
         dy = self.pixel_coords[:, 0] - mu[0]  # (H*W,)
         dx = self.pixel_coords[:, 1] - mu[1]  # (H*W,)
         sy, sx = sigma[0], sigma[1]
         z = (dy / sy) ** 2 - 2 * rho * (dy / sy) * (dx / sx) + (dx / sx) ** 2
         denom = 2 * (1 - rho**2)
-        log_w = -z / denom
-        return jnp.exp(log_w - jnp.max(log_w))  # numerically stable
+        return -z / denom  # log of unnormalised Gaussian, shape (H*W,)
 
     def decode(self, theta: jnp.ndarray, image_shape: tuple) -> jnp.ndarray:
         """Map unconstrained theta to per-pixel physical SPS parameters.
@@ -154,20 +157,19 @@ class GaussianMixtureSpatialModel(SpatialModel):
         # Parse per-component parameters
         theta_components = theta.reshape(K, 5 + N)
 
-        def component_weights_and_sps(
+        def component_log_weights_and_sps(
             theta_k: jnp.ndarray,
         ) -> tuple[jnp.ndarray, jnp.ndarray]:
             mu, sigma, rho, sps = self._parse_component(theta_k)
-            weights = self._gaussian_weights(mu, sigma, rho)  # (H*W,)
-            return weights, sps
+            log_weights = self._gaussian_log_weights(mu, sigma, rho)  # (H*W,)
+            return log_weights, sps
 
         # vmap over components
-        all_weights, all_sps = jax.vmap(component_weights_and_sps)(theta_components)
-        # all_weights: (K, H*W), all_sps: (K, N_sps)
+        all_log_weights, all_sps = jax.vmap(component_log_weights_and_sps)(theta_components)
+        # all_log_weights: (K, H*W), all_sps: (K, N_sps)
 
-        # Normalise weights across components at each pixel
-        weight_sum = jnp.sum(all_weights, axis=0, keepdims=True)  # (1, H*W)
-        norm_weights = all_weights / (weight_sum + 1e-10)  # (K, H*W)
+        # Softmax across components at each pixel — numerically stable, always sums to 1
+        norm_weights = jax.nn.softmax(all_log_weights, axis=0)  # (K, H*W)
 
         # Mixture-weighted SPS params
         # pixel_params = einsum('kp,kc->pc', norm_weights, all_sps)

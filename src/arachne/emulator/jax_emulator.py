@@ -32,10 +32,8 @@ runs — the entire forward pass is pure JAX.
 
 from __future__ import annotations
 
-import logging
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import equinox as eqx
 import jax
@@ -417,7 +415,6 @@ class JAXFlowEmulator(SPSEmulator, eqx.Module):
         """
         try:
             import joblib
-            import torch
         except ImportError as e:
             raise ImportError(
                 "PyTorch and joblib are required to load synference checkpoints. "
@@ -548,7 +545,9 @@ class JAXFlowEmulator(SPSEmulator, eqx.Module):
                 "No 'transform.*' keys in state_dict. "
                 "Attempting to build a single-transform flow from raw weights."
             )
-            transforms = [cls._build_single_transform(state_dict, "", n_features, n_bins, spline_bound)]
+            transforms = [
+                cls._build_single_transform(state_dict, "", n_features, n_bins, spline_bound)
+            ]
             return transforms
 
         transforms = []

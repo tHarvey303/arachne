@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import jax
 import jax.numpy as jnp
 
 from arachne.data.observation import ObservationCube

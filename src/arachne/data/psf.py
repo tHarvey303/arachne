@@ -111,14 +111,20 @@ class PSFModel:
                 "Either crop the PSF or use a larger image cutout."
             )
 
-        pad_h = H - h_psf
-        pad_w = W - w_psf
-        # Symmetric padding so the PSF peak stays centred before ifftshift
+        # Place the PSF centre at (H//2, W//2) so that ifftshift moves it
+        # exactly to (0, 0) — the convention for correct FFT convolution.
+        # Symmetric padding (pad_h//2 each side) is wrong when H-h_psf is odd:
+        # it places the centre at (h_psf//2 + pad_h//2) ≠ H//2.
+        center_h, center_w = h_psf // 2, w_psf // 2
+        pad_top = H // 2 - center_h
+        pad_left = W // 2 - center_w
+        pad_bottom = H - h_psf - pad_top
+        pad_right = W - w_psf - pad_left
         padded = np.pad(
             np.asarray(self.kernels),
-            ((0, 0), (pad_h // 2, pad_h - pad_h // 2), (pad_w // 2, pad_w - pad_w // 2)),
+            ((0, 0), (pad_top, pad_bottom), (pad_left, pad_right)),
         )
-        # ifftshift: move PSF peak from centre to (0,0) corner for FFT convention
+        # ifftshift: move PSF peak from (H//2, W//2) to (0,0) for FFT convention
         padded = np.fft.ifftshift(padded, axes=(-2, -1))
         return PSFModel(kernels=padded.astype(np.float32), band_names=self.band_names)
 

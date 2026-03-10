@@ -5,7 +5,6 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 
-from arachne.priors.spatial import GradientPenaltyPrior
 from arachne.spatial.base import SpatialModel
 
 
@@ -136,5 +135,7 @@ class FreeFormPixelMap(SpatialModel):
         dx = param_map[:, 1:, :] - param_map[:, :-1, :]  # (H, W-1, N)
 
         # Weighted sum over parameters
-        penalty = jnp.sum(self._lambdas * (jnp.sum(dy**2, axis=(0, 1)) + jnp.sum(dx**2, axis=(0, 1))))
+        dy_sum = jnp.sum(dy**2, axis=(0, 1))
+        dx_sum = jnp.sum(dx**2, axis=(0, 1))
+        penalty = jnp.sum(self._lambdas * (dy_sum + dx_sum))
         return -penalty

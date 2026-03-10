@@ -27,7 +27,7 @@ This approach replaces the fragile ``JAXFlowEmulator.from_synference_checkpoint`
 weight-export path and gives a fully native JAX pipeline with no PyTorch
 dependency at inference time.
 
-Example
+Example:
 -------
 .. code-block:: python
 
@@ -45,9 +45,7 @@ Example
 
 from __future__ import annotations
 
-import logging
 from pathlib import Path
-from typing import Optional
 
 import equinox as eqx
 import jax
@@ -158,7 +156,7 @@ class SPSMLPEmulator(SPSEmulator, eqx.Module):
         _band_names: Photometric band name list. Static.
     """
 
-    hidden_layers: list
+    hidden_layers: tuple
     output_layer: eqx.nn.Linear
     in_mean: jnp.ndarray
     in_std: jnp.ndarray
@@ -203,10 +201,10 @@ class SPSMLPEmulator(SPSEmulator, eqx.Module):
 
         sizes = [n_in] + hidden_sizes
         keys = jax.random.split(key, len(sizes))
-        layers = []
-        for i, (in_sz, out_sz) in enumerate(zip(sizes[:-1], sizes[1:])):
-            layers.append(AlsingLayer(in_sz, out_sz, keys[i]))
-        self.hidden_layers = layers
+        self.hidden_layers = tuple(
+            AlsingLayer(in_sz, out_sz, keys[i])
+            for i, (in_sz, out_sz) in enumerate(zip(sizes[:-1], sizes[1:]))
+        )
 
         out_key = jax.random.split(key, 1)[0]
         self.output_layer = eqx.nn.Linear(sizes[-1], n_out, key=out_key)

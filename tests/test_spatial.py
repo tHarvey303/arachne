@@ -148,17 +148,21 @@ class TestGMM:
         assert gmm_model.pixel_coords.shape == (16 * 16, 2)
 
     def test_separated_components_produce_spatial_variation(self, gmm_model):
-        """Components at opposite corners produce a spatially varying map."""
+        """Components at opposite corners with different SPS params produce a spatially varying map."""
         K = gmm_model.n_components
         N = len(gmm_model.sps_param_names)
         theta_list = list(np.zeros(gmm_model.n_params, dtype=np.float32))
-        # Component 0: top-left (mu_y=0, mu_x=0)
+        # Component 0: top-left (mu_y=0, mu_x=0), sps[0] at lower bound (theta=-5 -> sigmoid~0)
         theta_list[0] = 0.0
         theta_list[1] = 0.0
-        # Component 1: bottom-right (mu_y=15, mu_x=15)
+        for j in range(N):
+            theta_list[5 + j] = -5.0  # push SPS toward lower bound
+        # Component 1: bottom-right (mu_y=15, mu_x=15), sps[0] at upper bound (theta=+5 -> sigmoid~1)
         start = 5 + N
         theta_list[start] = 15.0
         theta_list[start + 1] = 15.0
+        for j in range(N):
+            theta_list[start + 5 + j] = 5.0  # push SPS toward upper bound
         theta = jnp.array(theta_list)
         out = gmm_model.decode(theta, (16, 16))
         assert float(jnp.std(out[:, 0])) > 0
