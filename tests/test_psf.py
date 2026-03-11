@@ -10,7 +10,6 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from arachne.data.psf import PSFModel
 from arachne.psf.convolution import PSFConvolver
 
 

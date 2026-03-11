@@ -7,7 +7,6 @@ test suite runs on CPU without any GPU or real checkpoint.
 from __future__ import annotations
 
 import equinox as eqx
-import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -15,7 +14,6 @@ import pytest
 from arachne.data.observation import ObservationCube
 from arachne.data.psf import PSFModel
 from arachne.emulator.base import SPSEmulator
-from arachne.emulator.jax_emulator import JAXFlowEmulator, _SimpleLinear, MAFTransform, _FCNN
 from arachne.spatial.gmm import GaussianMixtureSpatialModel
 from arachne.spatial.pixel_map import FreeFormPixelMap
 

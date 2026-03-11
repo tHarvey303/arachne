@@ -4,9 +4,6 @@ Uses a very short run (5 warmup + 10 samples) with the GMM model so CI
 finishes quickly on CPU.
 """
 
-import tempfile
-from pathlib import Path
-
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -14,7 +11,6 @@ import pytest
 
 from arachne.forward_model.pipeline import ForwardModel
 from arachne.inference.nuts_sampler import NUTSResult, NUTSSampler
-
 
 blackjax = pytest.importorskip("blackjax", reason="blackjax not installed")
 
@@ -54,7 +50,7 @@ class TestNUTSSampler:
     """Tests for NUTSSampler.run()."""
 
     def test_samples_shape(self, nuts_result, gmm_model):
-        """samples array has shape (n_samples, n_params)."""
+        """Samples array has shape (n_samples, n_params)."""
         assert nuts_result.samples.shape == (10, gmm_model.n_params)
 
     def test_samples_finite(self, nuts_result):

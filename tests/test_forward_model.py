@@ -111,7 +111,9 @@ class TestForwardModelPixelMap:
 class TestForwardModelBuild:
     """Tests for ForwardModel.build() convenience constructor."""
 
-    def test_build_calls_to_jax(self, tiny_observation_numpy, gaussian_psf, mock_emulator, gmm_model):
+    def test_build_calls_to_jax(
+        self, tiny_observation_numpy, gaussian_psf, mock_emulator, gmm_model
+    ):
         """ForwardModel.build() converts numpy obs to JAX arrays."""
         fm = ForwardModel.build(
             obs=tiny_observation_numpy,
@@ -121,7 +123,9 @@ class TestForwardModelBuild:
         )
         assert isinstance(fm.observation.flux, jnp.ndarray)
 
-    def test_build_creates_convolver(self, tiny_observation, gaussian_psf, mock_emulator, gmm_model):
+    def test_build_creates_convolver(
+        self, tiny_observation, gaussian_psf, mock_emulator, gmm_model
+    ):
         """ForwardModel.build() creates a PSFConvolver."""
         fm = ForwardModel.build(
             obs=tiny_observation,
@@ -131,7 +135,9 @@ class TestForwardModelBuild:
         )
         assert isinstance(fm.convolver, PSFConvolver)
 
-    def test_build_creates_likelihood(self, tiny_observation, gaussian_psf, mock_emulator, gmm_model):
+    def test_build_creates_likelihood(
+        self, tiny_observation, gaussian_psf, mock_emulator, gmm_model
+    ):
         """ForwardModel.build() creates a GaussianLikelihood."""
         fm = ForwardModel.build(
             obs=tiny_observation,

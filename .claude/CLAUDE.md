@@ -15,7 +15,7 @@ The core scientific workflow:
    (free-form per-pixel map or Gaussian Mixture Model)
 3. **Emulator loading** — export a trained synference normalising flow to JAX/Equinox (frozen weights)
 4. **Forward modelling** — spatial params → SPS emulator → PSF convolution → predicted image
-5. **Inference** — NUTS/HMC via BlackJAX samples the full posterior over all spatial parameters
+5. **Inference** — NUTS or MCLMC via BlackJAX samples the full posterior over all spatial parameters
 
 The entire forward model pipeline (steps 3–5) is implemented in pure JAX, making it
 end-to-end differentiable and JIT-compilable to GPU. BlackJAX NUTS calls `jax.grad` of
@@ -38,9 +38,13 @@ pip install "jax[cuda12_pip]" -f https://storage.googleapis.com/jax-releases/jax
 pytest                              # Full test suite (runs on CPU, no GPU needed)
 pytest tests/test_forward_model.py  # Single file
 pytest -m "not gpu"                 # Skip GPU-requiring tests in CI
-ruff check --fix src/               # Lint + auto-fix
-ruff format src/                    # Format
+ruff check --fix src/ scripts/ tests/  # Lint + auto-fix (include scripts/)
+ruff format src/ scripts/ tests/    # Format
 cd docs && make html                # Build docs
+
+# Training / validation scripts:
+python scripts/train_parrot_emulator.py --library <lib.hdf5> --output outputs/emulators/parrot.eqx
+python scripts/validate_parrot_emulator.py --emulator outputs/emulators/parrot.eqx --library <lib.hdf5>
 ```
 
 ## Architecture
@@ -51,7 +55,8 @@ All source lives in `src/arachne/`. The package exports the key public API from 
 |---|---|
 | `data/observation.py` | `ObservationCube` — multi-band FITS image container |
 | `data/psf.py` | `PSFModel` — per-band PSF kernels, padded for FFT |
-| `emulator/jax_mlp_emulator.py` | `SPSMLPEmulator` — **preferred emulator**; Alsing et al. 2020 MLP trained directly from synference HDF5 library; fully JAX-native |
+| `emulator/parrot_emulator.py` | `ParrotEmulator` — **recommended emulator**; Mathews et al. 2023 GELU MLP with arsinh-magnitude output; trained from synference HDF5 via `scripts/train_parrot_emulator.py` |
+| `emulator/jax_mlp_emulator.py` | `SPSMLPEmulator` — Alsing et al. 2020 Speculator MLP in log10-flux space; fully JAX-native |
 | `emulator/jax_emulator.py` | `JAXFlowEmulator` — **legacy**; exports synference normalising flow weights to JAX/Equinox; use only if a lampe checkpoint is the only available artefact |
 | `spatial/pixel_map.py` | `FreeFormPixelMap` — per-pixel SPS parameters with L2 smoothness prior |
 | `spatial/gmm.py` | `GaussianMixtureSpatialModel` — K-component GMM with per-component SPS parameters |
@@ -60,6 +65,7 @@ All source lives in `src/arachne/`. The package exports the key public API from 
 | `priors/spatial.py` | `GradientPenaltyPrior`, `TotalVariationPrior` — spatial smoothness priors |
 | `forward_model/pipeline.py` | `ForwardModel` — composes all components into a single `log_posterior(theta)` |
 | `inference/nuts_sampler.py` | `NUTSSampler` — BlackJAX NUTS with window adaptation, `jax.lax.scan` sampling loop |
+| `inference/mclmc_sampler.py` | `MCLMCSampler` — BlackJAX MCLMC; preferred for high-d `FreeFormPixelMap` (O(1) grad evals/sample). `run_pathfinder` provides L-BFGS warm-start |
 
 ## Key Design Principles
 
@@ -90,24 +96,27 @@ All `SpatialModel` subclasses implement exactly two methods called by `ForwardMo
 
 New spatial models are drop-in replacements if they satisfy this interface.
 
-### 6. Emulator: use SPSMLPEmulator, not JAXFlowEmulator
-The preferred emulator is `SPSMLPEmulator` — a native JAX/Equinox MLP (Alsing et al. 2020
-Speculator architecture) trained directly on `Grid/Parameters` → `Grid/Photometry` from a
-synference HDF5 model library.  This avoids the fragile PyTorch weight-export and works
-entirely within JAX.
+### 6. Emulator: use ParrotEmulator for new work
+The recommended emulator is `ParrotEmulator` (Mathews et al. 2023) — GELU MLP with arsinh-
+magnitude output transform. The arsinh transform handles near-zero fluxes (Lyman-break
+dropouts, ~50% of blue-band samples at high-z) without divergence. Train via:
 
-Train with:
-
-```python
-emulator = SPSMLPEmulator.from_synference_library(
-    "galaxy_library.h5", param_names=[...], band_names=[...]
-)
-emulator.save("emulator.eqx")
+```bash
+python scripts/train_parrot_emulator.py \
+    --library galaxy_library.h5 \
+    --output outputs/emulators/parrot.eqx \
+    --lr 3e-4 --patience 100 --epochs 1000
 ```
 
-`JAXFlowEmulator` is retained for cases where only a trained lampe checkpoint is available,
-but should not be used for new work.  The synference library (HDF5) is always preferred as
-the training data source — it is already generated as part of the synference workflow.
+`SPSMLPEmulator` (Alsing et al. 2020 Speculator, log10-flux space) remains available and
+is tested. `JAXFlowEmulator` is legacy-only (lampe checkpoint input); do not use for new work.
+Emulator checkpoints (`.eqx`) and validation outputs go in `outputs/` (gitignored).
+
+### 7. Sampler: use MCLMCSampler for FreeFormPixelMap
+`NUTSSampler` is adequate for `GaussianMixtureSpatialModel` (low-d). For `FreeFormPixelMap`
+(d~45k–67k), use `MCLMCSampler` — persistent momentum, no tree doubling, O(1) gradient evals
+per effective sample vs NUTS's O(d^{1/4}). Pair with `run_pathfinder` for a fast L-BFGS
+warm-start that skips expensive warmup.
 
 ## Conventions
 

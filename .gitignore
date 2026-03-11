@@ -43,3 +43,10 @@ docs/build/
 # IDEs
 .vscode/
 .idea/
+
+*.eqx
+
+# Outputs (emulator checkpoints, validation plots/residuals)
+# Directory structure is committed via outputs/.gitkeep; contents are not.
+outputs/emulators/
+outputs/validation/

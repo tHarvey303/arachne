@@ -13,8 +13,6 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from arachne.emulator.base import SPSEmulator
-
 
 def test_mock_emulator_predict_shape(mock_emulator):
     """predict() returns (N_pixels, N_bands)."""
@@ -57,7 +55,7 @@ def test_mock_emulator_n_params(mock_emulator):
 
 def test_jax_flow_emulator_from_weights():
     """JAXFlowEmulator.from_weights constructs a working emulator."""
-    from arachne.emulator.jax_emulator import JAXFlowEmulator, _SimpleLinear, MAFTransform, _FCNN
+    from arachne.emulator.jax_emulator import _FCNN, JAXFlowEmulator, MAFTransform, _SimpleLinear
 
     n_params = 3
     n_bands = 3
@@ -88,7 +86,7 @@ def test_jax_flow_emulator_from_weights():
 
 def test_jax_flow_emulator_grad():
     """jax.grad differentiates through JAXFlowEmulator."""
-    from arachne.emulator.jax_emulator import JAXFlowEmulator, _SimpleLinear, MAFTransform, _FCNN
+    from arachne.emulator.jax_emulator import _FCNN, JAXFlowEmulator, MAFTransform, _SimpleLinear
 
     n_params = 3
     n_bands = 3

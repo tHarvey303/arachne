@@ -22,24 +22,39 @@ modelling approach:
 The entire pipeline is implemented in pure JAX, making it end-to-end differentiable and
 JIT-compilable to GPU.
 
-## Emulator
+## Emulators
 
-arachne's emulator (`SPSMLPEmulator`) uses the [Speculator](https://arxiv.org/abs/1911.11778)
-architecture (Alsing et al. 2020) — a stack of fully-connected layers with learnable self-gating
-activations well-suited to the smooth mappings produced by SPS codes. It is trained directly
-from the HDF5 model library produced by synference, with no PyTorch dependency at inference time.
+arachne provides two native JAX/Equinox emulators, both trained directly from the HDF5
+model library produced by synference with no PyTorch dependency at inference time.
+
+### ParrotEmulator (recommended)
+
+A Parrot-style MLP ([Mathews et al. 2023](https://arxiv.org/abs/2302.05560)) with GELU
+activations and an arsinh-magnitude output transform.  The arsinh transform handles
+near-zero fluxes (e.g. Lyman-break dropouts) gracefully, which log-space cannot.
+Training uses a 3-phase NADAM schedule with early stopping and best-model checkpointing.
 
 ```bash
-# Train once from a synference library:
-python examples/train_emulator.py \
+# Train from a synference HDF5 library (recommended):
+python scripts/train_parrot_emulator.py \
     --library galaxy_library.h5 \
-    --output emulator.eqx \
-    --param-names log_stellar_mass log_age log_metallicity tau_v \
-    --band-names JWST/NIRCam.F115W JWST/NIRCam.F200W JWST/NIRCam.F277W
+    --output outputs/emulators/parrot.eqx \
+    --epochs 1000 --batch 4096 --lr 3e-4
+
+# Validate against held-out data:
+python scripts/validate_parrot_emulator.py \
+    --emulator outputs/emulators/parrot.eqx \
+    --library galaxy_library.h5 \
+    --output-dir outputs/validation/
 ```
 
-The resulting `.eqx` checkpoint is a native Equinox pytree — differentiable, JIT-compilable,
-and loadable with no PyTorch dependency.
+### SPSMLPEmulator
+
+Uses the [Speculator](https://arxiv.org/abs/1911.11778) architecture (Alsing et al. 2020)
+— fully-connected layers with learnable self-gating activations, trained in log10-flux space.
+
+Both emulators produce `.eqx` checkpoints — native Equinox pytrees that are differentiable,
+JIT-compilable, and loadable with no PyTorch dependency.
 
 ## Installation
 
@@ -122,6 +137,11 @@ forward_model = ForwardModel.build(
 )
 
 sampler = NUTSSampler(forward_model=forward_model, n_warmup=500, n_samples=1000)
+# For high-dimensional FreeFormPixelMap use MCLMCSampler instead (O(1) grad evals/sample):
+# from arachne import MCLMCSampler, run_pathfinder
+# pos, imm = run_pathfinder(forward_model.log_posterior, theta_init, key)
+# sampler = MCLMCSampler(forward_model, n_warmup=1000, n_samples=500)
+# result = sampler.run(pos, key, inverse_mass_matrix=imm)
 result = sampler.run(jnp.zeros(spatial_model.n_params), jax.random.PRNGKey(0))
 
 # Posterior parameter maps: {param_name: (n_percentiles, H, W)}
@@ -164,6 +184,16 @@ log_posterior(theta)  ← scalar, differentiable
 |---|---|---|
 | `GaussianMixtureSpatialModel` | `K × (5 + N_sps)` | Structured galaxies; fast inference |
 | `FreeFormPixelMap` | `H × W × N_sps` | Maximum flexibility; requires GPU |
+
+## Samplers
+
+| Sampler | Best for |
+|---|---|
+| `NUTSSampler` | GMM spatial models (low-d, ~tens of params) |
+| `MCLMCSampler` | FreeFormPixelMap (high-d, ~45k–67k params); O(1) gradient evals per effective sample vs NUTS's O(d^{1/4}) |
+
+`run_pathfinder` provides a fast L-BFGS warm-start (MAP position + diagonal inverse-mass-matrix
+estimate) that can be passed to either sampler to skip expensive warmup.
 
 ## License
 

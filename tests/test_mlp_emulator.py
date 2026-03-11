@@ -1,6 +1,5 @@
 """Tests for SPSMLPEmulator (native JAX/Equinox MLP emulator)."""
 
-import tempfile
 from pathlib import Path
 
 import jax
@@ -9,7 +8,6 @@ import numpy as np
 import pytest
 
 from arachne.emulator.jax_mlp_emulator import AlsingLayer, SPSMLPEmulator
-
 
 N_PARAMS = 3
 N_BANDS = 3

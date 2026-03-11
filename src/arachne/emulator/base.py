@@ -1,12 +1,15 @@
 """Abstract base class for SPS emulators."""
 
-from abc import ABC, abstractmethod
-
+import equinox as eqx
 import jax.numpy as jnp
 
 
-class SPSEmulator(ABC):
+class SPSEmulator(eqx.Module):
     """Abstract base class for stellar population synthesis emulators.
+
+    Inherits from ``eqx.Module`` so that all concrete subclasses are
+    Equinox pytrees without a metaclass conflict.  Abstract methods raise
+    ``NotImplementedError`` at runtime rather than at class-definition time.
 
     An emulator maps per-pixel SPS parameter vectors to predicted photometry.
     All implementations must be JAX-differentiable so that gradients can
@@ -14,7 +17,6 @@ class SPSEmulator(ABC):
     """
 
     @property
-    @abstractmethod
     def param_names(self) -> list[str]:
         """Names of the SPS input parameters.
 
@@ -22,19 +24,17 @@ class SPSEmulator(ABC):
             List of parameter name strings, e.g.
             ["log_stellar_mass", "log_age", "log_metallicity", "tau_v"].
         """
-        ...
+        raise NotImplementedError
 
     @property
-    @abstractmethod
     def band_names(self) -> list[str]:
         """Names of the photometric output bands.
 
         Returns:
             List of band name strings, e.g. ["JWST/NIRCam.F115W", ...].
         """
-        ...
+        raise NotImplementedError
 
-    @abstractmethod
     def predict(self, params: jnp.ndarray) -> jnp.ndarray:
         """Predict photometry from SPS parameters.
 
@@ -46,7 +46,7 @@ class SPSEmulator(ABC):
         Returns:
             Predicted photometry of shape (N_pixels, N_bands) in nJy.
         """
-        ...
+        raise NotImplementedError
 
     @property
     def n_params(self) -> int:

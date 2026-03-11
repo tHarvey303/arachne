@@ -33,14 +33,30 @@ Example:
 
     emulator = SPSMLPEmulator.from_synference_library(
         library_path="galaxy_library.h5",
-        param_names=["log_stellar_mass", "log_age", "log_metallicity", "tau_v"],
-        band_names=["JWST/NIRCam.F115W", "JWST/NIRCam.F200W"],
+        param_names=[
+            "log_stellar_mass",
+            "log_age",
+            "log_metallicity",
+            "tau_v",
+        ],
+        band_names=[
+            "JWST/NIRCam.F115W",
+            "JWST/NIRCam.F200W",
+        ],
     )
-    emulator.save("emulator.eqx")
+    emulator.save(
+        "emulator.eqx"
+    )
 
     # Later:
-    emulator = SPSMLPEmulator.load("emulator.eqx", param_names=..., band_names=...)
-    fluxes = emulator.predict(params)  # (N_pixels, N_bands) in nJy
+    emulator = SPSMLPEmulator.load(
+        "emulator.eqx",
+        param_names=...,
+        band_names=...,
+    )
+    fluxes = emulator.predict(
+        params
+    )  # (N_pixels, N_bands) in nJy
 """
 
 from __future__ import annotations
@@ -131,7 +147,7 @@ class AlsingLayer(eqx.Module):
 # ---------------------------------------------------------------------------
 
 
-class SPSMLPEmulator(SPSEmulator, eqx.Module):
+class SPSMLPEmulator(SPSEmulator):
     """Fast JAX-native MLP emulator mapping SPS parameters to photometry.
 
     All parameters (weights, normalisations) are stored as an Equinox pytree,
@@ -349,8 +365,7 @@ class SPSMLPEmulator(SPSEmulator, eqx.Module):
             import optax
         except ImportError as e:
             raise ImportError(
-                "h5py and optax are required for training. "
-                "Install with: pip install h5py optax"
+                "h5py and optax are required for training. Install with: pip install h5py optax"
             ) from e
 
         if hidden_sizes is None:
@@ -362,7 +377,7 @@ class SPSMLPEmulator(SPSEmulator, eqx.Module):
         with h5py.File(library_path, "r") as f:
             # Load raw arrays — shape (n_params, n_models) and (n_filters, n_models)
             raw_params = f["Grid/Parameters"][()]  # (N_p_all, N_models)
-            raw_phot = f["Grid/Photometry"][()]    # (N_b_all, N_models)
+            raw_phot = f["Grid/Photometry"][()]  # (N_b_all, N_models)
 
             # Read metadata attributes
             lib_param_names = _decode_str_attr(f.attrs.get("ParameterNames", []))
@@ -382,7 +397,7 @@ class SPSMLPEmulator(SPSEmulator, eqx.Module):
         band_indices = _select_indices(band_names, lib_band_names, "band")
 
         params = raw_params[param_indices, :].T.astype(np.float32)  # (N_models, N_p)
-        phot = raw_phot[band_indices, :].T.astype(np.float32)        # (N_models, N_b)
+        phot = raw_phot[band_indices, :].T.astype(np.float32)  # (N_models, N_b)
 
         # Filter out non-positive fluxes (unphysical; can't take log)
         valid = np.all(phot > 0, axis=1) & np.all(np.isfinite(params), axis=1)
@@ -539,8 +554,7 @@ def _select_indices(requested: list[str], available: list[str], kind: str) -> li
     for name in requested:
         if name not in available:
             raise KeyError(
-                f"Requested {kind} '{name}' not found in library. "
-                f"Available: {available}"
+                f"Requested {kind} '{name}' not found in library. Available: {available}"
             )
         indices.append(available.index(name))
     return indices

@@ -48,9 +48,7 @@ class NUTSResult:
         path.parent.mkdir(parents=True, exist_ok=True)
         with h5py.File(path, "w") as f:
             samples_group = f.create_group("samples")
-            samples_group.create_dataset(
-                "theta", data=np.asarray(self.samples), compression="gzip"
-            )
+            samples_group.create_dataset("theta", data=np.asarray(self.samples), compression="gzip")
             # Save key diagnostics if available
             infos_group = f.create_group("diagnostics")
             if hasattr(self.infos, "acceptance_rate"):
@@ -113,14 +111,10 @@ class NUTSResult:
         param_names = getattr(spatial_model, "sps_param_names", [])
 
         if not param_names:
-            logger.warning(
-                "spatial_model has no sps_param_names; returning empty parameter map."
-            )
+            logger.warning("spatial_model has no sps_param_names; returning empty parameter map.")
             return {}
 
-        logger.info(
-            f"Decoding {n_samples} samples into parameter maps ({H}×{W})..."
-        )
+        logger.info(f"Decoding {n_samples} samples into parameter maps ({H}×{W})...")
 
         # Decode all samples: (n_samples, H*W, N_sps)
         def decode_single(theta: jnp.ndarray) -> jnp.ndarray:
@@ -225,8 +219,7 @@ class NUTSSampler:
             import blackjax
         except ImportError as e:
             raise ImportError(
-                "blackjax is required for NUTS sampling. "
-                "Install it with: pip install blackjax"
+                "blackjax is required for NUTS sampling. Install it with: pip install blackjax"
             ) from e
 
         # JIT-compile the log-posterior once
@@ -244,9 +237,7 @@ class NUTSSampler:
         )
         rng_key, warmup_key = jax.random.split(rng_key)
         (state, params), warmup_info = warmup.run(warmup_key, theta_init, self.n_warmup)
-        logger.info(
-            f"Warmup complete. Step size: {params.get('step_size', 'N/A'):.4g}"
-        )
+        logger.info(f"Warmup complete. Step size: {params.get('step_size', 'N/A'):.4g}")
 
         # 2. Build NUTS kernel with adapted parameters
         nuts_kernel = blackjax.nuts(
@@ -256,9 +247,7 @@ class NUTSSampler:
         )
 
         # 3. Sampling: jax.lax.scan loop for full GPU efficiency
-        def one_step(
-            carry: Any, rng_key: jnp.ndarray
-        ) -> tuple[Any, tuple[jnp.ndarray, Any]]:
+        def one_step(carry: Any, rng_key: jnp.ndarray) -> tuple[Any, tuple[jnp.ndarray, Any]]:
             state, info = nuts_kernel.step(rng_key, carry)
             return state, (state.position, info)
 

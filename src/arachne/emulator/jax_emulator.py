@@ -233,8 +233,8 @@ class NSFTransform(eqx.Module):
         s = (y1 - y0) / (x1 - x0)
         d0 = derivatives[bin_idx]
         d1 = derivatives[bin_idx + 1]
-        w = (x1 - x0)
-        h = (y1 - y0)
+        w = x1 - x0
+        h = y1 - y0
 
         if not inverse:
             xi = (x - x0) / w
@@ -242,9 +242,7 @@ class NSFTransform(eqx.Module):
             denominator = s + ((d1 + d0 - 2 * s) * xi * (1 - xi))
             y = y0 + numerator / denominator
             dy_dx = (
-                s**2
-                * (d1 * xi**2 + 2 * s * xi * (1 - xi) + d0 * (1 - xi) ** 2)
-                / denominator**2
+                s**2 * (d1 * xi**2 + 2 * s * xi * (1 - xi) + d0 * (1 - xi) ** 2) / denominator**2
             )
             log_det = jnp.log(jnp.abs(dy_dx))
         else:
@@ -535,9 +533,7 @@ class JAXFlowEmulator(SPSEmulator, eqx.Module):
             List of MAFTransform or NSFTransform Equinox modules.
         """
         state_dict = flow.state_dict()
-        transform_keys = sorted(
-            {k.split(".")[0] for k in state_dict if k.startswith("transform")}
-        )
+        transform_keys = sorted({k.split(".")[0] for k in state_dict if k.startswith("transform")})
 
         if not transform_keys:
             # Flat structure: try to detect from key names
@@ -552,11 +548,7 @@ class JAXFlowEmulator(SPSEmulator, eqx.Module):
 
         transforms = []
         for tkey in transform_keys:
-            sub = {
-                k[len(tkey) + 1 :]: v
-                for k, v in state_dict.items()
-                if k.startswith(tkey + ".")
-            }
+            sub = {k[len(tkey) + 1 :]: v for k, v in state_dict.items() if k.startswith(tkey + ".")}
             t = cls._build_single_transform(sub, tkey, n_features, n_bins, spline_bound)
             transforms.append(t)
         return transforms
