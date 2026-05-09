@@ -8,8 +8,11 @@ import jax.numpy as jnp
 class IndependentUniformPrior:
     """Independent uniform prior over SPS parameter bounds.
 
-    Returns 0 within the bounds and -inf outside.  Note that for the
-    FreeFormPixelMap and GaussianMixtureSpatialModel the bounds are already
+    Returns 0 within the bounds and a large quadratic penalty outside.  The
+    penalty is gradient-compatible (no -inf) so that ``jax.grad`` and HMC
+    samplers (NUTS, MCLMC) can still step towards the feasible region.
+
+    For FreeFormPixelMap and GaussianMixtureSpatialModel the bounds are already
     enforced by the sigmoid/atanh parameterisation, so this prior adds no
     gradient signal — it is useful primarily as a sanity check or for
     likelihood-based inference with explicitly bounded parameters.
@@ -32,14 +35,19 @@ class IndependentUniformPrior:
     def log_prob(self, params: jnp.ndarray) -> jnp.ndarray:
         """Compute the log-prior.
 
+        Returns 0 inside the bounds.  Outside, applies a steep quadratic
+        barrier proportional to the squared violation, keeping gradients
+        finite so HMC-family samplers can recover from out-of-bounds proposals.
+
         Args:
             params: Parameter array of shape (..., N_params).
 
         Returns:
-            Scalar log-prior value (0 if in bounds, -inf if out of bounds).
+            Scalar log-prior value (0 inside bounds, large negative outside).
         """
-        in_bounds = jnp.all((params >= self.lows) & (params <= self.highs))
-        return jnp.where(in_bounds, 0.0, -jnp.inf)
+        excess_low = jnp.sum(jnp.maximum(0.0, self.lows - params) ** 2)
+        excess_high = jnp.sum(jnp.maximum(0.0, params - self.highs) ** 2)
+        return -(excess_low + excess_high) * 1e6
 
 
 class LogNormalPrior:

@@ -124,18 +124,35 @@ class FreeFormPixelMap(SpatialModel):
         Returns:
             Scalar log-prior value (≤ 0).
         """
-        H, W = self.image_shape
-        N = len(self.sps_param_names)
-        # Decode to physical space
-        params = self.decode(theta, self.image_shape)  # (H*W, N)
-        param_map = params.reshape(H, W, N)  # (H, W, N)
+        decoded = self.decode(theta, self.image_shape)
+        return self.log_prior_from_decoded(theta, decoded, self.image_shape)
 
-        # Finite-difference gradients
+    def log_prior_from_decoded(
+        self,
+        theta: jnp.ndarray,
+        decoded_params: jnp.ndarray,
+        image_shape: tuple,
+    ) -> jnp.ndarray:
+        """Compute the L2 gradient penalty directly from pre-decoded params.
+
+        Called by ``ForwardModel.log_posterior`` to avoid re-running the
+        sigmoid transform when ``decoded_params`` is already available.
+
+        Args:
+            theta: Unused; present for interface consistency.
+            decoded_params: Physical SPS parameter array of shape (H*W, N_sps_params).
+            image_shape: Spatial dimensions (H, W).
+
+        Returns:
+            Scalar log-prior value (≤ 0).
+        """
+        H, W = image_shape
+        N = len(self.sps_param_names)
+        param_map = decoded_params.reshape(H, W, N)  # (H, W, N)
+
         dy = param_map[1:, :, :] - param_map[:-1, :, :]  # (H-1, W, N)
         dx = param_map[:, 1:, :] - param_map[:, :-1, :]  # (H, W-1, N)
 
-        # Weighted sum over parameters
         dy_sum = jnp.sum(dy**2, axis=(0, 1))
         dx_sum = jnp.sum(dx**2, axis=(0, 1))
-        penalty = jnp.sum(self._lambdas * (dy_sum + dx_sum))
-        return -penalty
+        return -jnp.sum(self._lambdas * (dy_sum + dx_sum))

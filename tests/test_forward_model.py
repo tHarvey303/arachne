@@ -9,6 +9,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 
+from arachne.data.observation import ObservationCube
 from arachne.forward_model.pipeline import ForwardModel
 from arachne.likelihood.gaussian import GaussianLikelihood
 from arachne.psf.convolution import PSFConvolver
@@ -146,3 +147,75 @@ class TestForwardModelBuild:
             emulator=mock_emulator,
         )
         assert isinstance(fm.likelihood, GaussianLikelihood)
+
+
+# ---------------------------------------------------------------------------
+# Numerical correctness tests
+# ---------------------------------------------------------------------------
+
+
+def _flat_obs(flux_val: float, bands, H: int = 16, W: int = 16) -> ObservationCube:
+    """ObservationCube filled with a constant flux value (JAX arrays)."""
+    flux = jnp.full((len(bands), H, W), flux_val, dtype=jnp.float32)
+    ones = jnp.ones((len(bands), H, W), dtype=jnp.float32)
+    return ObservationCube(
+        flux=flux,
+        variance=ones,
+        mask=ones,
+        band_names=bands,
+        pixel_scale=0.031,
+    )
+
+
+BANDS = ["JWST/NIRCam.F115W", "JWST/NIRCam.F200W", "JWST/NIRCam.F277W"]
+
+
+class TestForwardModelNumericalCorrectness:
+    """Numerical correctness tests for ForwardModel.log_posterior.
+
+    Uses a delta PSF (identity convolution) and the mock emulator so that
+    the predicted flux can be computed analytically:
+
+        theta = 0  →  sigmoid(0) = 0.5
+        log_stellar_mass = 6.0 + (12.0 − 6.0) × 0.5 = 9.0
+        mock_emulator: flux = |9.0| + 1.0 = 10.0 nJy  (all bands)
+    """
+
+    def test_perfect_model_log_posterior_zero(
+        self, delta_psf, mock_emulator, pixel_map_model
+    ):
+        """log_posterior = 0 when model exactly matches observation.
+
+        obs.flux = 10.0, model = 10.0 (mock emulator at theta=0).
+        chi2 = 0 → log_like = 0. Uniform theta → log_prior = 0.
+        """
+        obs = _flat_obs(10.0, BANDS)
+        fm = ForwardModel.build(
+            obs=obs,
+            psf_model=delta_psf,
+            spatial_model=pixel_map_model,
+            emulator=mock_emulator,
+        )
+        theta = jnp.zeros(pixel_map_model.n_params)
+        lp = float(fm.log_posterior(theta))
+        assert lp == pytest.approx(0.0, abs=1e-3)
+
+    def test_offset_model_log_posterior_known_value(
+        self, delta_psf, mock_emulator, pixel_map_model
+    ):
+        """log_posterior = −384 when model is uniformly 1 nJy below observation.
+
+        obs.flux = 11.0, model = 10.0, variance = 1.0.
+        log_like = −0.5 × N_bands × H × W = −0.5 × 3 × 16 × 16 = −384.
+        log_prior = 0 (flat theta → zero gradient penalty).
+        """
+        obs = _flat_obs(11.0, BANDS)
+        fm = ForwardModel.build(
+            obs=obs,
+            psf_model=delta_psf,
+            spatial_model=pixel_map_model,
+            emulator=mock_emulator,
+        )
+        theta = jnp.zeros(pixel_map_model.n_params)
+        lp = float(fm.log_posterior(theta))
+        assert lp == pytest.approx(-384.0, rel=1e-4)

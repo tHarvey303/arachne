@@ -234,6 +234,38 @@ def test_from_synference_library_missing_param_raises(tmp_path):
         )
 
 
+def test_output_layer_key_independent_of_n_hidden():
+    """Output layer uses a distinct PRNGKey from every hidden layer.
+
+    Regression test for fix 3: the original __init__ computed the output-layer
+    key as ``jax.random.split(key, 1)[0]``, which equals ``keys[0]`` (the key
+    used for hidden_layers[0]) regardless of n_hidden.  With the fix, the
+    output layer gets ``keys[-1]`` from a split of size ``n_hidden + 1``, so
+    it changes as n_hidden changes.
+
+    Two emulators with the same seed but different numbers of hidden layers
+    must have different output-layer weight matrices — under the old code they
+    would be identical.
+    """
+    key = jax.random.PRNGKey(0)
+    common_kwargs = dict(
+        param_names=PARAM_NAMES,
+        band_names=BAND_NAMES,
+        in_mean=np.zeros(N_PARAMS),
+        in_std=np.ones(N_PARAMS),
+        out_mean=np.zeros(N_BANDS),
+        out_std=np.ones(N_BANDS),
+        key=key,
+    )
+    em2 = SPSMLPEmulator(hidden_sizes=[16, 16], **common_kwargs)
+    em3 = SPSMLPEmulator(hidden_sizes=[16, 16, 16], **common_kwargs)
+
+    assert not jnp.allclose(em2.output_layer.weight, em3.output_layer.weight), (
+        "Output layer weights are identical for 2 vs 3 hidden layers with the same key. "
+        "This indicates the key-collision bug (fix 3) has been reintroduced."
+    )
+
+
 def test_from_synference_library_grad(tmp_path):
     """Emulator trained from library is differentiable."""
     pytest.importorskip("h5py")

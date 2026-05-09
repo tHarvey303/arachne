@@ -13,12 +13,13 @@ class SpatialModel(ABC):
     is responsible for enforcing physical parameter bounds via its ``decode``
     method and for supplying a differentiable log-prior.
 
-    All subclasses must implement exactly two methods:
+    All subclasses must implement:
     - ``decode(theta, image_shape)`` — theta → pixel params (H*W, N_sps_params)
     - ``log_prior(theta)`` — scalar log-prior, jax.grad-differentiable
 
-    These are the only methods called by ``ForwardModel``.  New spatial models
-    are drop-in replacements as long as they satisfy this interface.
+    Subclasses may optionally override ``log_prior_from_decoded`` to avoid
+    re-decoding theta when decoded params are already available (e.g. in
+    ``ForwardModel.log_posterior``).  The default delegates to ``log_prior``.
     """
 
     @property
@@ -54,3 +55,26 @@ class SpatialModel(ABC):
             Scalar log-prior value.
         """
         ...
+
+    def log_prior_from_decoded(
+        self,
+        theta: jnp.ndarray,
+        decoded_params: jnp.ndarray,
+        image_shape: tuple,
+    ) -> jnp.ndarray:
+        """Compute the log-prior when decoded params are already available.
+
+        Called by ``ForwardModel.log_posterior`` to avoid re-decoding theta.
+        The default implementation ignores ``decoded_params`` and calls
+        ``log_prior(theta)``.  Override in subclasses where the prior can be
+        computed directly from decoded params (e.g. ``FreeFormPixelMap``).
+
+        Args:
+            theta: Unconstrained parameter vector of shape (n_params,).
+            decoded_params: Pre-decoded pixel params of shape (H*W, N_sps_params).
+            image_shape: Spatial dimensions (H, W).
+
+        Returns:
+            Scalar log-prior value.
+        """
+        return self.log_prior(theta)

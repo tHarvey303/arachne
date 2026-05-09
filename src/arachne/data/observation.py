@@ -96,6 +96,7 @@ class ObservationCube:
         var_list = []
         mask_list = []
         wcs_ref = None
+        _wcs_cutout_slices: Optional[tuple] = None  # pixel slices from band-0 WCS cutout
 
         for i, (fp, vp) in enumerate(zip(flux_paths, variance_paths)):
             with fits.open(fp) as hdul:
@@ -103,7 +104,8 @@ class ObservationCube:
                 header = hdul[0].header
                 if i == 0:
                     try:
-                        wcs_ref = WCS(header)
+                        candidate = WCS(header)
+                        wcs_ref = candidate if candidate.has_celestial else None
                     except Exception:
                         wcs_ref = None
 
@@ -117,21 +119,25 @@ class ObservationCube:
                 mask_data = np.ones(flux_data.shape, dtype=bool)
 
             if cutout_center is not None and cutout_size is not None:
-                if wcs_ref is not None and i == 0:
+                if i == 0 and wcs_ref is not None:
+                    # Band 0 with WCS: compute cutout position and save pixel slices
                     import astropy.units as u
                     from astropy.coordinates import SkyCoord
 
                     coord = SkyCoord(ra=cutout_center[0] * u.deg, dec=cutout_center[1] * u.deg)
                     cutout = Cutout2D(flux_data, coord, cutout_size, wcs=wcs_ref)
+                    _wcs_cutout_slices = cutout.slices_original
                     wcs_ref = cutout.wcs
                     flux_data = cutout.data
-                    # Re-cut variance and mask to same region
-                    var_cutout = Cutout2D(var_data, coord, cutout_size)
-                    var_data = var_cutout.data
-                    mask_cutout = Cutout2D(mask_data.astype(np.float32), coord, cutout_size)
-                    mask_data = mask_cutout.data.astype(bool)
+                    var_data = var_data[_wcs_cutout_slices]
+                    mask_data = mask_data[_wcs_cutout_slices]
+                elif _wcs_cutout_slices is not None:
+                    # Bands 1+ with WCS: reuse the pixel slices determined from band 0
+                    flux_data = flux_data[_wcs_cutout_slices]
+                    var_data = var_data[_wcs_cutout_slices]
+                    mask_data = mask_data[_wcs_cutout_slices]
                 else:
-                    # pixel-space cutout
+                    # Pure pixel-space cutout (no WCS available)
                     cy, cx = cutout_center
                     if isinstance(cutout_size, int):
                         hs = cutout_size // 2

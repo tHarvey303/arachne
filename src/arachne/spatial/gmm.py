@@ -114,7 +114,7 @@ class GaussianMixtureSpatialModel(SpatialModel):
         sps_raw = theta_k[5:]
 
         sigma = jnp.exp(log_sigma)  # positive
-        rho = jnp.tanh(atanh_rho)  # ∈ (-1, 1)
+        rho = jnp.clip(jnp.tanh(atanh_rho), -0.999, 0.999)  # ∈ (-1, 1), clipped for stability
         sps_params = self._lows + (self._highs - self._lows) * jax.nn.sigmoid(sps_raw)
         return mu, sigma, rho, sps_params
 

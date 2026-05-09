@@ -124,3 +124,116 @@ def test_delta_psf_is_identity(delta_psf):
 
     # With a delta PSF, convolved ~ original (small FFT rounding errors)
     np.testing.assert_allclose(np.asarray(convolved), np.asarray(image), atol=1e-4)
+
+
+def test_psf_centering_all_bands(delta_psf):
+    """PSF-convolved point source centroid is correct for every band.
+
+    Regression test: verifies that ifftshift is applied consistently for all
+    bands, not only band 0.  A bug in per-band padding would shift the
+    centroid for bands 1+.
+    """
+    H, W = 16, 16
+    convolver = PSFConvolver(delta_psf, image_shape=(H, W))
+
+    py, px = 5, 8
+    image = np.zeros((3, H, W), dtype=np.float32)
+    image[:, py, px] = 1.0
+    convolved = convolver(jnp.array(image))
+
+    ys = jnp.arange(H, dtype=jnp.float32)
+    xs = jnp.arange(W, dtype=jnp.float32)
+    yy, xx = jnp.meshgrid(ys, xs, indexing="ij")
+
+    for b in range(3):
+        band = convolved[b]
+        total = jnp.sum(band)
+        cy = float(jnp.sum(yy * band) / total)
+        cx = float(jnp.sum(xx * band) / total)
+        assert abs(cy - py) < 0.5, f"Band {b}: centroid_y={cy:.2f} shifted from py={py}"
+        assert abs(cx - px) < 0.5, f"Band {b}: centroid_x={cx:.2f} shifted from px={px}"
+
+
+# ---------------------------------------------------------------------------
+# PSFModel.from_fits tests
+# ---------------------------------------------------------------------------
+
+
+def _write_psf_fits(path, kernel):
+    """Write a 2-D numpy array as a FITS file."""
+    from astropy.io import fits as afits
+    hdu = afits.PrimaryHDU(kernel)
+    afits.HDUList([hdu]).writeto(str(path), overwrite=True)
+
+
+class TestPSFModelFromFits:
+    """Tests for PSFModel.from_fits."""
+
+    def test_basic_load_shape(self, tmp_path):
+        """from_fits returns correct shape and band ordering."""
+        from arachne.data.psf import PSFModel
+        bands = ["F115W", "F200W", "F277W"]
+        psf_paths = {}
+        for band in bands:
+            k = np.ones((9, 9), dtype=np.float32)
+            k /= k.sum()
+            fp = tmp_path / f"psf_{band}.fits"
+            _write_psf_fits(fp, k)
+            psf_paths[band] = fp
+
+        psf = PSFModel.from_fits(psf_paths)
+        assert psf.kernels.shape == (3, 9, 9)
+        assert psf.band_names == bands
+
+    def test_values_preserved(self, tmp_path):
+        """Kernel values loaded from FITS match what was written."""
+        from arachne.data.psf import PSFModel
+        rng = np.random.default_rng(42)
+        k = rng.uniform(0, 1, (7, 7)).astype(np.float32)
+        k /= k.sum()
+        fp = tmp_path / "psf.fits"
+        _write_psf_fits(fp, k)
+
+        psf = PSFModel.from_fits({"band_A": fp})
+        np.testing.assert_allclose(psf.kernels[0], k, rtol=1e-5)
+
+    def test_3d_psf_takes_first_plane(self, tmp_path):
+        """A (1, H, W) PSF FITS file is reduced to (H, W) by taking the first plane."""
+        from astropy.io import fits as afits
+        from arachne.data.psf import PSFModel
+        k3d = np.ones((1, 9, 9), dtype=np.float32) / 81.0
+        fp = tmp_path / "psf_3d.fits"
+        afits.HDUList([afits.PrimaryHDU(k3d)]).writeto(str(fp), overwrite=True)
+
+        psf = PSFModel.from_fits({"band_A": fp})
+        assert psf.kernels.shape == (1, 9, 9)
+
+    def test_pads_to_common_size(self, tmp_path):
+        """PSFs of different sizes are padded to the largest common size."""
+        from arachne.data.psf import PSFModel
+        small = np.ones((5, 5), dtype=np.float32)
+        small /= small.sum()
+        large = np.ones((9, 9), dtype=np.float32)
+        large /= large.sum()
+
+        fp_s = tmp_path / "psf_small.fits"
+        fp_l = tmp_path / "psf_large.fits"
+        _write_psf_fits(fp_s, small)
+        _write_psf_fits(fp_l, large)
+
+        psf = PSFModel.from_fits({"band_A": fp_s, "band_B": fp_l})
+        assert psf.kernels.shape == (2, 9, 9)
+
+    def test_n_bands_property(self, tmp_path):
+        """n_bands property equals number of loaded PSFs."""
+        from arachne.data.psf import PSFModel
+        paths = {}
+        for i in range(4):
+            k = np.eye(5, dtype=np.float32)
+            k /= k.sum()
+            fp = tmp_path / f"psf_{i}.fits"
+            _write_psf_fits(fp, k)
+            paths[f"band_{i}"] = fp
+
+        psf = PSFModel.from_fits(paths)
+        assert psf.n_bands == 4

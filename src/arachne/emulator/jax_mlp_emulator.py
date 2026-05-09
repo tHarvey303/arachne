@@ -216,14 +216,13 @@ class SPSMLPEmulator(SPSEmulator):
         self.out_std = jnp.array(out_std, dtype=jnp.float32)
 
         sizes = [n_in] + hidden_sizes
-        keys = jax.random.split(key, len(sizes))
+        n_hidden = len(sizes) - 1
+        keys = jax.random.split(key, n_hidden + 1)  # last key reserved for output layer
         self.hidden_layers = tuple(
             AlsingLayer(in_sz, out_sz, keys[i])
             for i, (in_sz, out_sz) in enumerate(zip(sizes[:-1], sizes[1:]))
         )
-
-        out_key = jax.random.split(key, 1)[0]
-        self.output_layer = eqx.nn.Linear(sizes[-1], n_out, key=out_key)
+        self.output_layer = eqx.nn.Linear(sizes[-1], n_out, key=keys[-1])
 
     @property
     def param_names(self) -> list[str]:

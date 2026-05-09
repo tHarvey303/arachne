@@ -149,3 +149,50 @@ class TestRunPathfinder:
 
         assert result.samples.shape == (5, gmm_model.n_params)
         assert jnp.all(jnp.isfinite(result.samples))
+
+
+# ---------------------------------------------------------------------------
+# FreeFormPixelMap tests (recommended high-d use case for MCLMC)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def forward_model_pixel_map(tiny_observation, gaussian_psf, mock_emulator, pixel_map_model):
+    """ForwardModel with FreeFormPixelMap for MCLMC high-d tests."""
+    return ForwardModel.build(
+        obs=tiny_observation,
+        psf_model=gaussian_psf,
+        spatial_model=pixel_map_model,
+        emulator=mock_emulator,
+    )
+
+
+class TestMCLMCWithPixelMap:
+    """MCLMCSampler with FreeFormPixelMap (the high-dimensional recommended use case).
+
+    MCLMC is preferred over NUTS for FreeFormPixelMap because it requires only
+    O(1) gradient evaluations per effective sample (vs O(d^{1/4}) for NUTS).
+    These tests verify the sampler runs end-to-end with a pixel-map model.
+    """
+
+    def test_samples_shape(self, forward_model_pixel_map, pixel_map_model):
+        """MCLMCSampler with FreeFormPixelMap returns the correct sample shape."""
+        sampler = MCLMCSampler(
+            forward_model=forward_model_pixel_map,
+            n_warmup=20,
+            n_samples=5,
+            diagonal_preconditioning=True,
+        )
+        result = sampler.run(jnp.zeros(pixel_map_model.n_params), jax.random.PRNGKey(7))
+        assert result.samples.shape == (5, pixel_map_model.n_params)
+
+    def test_samples_finite(self, forward_model_pixel_map, pixel_map_model):
+        """All MCLMC samples are finite for FreeFormPixelMap."""
+        sampler = MCLMCSampler(
+            forward_model=forward_model_pixel_map,
+            n_warmup=20,
+            n_samples=5,
+            diagonal_preconditioning=True,
+        )
+        result = sampler.run(jnp.zeros(pixel_map_model.n_params), jax.random.PRNGKey(11))
+        assert jnp.all(jnp.isfinite(result.samples))

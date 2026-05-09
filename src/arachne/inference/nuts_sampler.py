@@ -64,7 +64,9 @@ class NUTSResult:
             # Save spatial model metadata
             meta = f.create_group("metadata")
             if hasattr(self.spatial_model, "sps_param_names"):
-                meta.attrs["param_names"] = np.bytes_(self.spatial_model.sps_param_names)
+                meta.attrs["param_names"] = np.array(
+                    [s.encode("utf-8") for s in self.spatial_model.sps_param_names]
+                )
             meta.attrs["n_params"] = self.spatial_model.n_params
             meta.attrs["n_samples"] = self.samples.shape[0]
 

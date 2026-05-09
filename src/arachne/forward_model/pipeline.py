@@ -151,6 +151,14 @@ class ForwardModel:
             Scalar log-posterior value:
             ``log p(theta | data) = log_likelihood + log_prior``
         """
-        log_like = self.likelihood(self._model_image(theta))
-        log_prior = self.spatial_model.log_prior(theta)
+        H, W = self.observation.image_shape
+        N_bands = self.observation.n_bands
+
+        # Decode once; reuse decoded params for both the emulator and the prior.
+        pixel_params = self.spatial_model.decode(theta, (H, W))  # (H*W, N_sps)
+        pixel_fluxes = self.emulator.predict(pixel_params)  # (H*W, N_bands)
+        convolved = self.convolver(pixel_fluxes.T.reshape(N_bands, H, W))  # (N_bands, H, W)
+
+        log_like = self.likelihood(convolved)
+        log_prior = self.spatial_model.log_prior_from_decoded(theta, pixel_params, (H, W))
         return log_like + log_prior

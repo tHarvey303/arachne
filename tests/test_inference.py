@@ -107,6 +107,22 @@ class TestNUTSResult:
         for name, arr in param_maps.items():
             assert jnp.all(jnp.isfinite(arr)), f"Non-finite values in {name}"
 
+    def test_hdf5_param_names_metadata_roundtrip(self, nuts_result, tmp_path):
+        """param_names metadata is saved and decoded correctly from HDF5.
+
+        Regression test for fix 2: the original code passed the list directly
+        to np.bytes_(), which encoded the list repr rather than each name
+        individually.  The fix encodes each string separately.
+        """
+        h5py = pytest.importorskip("h5py")
+        path = tmp_path / "meta.h5"
+        nuts_result.to_hdf5(str(path))
+
+        with h5py.File(str(path), "r") as f:
+            raw = f["metadata"].attrs["param_names"]
+        decoded = [s.decode("utf-8") if isinstance(s, bytes) else s for s in raw]
+        assert decoded == nuts_result.spatial_model.sps_param_names
+
     def test_get_parameter_map_within_bounds(self, nuts_result, gmm_model):
         """Median parameter map values lie within physical bounds."""
         param_maps = nuts_result.get_parameter_map(image_shape=(16, 16), percentiles=[50])
