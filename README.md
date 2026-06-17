@@ -29,7 +29,7 @@ model library produced by synference with no PyTorch dependency at inference tim
 
 ### ParrotEmulator (recommended)
 
-A Parrot-style MLP ([Mathews et al. 2023](https://arxiv.org/abs/2302.05560)) with GELU
+A Parrot-style MLP ([Mathews et al. 2023](https://iopscience.iop.org/article/10.3847/1538-4357/ace720)) with GELU
 activations and an arsinh-magnitude output transform.  The arsinh transform handles
 near-zero fluxes (e.g. Lyman-break dropouts) gracefully, which log-space cannot.
 Training uses a 3-phase NADAM schedule with early stopping and best-model checkpointing.
