@@ -24,18 +24,11 @@ JIT-compilable to GPU.
 
 ## Emulators
 
-arachne provides two native JAX/Equinox emulators, both trained directly from the HDF5
-model library produced by synference with no PyTorch dependency at inference time.
+arachne provides two native JAX/Equinox emulators, both trained directly from the HDF5 model library produced by synference with no PyTorch dependency at inference time.
 
 ### ParrotEmulator (recommended)
 
-A Parrot-style MLP ([Mathews et al. 2023](https://arxiv.org/abs/2302.05560)) with GELU
-activations (tanh approximation) and an arsinh-magnitude output transform.  The arsinh
-transform handles near-zero fluxes (e.g. Lyman-break dropouts) gracefully, which log-space
-cannot.  Training exactly follows the paper: RMSE loss, output normalisation with std=1 (equal
-per-filter weighting), and a 3-step independent NAdam schedule (lr 1e-3→1e-4→1e-5, batch 1000,
-patience 20 per step) where each step uses a fresh random 5 % validation split and the best
-weights carry into the next step.
+A Parrot-style MLP ([Mathews et al. 2023](https://iopscience.iop.org/article/10.3847/1538-4357/ace720)) with GELU activations (tanh approximation) and an arsinh-magnitude output transform.  The arsinhtransform handles near-zero fluxes (e.g. Lyman-break dropouts) gracefully, which log-space cannot.  Training exactly follows the paper: RMSE loss, output normalisation with std=1 (equal per-filter weighting), and a 3-step independent NAdam schedule (lr 1e-3→1e-4→1e-5, batch 1000, patience 20 per step) where each step uses a fresh random 5 % validation split and the best weights carry into the next step.
 
 ```bash
 # Train from a synference HDF5 library (recommended):
