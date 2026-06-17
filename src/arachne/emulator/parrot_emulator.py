@@ -94,6 +94,7 @@ Example:
 
 from __future__ import annotations
 
+import io
 from pathlib import Path
 
 import equinox as eqx
@@ -283,32 +284,114 @@ class ParrotEmulator(SPSEmulator):
         return asinh_mag_to_flux(asinh_mag)  # nJy
 
     def save(self, path: str | Path) -> None:
-        """Save the emulator weights to an Equinox checkpoint file.
+        """Save the emulator to a self-contained checkpoint file.
+
+        The file is a numpy ``.npz`` archive (ZIP format) containing:
+
+        * ``param_names`` / ``band_names`` / ``hidden_sizes`` — architecture
+          metadata needed to reconstruct the model.
+        * ``in_mean`` / ``in_std`` / ``out_mean`` / ``out_std`` — stored for
+          reference only (already embedded in the weight bytes).
+        * ``weights_bytes`` — raw bytes from
+          :func:`equinox.tree_serialise_leaves`, encoding all JAX array leaves.
+
+        Loading requires only the file path — no external knowledge of the
+        architecture or filter list.
 
         Args:
             path: Output file path (conventionally ``*.eqx``).
         """
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        eqx.tree_serialise_leaves(str(path), self)
+
+        buf = io.BytesIO()
+        eqx.tree_serialise_leaves(buf, self)
+
+        hidden_sizes = np.array(
+            [layer.weight.shape[0] for layer in self.layers[:-1]], dtype=np.int32
+        )
+        # Open the file ourselves so numpy does not append an extra .npz suffix.
+        with open(path, "wb") as f:
+            np.savez(
+                f,
+                param_names=np.array(self._param_names),
+                band_names=np.array(self._band_names),
+                hidden_sizes=hidden_sizes,
+                in_mean=np.array(self.in_mean),
+                in_std=np.array(self.in_std),
+                out_mean=np.array(self.out_mean),
+                out_std=np.array(self.out_std),
+                weights_bytes=np.frombuffer(buf.getvalue(), dtype=np.uint8),
+            )
         logger.info(f"ParrotEmulator saved to {path}")
 
     @classmethod
-    def load(
+    def load(cls, path: str | Path) -> "ParrotEmulator":
+        """Load a self-contained ParrotEmulator checkpoint.
+
+        No architecture arguments needed — parameter names, band names, and
+        hidden layer sizes are all stored inside the file by :meth:`save`.
+
+        Args:
+            path: Path to a ``.eqx`` checkpoint written by :meth:`save`.
+
+        Returns:
+            ParrotEmulator with weights and metadata restored from disk.
+
+        Raises:
+            ValueError: If the file is a legacy checkpoint (written before the
+                self-contained format was introduced).  Use
+                :meth:`load_legacy` for those files.
+        """
+        import zipfile
+
+        path = Path(path)
+        try:
+            raw = np.load(str(path), allow_pickle=False)
+        except zipfile.BadZipFile:
+            raise ValueError(
+                f"{path} is a legacy checkpoint (equinox-only format). "
+                "Use ParrotEmulator.load_legacy(path, param_names=..., band_names=...) instead."
+            )
+
+        with raw:
+            param_names = raw["param_names"].tolist()
+            band_names = raw["band_names"].tolist()
+            hidden_sizes = [int(h) for h in raw["hidden_sizes"]]
+            weights_bytes = bytes(raw["weights_bytes"])
+
+        n_p, n_b = len(param_names), len(band_names)
+        dummy = cls(
+            param_names=param_names,
+            band_names=band_names,
+            hidden_sizes=hidden_sizes,
+            in_mean=np.zeros(n_p),
+            in_std=np.ones(n_p),
+            out_mean=np.zeros(n_b),
+            out_std=np.ones(n_b),
+            key=jax.random.PRNGKey(0),
+        )
+        loaded = eqx.tree_deserialise_leaves(io.BytesIO(weights_bytes), dummy)
+        logger.info(f"ParrotEmulator loaded from {path}")
+        return loaded
+
+    @classmethod
+    def load_legacy(
         cls,
         path: str | Path,
         param_names: list[str],
         band_names: list[str],
         hidden_sizes: list[int] | None = None,
     ) -> "ParrotEmulator":
-        """Load a saved ParrotEmulator from an Equinox checkpoint file.
+        """Load a checkpoint saved by the old equinox-only format.
 
-        The architecture (``hidden_sizes``) must match what was used during
-        training.  A dummy model with the same architecture is constructed
-        first, then its leaves are replaced by the saved values.
+        Use this for ``.eqx`` files written before the self-contained format
+        was introduced (i.e. files that require architecture arguments to
+        reconstruct).  Checkpoints written by the current :meth:`save` are
+        self-contained and should be loaded with :meth:`load`.
 
         Args:
-            path: Path to the ``.eqx`` checkpoint file.
+            path: Path to the legacy ``.eqx`` checkpoint.
             param_names: SPS parameter names (must match training order).
             band_names: Band names (must match training order).
             hidden_sizes: Hidden layer widths used during training.
@@ -332,7 +415,7 @@ class ParrotEmulator(SPSEmulator):
             key=jax.random.PRNGKey(0),
         )
         loaded = eqx.tree_deserialise_leaves(str(path), dummy)
-        logger.info(f"ParrotEmulator loaded from {path}")
+        logger.info(f"ParrotEmulator loaded from {path} (legacy format)")
         return loaded
 
     @classmethod

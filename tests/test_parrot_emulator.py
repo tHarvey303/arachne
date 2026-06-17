@@ -150,12 +150,7 @@ class TestParrotEmulator:
         tiny_emulator.save(str(path))
         assert path.exists()
 
-        loaded = ParrotEmulator.load(
-            str(path),
-            param_names=PARAM_NAMES,
-            band_names=BAND_NAMES,
-            hidden_sizes=[16, 16],
-        )
+        loaded = ParrotEmulator.load(str(path))
 
         params = jnp.zeros((5, N_PARAMS))
         out_orig = tiny_emulator.predict(params)

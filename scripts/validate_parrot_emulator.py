@@ -26,16 +26,6 @@ import argparse
 import sys
 from pathlib import Path
 
-_DEFAULT_PARAMS = [
-    "redshift",
-    "log10metallicity",
-    "Av",
-    "log_sfr",
-    "sfh_quantile_25",
-    "sfh_quantile_50",
-    "sfh_quantile_75",
-    "tau_v",
-]
 
 
 def parse_args(argv=None):
@@ -54,21 +44,16 @@ def parse_args(argv=None):
     p.add_argument(
         "--params",
         nargs="+",
-        default=_DEFAULT_PARAMS,
-        help="SPS parameter names used during training (must match checkpoint).",
+        default=None,
+        help="SPS parameter names to validate against. "
+        "Defaults to the names embedded in the checkpoint.",
     )
     p.add_argument(
         "--bands",
         nargs="+",
         default=None,
-        help="Band names used during training. Auto-detected from emulator if omitted.",
-    )
-    p.add_argument(
-        "--hidden",
-        nargs="+",
-        type=int,
-        default=[512, 512, 512, 512, 512],
-        help="Hidden layer widths (must match checkpoint).",
+        help="Band names to validate against. "
+        "Defaults to the names embedded in the checkpoint.",
     )
     p.add_argument(
         "--n-val",
@@ -106,22 +91,14 @@ def main(argv=None):  # noqa: C901
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # ------------------------------------------------------------------
-    # Load emulator
+    # Load emulator (self-contained — no architecture args required)
     # ------------------------------------------------------------------
-    bands = args.bands
-    if bands is None:
-        # Peek at the library to get band list
-        with h5py.File(args.library, "r") as f:
-            bands = _read_band_names(f)
-        print(f"Auto-detected {len(bands)} bands from library.")
-
-    emulator = ParrotEmulator.load(
-        args.emulator,
-        param_names=args.params,
-        band_names=bands,
-        hidden_sizes=args.hidden,
-    )
+    emulator = ParrotEmulator.load(args.emulator)
     print(f"Loaded emulator: {len(emulator.param_names)} params, {len(emulator.band_names)} bands")
+
+    # Allow CLI overrides; default to what the checkpoint already knows.
+    params = args.params if args.params is not None else emulator.param_names
+    bands = args.bands if args.bands is not None else emulator.band_names
 
     # ------------------------------------------------------------------
     # Load library subset
@@ -132,7 +109,7 @@ def main(argv=None):  # noqa: C901
         lib_param_names = _read_param_names(f)
         lib_band_names = _read_band_names(f)
 
-    param_indices = _select_indices(args.params, lib_param_names, "parameter")
+    param_indices = _select_indices(params, lib_param_names, "parameter")
     band_indices = _select_indices(bands, lib_band_names, "band")
 
     params_all = raw_params[param_indices, :].T.astype(np.float32)
@@ -192,7 +169,7 @@ def main(argv=None):  # noqa: C901
         fout.create_dataset("pred_flux_nJy", data=pred_flux.astype(np.float32))
         fout.create_dataset("params", data=params_val.astype(np.float32))
         fout.attrs["band_names"] = np.array(bands, dtype="S")
-        fout.attrs["param_names"] = np.array(args.params, dtype="S")
+        fout.attrs["param_names"] = np.array(params, dtype="S")
         fout.attrs["bias"] = bias.astype(np.float32)
         fout.attrs["scatter"] = scatter.astype(np.float32)
         fout.attrs["p95_abs_err"] = p95.astype(np.float32)
