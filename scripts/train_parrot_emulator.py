@@ -111,33 +111,27 @@ def parse_args(argv=None):
         default=[512, 512, 512, 512, 512],
         help="Hidden layer widths (5 layers = 6-layer network as in Parrot).",
     )
-    p.add_argument("--epochs", type=int, default=1000, help="Maximum training epochs.")
-    p.add_argument("--batch", type=int, default=4096, help="Mini-batch size.")
-    p.add_argument("--lr", type=float, default=1e-3, help="Initial Adam/NADAM learning rate.")
+    p.add_argument("--epochs", type=int, default=1000, help="Maximum training epochs per step.")
+    p.add_argument("--batch", type=int, default=1000, help="Mini-batch size (paper value: 1000).")
     p.add_argument(
-        "--lr-decay-epochs",
-        nargs=2,
-        type=int,
-        default=[300, 700],
-        metavar=("E1", "E2"),
-        help="Epochs at which LR is decayed (3-phase schedule).",
-    )
-    p.add_argument(
-        "--lr-decay-factors",
-        nargs=2,
+        "--lr-schedule",
+        nargs="+",
         type=float,
-        default=[0.1, 0.1],
-        metavar=("F1", "F2"),
-        help="Multiplicative LR factors at each decay epoch.",
+        default=[1e-3, 1e-4, 1e-5],
+        metavar="LR",
+        help="Learning rate for each training step (paper: 1e-3 1e-4 1e-5).",
     )
     p.add_argument(
-        "--val-fraction", type=float, default=0.1, help="Fraction of data held out for validation."
+        "--val-fraction",
+        type=float,
+        default=0.05,
+        help="Fraction of data held out for validation per step (paper: 0.05).",
     )
     p.add_argument(
         "--patience",
         type=int,
         default=20,
-        help="Early-stopping patience (epochs without val improvement).",
+        help="Early-stopping patience per step (epochs without val improvement).",
     )
     p.add_argument("--seed", type=int, default=0, help="Random seed.")
     p.add_argument("--log-interval", type=int, default=10, help="Log every N epochs.")
@@ -166,7 +160,7 @@ def main(argv=None):
     print(f"Params   : {args.params}")
     print(f"Bands    : {len(args.bands)} bands")
     print(f"Hidden   : {args.hidden}")
-    print(f"Epochs   : {args.epochs}  Batch: {args.batch}  LR: {args.lr}")
+    print(f"Epochs   : {args.epochs}  Batch: {args.batch}  LR schedule: {args.lr_schedule}")
 
     emulator = ParrotEmulator.from_synference_library(
         library_path=args.library,
@@ -175,9 +169,7 @@ def main(argv=None):
         hidden_sizes=args.hidden,
         n_epochs=args.epochs,
         batch_size=args.batch,
-        learning_rate=args.lr,
-        lr_decay_steps=tuple(args.lr_decay_epochs),
-        lr_decay_factors=tuple(args.lr_decay_factors),
+        lr_schedule=args.lr_schedule,
         val_fraction=args.val_fraction,
         early_stopping_patience=args.patience,
         seed=args.seed,

@@ -55,7 +55,7 @@ All source lives in `src/arachne/`. The package exports the key public API from 
 |---|---|
 | `data/observation.py` | `ObservationCube` — multi-band FITS image container |
 | `data/psf.py` | `PSFModel` — per-band PSF kernels, padded for FFT |
-| `emulator/parrot_emulator.py` | `ParrotEmulator` — **recommended emulator**; Mathews et al. 2023 GELU MLP with arsinh-magnitude output; trained from synference HDF5 via `scripts/train_parrot_emulator.py` |
+| `emulator/parrot_emulator.py` | `ParrotEmulator` — **recommended emulator**; Mathews et al. 2023 GELU (tanh approx) MLP with arsinh-magnitude output and equal per-filter RMSE loss; 3-step NAdam schedule (1e-3→1e-4→1e-5, batch=1000, patience=20/step); trained from synference HDF5 via `scripts/train_parrot_emulator.py` |
 | `emulator/jax_mlp_emulator.py` | `SPSMLPEmulator` — Alsing et al. 2020 Speculator MLP in log10-flux space; fully JAX-native |
 | `emulator/jax_emulator.py` | `JAXFlowEmulator` — **legacy**; exports synference normalising flow weights to JAX/Equinox; use only if a lampe checkpoint is the only available artefact |
 | `spatial/pixel_map.py` | `FreeFormPixelMap` — per-pixel SPS parameters with L2 smoothness prior |
@@ -97,15 +97,17 @@ All `SpatialModel` subclasses implement exactly two methods called by `ForwardMo
 New spatial models are drop-in replacements if they satisfy this interface.
 
 ### 6. Emulator: use ParrotEmulator for new work
-The recommended emulator is `ParrotEmulator` (Mathews et al. 2023) — GELU MLP with arsinh-
-magnitude output transform. The arsinh transform handles near-zero fluxes (Lyman-break
-dropouts, ~50% of blue-band samples at high-z) without divergence. Train via:
+The recommended emulator is `ParrotEmulator` (Mathews et al. 2023) — GELU (tanh approx) MLP
+with arsinh-magnitude output. Training uses RMSE loss with output std=1 (equal per-filter
+weighting) and a 3-step NAdam schedule (1e-3→1e-4→1e-5, batch=1000, patience=20/step), exactly
+matching the paper. The arsinh transform handles near-zero fluxes (Lyman-break dropouts, ~50%
+of blue-band samples at high-z) without divergence. Train via:
 
 ```bash
 python scripts/train_parrot_emulator.py \
     --library galaxy_library.h5 \
     --output outputs/emulators/parrot.eqx \
-    --lr 3e-4 --patience 100 --epochs 1000
+    --epochs 1000
 ```
 
 `SPSMLPEmulator` (Alsing et al. 2020 Speculator, log10-flux space) remains available and

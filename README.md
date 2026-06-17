@@ -30,16 +30,19 @@ model library produced by synference with no PyTorch dependency at inference tim
 ### ParrotEmulator (recommended)
 
 A Parrot-style MLP ([Mathews et al. 2023](https://arxiv.org/abs/2302.05560)) with GELU
-activations and an arsinh-magnitude output transform.  The arsinh transform handles
-near-zero fluxes (e.g. Lyman-break dropouts) gracefully, which log-space cannot.
-Training uses a 3-phase NADAM schedule with early stopping and best-model checkpointing.
+activations (tanh approximation) and an arsinh-magnitude output transform.  The arsinh
+transform handles near-zero fluxes (e.g. Lyman-break dropouts) gracefully, which log-space
+cannot.  Training exactly follows the paper: RMSE loss, output normalisation with std=1 (equal
+per-filter weighting), and a 3-step independent NAdam schedule (lr 1e-3→1e-4→1e-5, batch 1000,
+patience 20 per step) where each step uses a fresh random 5 % validation split and the best
+weights carry into the next step.
 
 ```bash
 # Train from a synference HDF5 library (recommended):
 python scripts/train_parrot_emulator.py \
     --library galaxy_library.h5 \
     --output outputs/emulators/parrot.eqx \
-    --epochs 1000 --batch 4096 --lr 3e-4
+    --epochs 1000
 
 # Validate against held-out data:
 python scripts/validate_parrot_emulator.py \
@@ -77,16 +80,24 @@ pip install -e /path/to/synference
 Train once from a synference HDF5 model library:
 
 ```python
-from arachne import SPSMLPEmulator
+from arachne import ParrotEmulator
 
-emulator = SPSMLPEmulator.from_synference_library(
+emulator = ParrotEmulator.from_synference_library(
     library_path="galaxy_library.h5",
     param_names=["log_stellar_mass", "log_age", "log_metallicity", "tau_v"],
     band_names=["JWST/NIRCam.F115W", "JWST/NIRCam.F200W", "JWST/NIRCam.F277W"],
-    hidden_sizes=[256, 256, 256],
-    n_epochs=300,
 )
 emulator.save("emulator.eqx")
+```
+
+Or via the training script (equivalent, with more CLI options):
+
+```bash
+python scripts/train_parrot_emulator.py \
+    --library galaxy_library.h5 \
+    --output emulator.eqx \
+    --params log_stellar_mass log_age log_metallicity tau_v \
+    --bands JWST/NIRCam.F115W JWST/NIRCam.F200W JWST/NIRCam.F277W
 ```
 
 ### Step 2 — Fit a galaxy
@@ -95,7 +106,7 @@ emulator.save("emulator.eqx")
 import jax
 import jax.numpy as jnp
 from arachne import (
-    ObservationCube, PSFModel, SPSMLPEmulator,
+    ObservationCube, PSFModel, ParrotEmulator,
     GaussianMixtureSpatialModel, ForwardModel, NUTSSampler,
 )
 
@@ -112,7 +123,7 @@ psf = PSFModel.from_fits({
 })
 
 # Load the trained emulator
-emulator = SPSMLPEmulator.load(
+emulator = ParrotEmulator.load(
     "emulator.eqx",
     param_names=["log_stellar_mass", "log_age", "log_metallicity", "tau_v"],
     band_names=["JWST/NIRCam.F115W", "JWST/NIRCam.F200W", "JWST/NIRCam.F277W"],
@@ -154,8 +165,8 @@ result.to_hdf5("posterior.h5")
 ```
 synference HDF5 library
        │
-       ▼ SPSMLPEmulator.from_synference_library()
-emulator.eqx  ←  Alsing-layer MLP, trained in log10 flux space
+       ▼ ParrotEmulator.from_synference_library()
+emulator.eqx  ←  GELU MLP, trained in arsinh-magnitude space
        │
        │  (inference time)
        ▼
@@ -164,7 +175,7 @@ theta (n_params,)  ← BlackJAX NUTS
        ▼ SpatialModel.decode()
 pixel_params (H*W, N_sps_params)
        │
-       ▼ SPSMLPEmulator.predict()   ← pure JAX, no PyTorch
+       ▼ ParrotEmulator.predict()   ← pure JAX, no PyTorch
 pixel_fluxes (H*W, N_bands)
        │
        ▼ reshape → model_image (N_bands, H, W)

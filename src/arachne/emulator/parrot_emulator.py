@@ -260,7 +260,7 @@ class ParrotEmulator(SPSEmulator):
         """
         x = p_norm
         for layer in self.layers[:-1]:
-            x = jax.nn.gelu(layer(x))
+            x = jax.nn.gelu(layer(x), approximate=True)
         return self.layers[-1](x)
 
     def predict(self, params: jnp.ndarray) -> jnp.ndarray:
@@ -343,11 +343,9 @@ class ParrotEmulator(SPSEmulator):
         band_names: list[str],
         hidden_sizes: list[int] | None = None,
         n_epochs: int = 1000,
-        batch_size: int = 4096,
-        learning_rate: float = 1e-3,
-        lr_decay_steps: tuple[int, int] = (300, 700),
-        lr_decay_factors: tuple[float, float] = (0.1, 0.1),
-        val_fraction: float = 0.1,
+        batch_size: int = 1000,
+        lr_schedule: list[float] | None = None,
+        val_fraction: float = 0.05,
         early_stopping_patience: int = 20,
         seed: int = 0,
         log_interval: int = 10,
@@ -355,10 +353,16 @@ class ParrotEmulator(SPSEmulator):
     ) -> "ParrotEmulator":
         """Train a ParrotEmulator from a synference HDF5 model library.
 
+        Implements the three-step training procedure from Mathews et al. 2023
+        exactly: three independent optimisation phases at decreasing learning
+        rates (default 1e-3 → 1e-4 → 1e-5), each with a fresh random 5%
+        validation split and independent early stopping.  RMSE loss and
+        output normalisation with ``out_std = 1`` (equal per-filter weighting)
+        match the paper's training setup.
+
         Loads ``Grid/Parameters`` and ``Grid/Photometry`` from the HDF5
         library, selects the requested param/band columns, converts photometry
-        to arsinh magnitudes (Parrot transform), and trains the MLP with MSE
-        loss in normalised arsinh-magnitude space.
+        to arsinh magnitudes (Parrot transform), and trains the MLP.
 
         Parameter names and filter codes are read from the library metadata.
         Both the old root-attr format (``ParameterNames``, ``FilterCodes``) and
@@ -375,25 +379,23 @@ class ParrotEmulator(SPSEmulator):
                 E.g. ``["JWST/NIRCam.F200W", "JWST/NIRCam.F277W"]``.
             hidden_sizes: Hidden layer widths.  Defaults to
                 ``[512, 512, 512, 512, 512]`` (6-layer network as in Parrot).
-            n_epochs: Maximum training epochs.  Defaults to 1000.
-            batch_size: Mini-batch size.  Defaults to 4096.
-            learning_rate: Initial Adam learning rate.  Defaults to 1e-3.
-            lr_decay_steps: Epochs at which LR is multiplied by the
-                corresponding ``lr_decay_factors`` (3-phase decay as in
-                Parrot).  Defaults to ``(300, 700)``.
-            lr_decay_factors: Multiplicative LR factors at each decay step.
-                Defaults to ``(0.1, 0.1)`` (1e-3 → 1e-4 → 1e-5).
-            val_fraction: Fraction held out for validation.  Defaults to 0.1.
-            early_stopping_patience: Stop if val loss does not improve for
-                this many epochs.  Set to ``n_epochs`` to disable.
-                Defaults to 20.
+            n_epochs: Maximum training epochs per step.  Defaults to 1000.
+            batch_size: Mini-batch size.  Defaults to 1000 (paper value).
+            lr_schedule: Learning rates for each training step.  Defaults to
+                ``[1e-3, 1e-4, 1e-5]`` (paper Table 8).
+            val_fraction: Fraction held out for validation per step.  Defaults
+                to 0.05 (1:19 split as in paper).
+            early_stopping_patience: Stop a step if val RMSE does not improve
+                for this many epochs.  Applied independently per step.
+                Defaults to 20 (paper value).
             seed: Random seed for reproducibility.
             log_interval: Log training/val loss every this many epochs.
-            checkpoint_path: If given, save the best-validation-loss model
-                here during training (safety checkpoint).
+            checkpoint_path: If given, overwrite with the best model after
+                each step completes (safety checkpoint).
 
         Returns:
-            Trained ParrotEmulator (best validation-loss weights).
+            Trained ParrotEmulator (best validation-loss weights from the
+            final step).
 
         Raises:
             ImportError: If h5py or optax is not installed.
@@ -409,6 +411,8 @@ class ParrotEmulator(SPSEmulator):
 
         if hidden_sizes is None:
             hidden_sizes = [512, 512, 512, 512, 512]
+        if lr_schedule is None:
+            lr_schedule = [1e-3, 1e-4, 1e-5]
 
         library_path = Path(library_path)
         logger.info(f"Loading synference library: {library_path}")
@@ -417,7 +421,6 @@ class ParrotEmulator(SPSEmulator):
             raw_params = f["Grid/Parameters"][()]  # (N_p_all, N_models)
             raw_phot = f["Grid/Photometry"][()]  # (N_b_all, N_models)
 
-            # --- Resolve parameter names from library metadata ---
             lib_param_names = _read_param_names(f)
             lib_band_names = _read_band_names(f)
 
@@ -432,37 +435,24 @@ class ParrotEmulator(SPSEmulator):
         params_np = raw_params[param_indices, :].T.astype(np.float32)  # (N, P)
         phot_np = raw_phot[band_indices, :].T.astype(np.float32)  # (N, B)
 
-        # Remove rows with non-finite parameters (photometry can be ~0; arsinh handles that)
         valid = np.all(np.isfinite(params_np), axis=1)
         params_np = params_np[valid]
         phot_np = phot_np[valid]
         logger.info(f"After finite-param filter: {params_np.shape[0]} models")
 
-        # Convert photometry to arsinh magnitudes (numpy-side, one-time)
         asinh_phot = _flux_to_asinh_mag_np(phot_np)
 
-        # Train / validation split
-        rng = np.random.default_rng(seed)
         n_total = params_np.shape[0]
-        n_val = max(1, int(n_total * val_fraction))
-        idx = rng.permutation(n_total)
-        val_idx, train_idx = idx[:n_val], idx[n_val:]
 
-        p_train, am_train = params_np[train_idx], asinh_phot[train_idx]
-        p_val, am_val = params_np[val_idx], asinh_phot[val_idx]
+        # Normalisation statistics computed once from the full dataset.
+        # Output std is fixed to 1 so every filter contributes equally to the
+        # RMSE loss regardless of its dynamic range (Mathews et al. 2023 §3.2).
+        in_mean = params_np.mean(axis=0)
+        in_std = params_np.std(axis=0) + 1e-8
+        out_mean = asinh_phot.mean(axis=0)
+        out_std = np.ones_like(out_mean)
 
-        # Normalisation statistics from training set
-        in_mean = p_train.mean(axis=0)
-        in_std = p_train.std(axis=0) + 1e-8
-        out_mean = am_train.mean(axis=0)
-        out_std = am_train.std(axis=0) + 1e-8
-
-        p_train_n = (p_train - in_mean) / in_std
-        am_train_n = (am_train - out_mean) / out_std
-        p_val_n = (p_val - in_mean) / in_std
-        am_val_n = (am_val - out_mean) / out_std
-
-        # Build model
+        # Build model with random initialisation
         key = jax.random.PRNGKey(seed)
         model = cls(
             param_names=param_names,
@@ -475,32 +465,11 @@ class ParrotEmulator(SPSEmulator):
             key=key,
         )
 
-        # 3-phase LR schedule: step functions at specified epoch boundaries
-        def get_lr(epoch: int) -> float:
-            lr = learning_rate
-            for step_epoch, factor in zip(lr_decay_steps, lr_decay_factors):
-                if epoch >= step_epoch:
-                    lr *= factor
-            return lr
-
-        p_train_jax = jnp.array(p_train_n)
-        am_train_jax = jnp.array(am_train_n)
-        p_val_jax = jnp.array(p_val_n)
-        am_val_jax = jnp.array(am_val_n)
-
-        n_train = len(p_train_jax)
-        n_steps_per_epoch = max(1, n_train // batch_size)
         logger.info(
-            f"Training: {n_train} train / {len(p_val_jax)} val, "
-            f"max {n_epochs} epochs, batch {batch_size}, "
-            f"initial lr {learning_rate}, decay at epochs {lr_decay_steps}"
+            f"Training: {n_total} models total, {len(lr_schedule)}-step schedule "
+            f"lr={lr_schedule}, batch={batch_size}, max {n_epochs} epochs/step, "
+            f"patience={early_stopping_patience}, val_fraction={val_fraction}"
         )
-
-        # Initialise optimiser with the initial LR; we rebuild opt_state at each
-        # decay step to apply the new LR cleanly.
-        current_lr = learning_rate
-        optimiser = optax.nadam(current_lr)
-        opt_state = optimiser.init(eqx.filter(model, eqx.is_array))
 
         @eqx.filter_jit
         def step(
@@ -512,7 +481,7 @@ class ParrotEmulator(SPSEmulator):
         ):
             def loss_fn(m):
                 pred = jax.vmap(m._forward_normalised)(p_batch)
-                return jnp.mean((pred - am_batch) ** 2)
+                return jnp.sqrt(jnp.mean((pred - am_batch) ** 2))
 
             loss, grads = eqx.filter_value_and_grad(loss_fn)(model)
             updates, opt_state_new = optimiser.update(
@@ -523,63 +492,96 @@ class ParrotEmulator(SPSEmulator):
         @eqx.filter_jit
         def compute_val_loss(model: "ParrotEmulator", p_v, am_v):
             pred = jax.vmap(model._forward_normalised)(p_v)
-            return jnp.mean((pred - am_v) ** 2)
+            return jnp.sqrt(jnp.mean((pred - am_v) ** 2))
 
-        best_val = float("inf")
-        best_model = model
-        epochs_no_improve = 0
-        key_epoch = jax.random.PRNGKey(seed + 1)
+        # -------------------------------------------------------------------
+        # Three-step training procedure (Mathews et al. 2023 §3.2)
+        # Each step: fresh random split, independent early stopping, fresh
+        # NAdam optimiser.  Best weights from step N initialise step N+1.
+        # -------------------------------------------------------------------
+        for step_idx, step_lr in enumerate(lr_schedule):
+            # Fresh random train/val split per step (paper: 1:19 = 5% val)
+            rng_step = np.random.default_rng(seed + step_idx)
+            n_val = max(1, int(n_total * val_fraction))
+            idx = rng_step.permutation(n_total)
+            val_idx, train_idx = idx[:n_val], idx[n_val:]
 
-        for epoch in range(1, n_epochs + 1):
-            # Update LR at decay boundaries (rebuild optimiser + re-init state)
-            new_lr = get_lr(epoch)
-            if new_lr != current_lr:
-                logger.info(f"  LR decay at epoch {epoch}: {current_lr:.2e} → {new_lr:.2e}")
-                current_lr = new_lr
-                optimiser = optax.nadam(current_lr)
-                opt_state = optimiser.init(eqx.filter(model, eqx.is_array))
+            # out_std=1 → normalised output is just (asinh_mag - out_mean)
+            p_train_n = (params_np[train_idx] - in_mean) / in_std
+            am_train_n = asinh_phot[train_idx] - out_mean
+            p_val_n = (params_np[val_idx] - in_mean) / in_std
+            am_val_n = asinh_phot[val_idx] - out_mean
 
-            # Shuffle
-            key_epoch, subkey = jax.random.split(key_epoch)
-            perm = jax.random.permutation(subkey, n_train)
-            p_shuf = p_train_jax[perm]
-            am_shuf = am_train_jax[perm]
+            p_train_jax = jnp.array(p_train_n)
+            am_train_jax = jnp.array(am_train_n)
+            p_val_jax = jnp.array(p_val_n)
+            am_val_jax = jnp.array(am_val_n)
 
-            epoch_loss = 0.0
-            for i in range(0, n_train, batch_size):
-                pb = p_shuf[i : i + batch_size]
-                amb = am_shuf[i : i + batch_size]
-                model, opt_state, loss = step(model, opt_state, optimiser, pb, amb)
-                epoch_loss += float(loss)
+            n_train = len(p_train_jax)
+            n_steps_per_epoch = max(1, n_train // batch_size)
 
-            v_loss = float(compute_val_loss(model, p_val_jax, am_val_jax))
+            # Fresh NAdam for this step; reinit is intentional here since LR
+            # changes by an order of magnitude between steps.
+            optimiser = optax.nadam(step_lr)
+            opt_state = optimiser.init(eqx.filter(model, eqx.is_array))
 
-            if v_loss < best_val:
-                best_val = v_loss
-                best_model = model
-                epochs_no_improve = 0
-                if checkpoint_path is not None:
-                    best_model.save(checkpoint_path)
-            else:
-                epochs_no_improve += 1
+            best_val = float("inf")
+            best_model = model
+            epochs_no_improve = 0
+            key_epoch = jax.random.PRNGKey(seed + step_idx + 1)
 
-            if epoch % log_interval == 0 or epoch == 1:
-                t_loss = epoch_loss / max(1, n_steps_per_epoch)
-                logger.info(
-                    f"Epoch {epoch:4d}/{n_epochs}  "
-                    f"train={t_loss:.5f}  val={v_loss:.5f}  "
-                    f"best_val={best_val:.5f}"
-                )
+            logger.info(
+                f"Step {step_idx + 1}/{len(lr_schedule)}: "
+                f"lr={step_lr:.1e}, train={n_train}, val={len(p_val_jax)}"
+            )
 
-            if epochs_no_improve >= early_stopping_patience:
-                logger.info(
-                    f"Early stopping at epoch {epoch} "
-                    f"(no val improvement for {early_stopping_patience} epochs)"
-                )
-                break
+            for epoch in range(1, n_epochs + 1):
+                key_epoch, subkey = jax.random.split(key_epoch)
+                perm = jax.random.permutation(subkey, n_train)
+                p_shuf = p_train_jax[perm]
+                am_shuf = am_train_jax[perm]
 
-        logger.info(f"Training complete. Best val MSE (normalised asinh space): {best_val:.5f}")
-        return best_model
+                epoch_loss = 0.0
+                for i in range(0, n_train, batch_size):
+                    pb = p_shuf[i : i + batch_size]
+                    amb = am_shuf[i : i + batch_size]
+                    model, opt_state, loss = step(model, opt_state, optimiser, pb, amb)
+                    epoch_loss += float(loss)
+
+                v_loss = float(compute_val_loss(model, p_val_jax, am_val_jax))
+
+                if v_loss < best_val:
+                    best_val = v_loss
+                    best_model = model
+                    epochs_no_improve = 0
+                    if checkpoint_path is not None:
+                        best_model.save(checkpoint_path)
+                else:
+                    epochs_no_improve += 1
+
+                if epoch % log_interval == 0 or epoch == 1:
+                    t_loss = epoch_loss / max(1, n_steps_per_epoch)
+                    logger.info(
+                        f"  Step {step_idx + 1}  Epoch {epoch:4d}/{n_epochs}  "
+                        f"train={t_loss:.5f}  val={v_loss:.5f}  best_val={best_val:.5f}"
+                    )
+
+                if epochs_no_improve >= early_stopping_patience:
+                    logger.info(
+                        f"  Step {step_idx + 1}: early stopping at epoch {epoch} "
+                        f"(no val improvement for {early_stopping_patience} epochs)"
+                    )
+                    break
+
+            # Carry best weights from this step into the next
+            model = best_model
+            logger.info(
+                f"Step {step_idx + 1} complete. "
+                f"Best val RMSE (normalised asinh space): {best_val:.5f}"
+            )
+
+        logger.info("Training complete.")
+        return model
 
 
 # ---------------------------------------------------------------------------
