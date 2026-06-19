@@ -135,6 +135,27 @@ def parse_args(argv=None):
     )
     p.add_argument("--seed", type=int, default=0, help="Random seed.")
     p.add_argument("--log-interval", type=int, default=10, help="Log every N epochs.")
+    p.add_argument(
+        "--flux-floor",
+        type=float,
+        default=1e-4,
+        help=(
+            "Flux clip threshold (nJy).  Library entries below this are set to zero "
+            "before asinh-mag conversion.  SPS libraries contain values as low as "
+            "~1e-48 nJy (numerical underflow); 1e-4 nJy covers all such artefacts "
+            "while remaining far below any real detection limit.  Set to 0 to disable."
+        ),
+    )
+    p.add_argument(
+        "--asinh-mu0",
+        type=float,
+        default=None,
+        help=(
+            "Zero-flux arsinh magnitude (controls softening scale).  If omitted, "
+            "derived automatically as a*ln(2/flux_floor) ≈ 10.75 for the default "
+            "flux-floor of 1e-4 nJy.  Override only if you need a specific value."
+        ),
+    )
     return p.parse_args(argv)
 
 
@@ -161,6 +182,7 @@ def main(argv=None):
     print(f"Bands    : {len(args.bands)} bands")
     print(f"Hidden   : {args.hidden}")
     print(f"Epochs   : {args.epochs}  Batch: {args.batch}  LR schedule: {args.lr_schedule}")
+    print(f"Flux floor: {args.flux_floor:.2e} nJy  asinh_mu0: {'auto' if args.asinh_mu0 is None else args.asinh_mu0}")
 
     emulator = ParrotEmulator.from_synference_library(
         library_path=args.library,
@@ -175,6 +197,8 @@ def main(argv=None):
         seed=args.seed,
         log_interval=args.log_interval,
         checkpoint_path=checkpoint,
+        flux_floor=args.flux_floor,
+        asinh_mu0=args.asinh_mu0,
     )
 
     emulator.save(args.output)

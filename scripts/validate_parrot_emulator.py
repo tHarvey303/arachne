@@ -136,9 +136,11 @@ def main(argv=None):  # noqa: C901
 
     # ------------------------------------------------------------------
     # Compute residuals in arsinh magnitude space
+    # Use the emulator's own mu0 so the space matches training.
     # ------------------------------------------------------------------
-    true_mag = _flux_to_asinh_mag_np(phot_val)   # (N, B)
-    pred_mag = _flux_to_asinh_mag_np(pred_flux)   # (N, B)
+    mu0 = emulator._asinh_mu0
+    true_mag = _flux_to_asinh_mag_np(phot_val, mu0=mu0)   # (N, B)
+    pred_mag = _flux_to_asinh_mag_np(pred_flux, mu0=mu0)   # (N, B)
     residuals = pred_mag - true_mag               # (N, B); positive = over-predicted
 
     # ------------------------------------------------------------------

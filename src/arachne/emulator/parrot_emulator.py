@@ -17,29 +17,26 @@ full dynamic range of galaxy photometry — including undetected sources and
 high-redshift Lyman-break dropouts that produce formally zero flux — to a
 smooth, bounded space without the divergence of log magnitudes at zero flux::
 
-    a = 2.5 * log10(
-        e
-    )  # ≈ 1.086
-    mu0 = 35  # softening magnitude (reference zeropoint)
-    mu = (
-        -a
-        * arcsinh(
-            f
-            * exp(
-                mu0 / a
-            )
-            / 2
-        )
-        + mu0
-    )  # flux -> asinh mag
-    f = (
-        2
-        * exp(-mu0 / a)
-        * sinh(
-            (mu0 - mu)
-            / a
-        )
-    )  # asinh mag -> flux
+    a = 2.5 * log10(e)   # ≈ 1.086
+    b = exp(mu0 / a) / 2  # softening parameter; sets scale where linear→log
+    mu = -a * arcsinh(f * b) + mu0   # flux -> asinh mag
+    f  =  2 * exp(-mu0 / a) * sinh((mu0 - mu) / a)  # asinh mag -> flux
+
+For large flux (f >> 1/b, log regime): mu ≈ -a * ln(f)  (independent of mu0).
+For zero flux: mu = mu0 exactly.
+The softening flux scale f_soft = 1/b = 2 * exp(-mu0/a).
+
+Choosing mu0
+~~~~~~~~~~~~
+mu0 controls where the linear→log transition occurs.  With the default
+mu0 = 35, f_soft ≈ 2e-14 nJy — far below any real galaxy flux —
+which wastes dynamic range on unphysical values.  The recommended choice
+ties f_soft to the ``flux_floor`` clip applied during training::
+
+    mu0 = a * ln(2 / flux_floor)   # f_soft ≈ flux_floor / 2
+
+With flux_floor = 1e-4 nJy this gives mu0 ≈ 10.75.  Use
+:func:`asinh_mu0_from_floor` to compute this automatically.
 
 Key differences from SPSMLPEmulator (Speculator/Alsing)
 ---------------------------------------------------------
@@ -112,43 +109,77 @@ logger = setup_named_logger(__name__)
 # ---------------------------------------------------------------------------
 
 _ASINH_A: float = 2.5 * np.log10(np.e)  # ≈ 1.0857
-_ASINH_MU0: float = 35.0  # softening magnitude (AB-like zeropoint in nJy)
+
+# Legacy default: kept only for backward-compatible module-level helpers.
+# New emulators store their own mu0 in the checkpoint — see ParrotEmulator._asinh_mu0.
+_ASINH_MU0: float = 35.0
+
+# Recommended flux floor for training data (nJy).
+# SPS libraries for these bands contain values as low as 1e-48 nJy that are
+# pure numerical underflow.  Anything below this threshold is treated as zero.
+# Investigation of the v6 BPASS library showed a clear bimodal distribution:
+# ~10% of values cluster around 1e-48 nJy (underflow artefacts) and then a
+# gap before real fluxes begin around 1e-4 – 1e-1 nJy.
+DEFAULT_FLUX_FLOOR: float = 1e-4  # nJy
 
 
-def flux_to_asinh_mag(flux: jnp.ndarray) -> jnp.ndarray:
+def asinh_mu0_from_floor(flux_floor: float) -> float:
+    """Compute the asinh_mu0 that places the softening transition at flux_floor.
+
+    Chooses mu0 so that f_soft = flux_floor / 2, meaning sources below
+    ``flux_floor`` all map to within ~1 asinh-mag of mu0 (effectively the
+    same "undetected" signal), while sources above it enter the logarithmic
+    regime and are distinguished with good precision.
+
+    In the log regime (f >> flux_floor), the transform is independent of mu0:
+    mu ≈ -a * ln(f), so changing mu0 only affects the faint-end encoding.
+
+    Args:
+        flux_floor: Clip threshold in nJy used during training.
+
+    Returns:
+        Recommended mu0 value (≈ 10.75 for flux_floor = 1e-4 nJy).
+    """
+    return _ASINH_A * np.log(2.0 / flux_floor)
+
+
+def flux_to_asinh_mag(flux: jnp.ndarray, mu0: float = _ASINH_MU0) -> jnp.ndarray:
     """Convert flux (nJy) to arsinh magnitude.
 
-    Smooth over the full dynamic range including zero and negative flux,
-    asymptoting to standard AB magnitudes for bright sources.
+    Smooth over the full dynamic range including zero and negative flux.
+    For bright sources (f >> f_soft), mu ≈ -a * ln(f) independent of mu0.
+    For zero/undetected sources, mu = mu0 exactly.
 
     Args:
         flux: Flux in nJy, any shape.  Need not be positive.
+        mu0: Zero-flux magnitude.  Controls where the linear→log softening
+            transition occurs (f_soft = 2 * exp(-mu0/a)).  Defaults to the
+            legacy value 35.0; prefer :func:`asinh_mu0_from_floor` for new
+            emulators.
 
     Returns:
-        arsinh magnitude, same shape as flux.  Bright sources (large flux)
-        give small (negative) values; faint/non-detected sources give
-        values near ``mu0`` = 35.
+        arsinh magnitude, same shape as flux.
     """
     a = _ASINH_A
-    mu0 = _ASINH_MU0
-    b = jnp.exp(mu0 / a) / 2.0  # softening parameter
+    b = jnp.exp(mu0 / a) / 2.0
     return -a * jnp.arcsinh(flux * b) + mu0
 
 
-def asinh_mag_to_flux(mag: jnp.ndarray) -> jnp.ndarray:
+def asinh_mag_to_flux(mag: jnp.ndarray, mu0: float = _ASINH_MU0) -> jnp.ndarray:
     """Convert arsinh magnitude back to flux (nJy).
 
     Inverse of :func:`flux_to_asinh_mag`.
 
     Args:
         mag: arsinh magnitude, any shape.
+        mu0: Must match the value used in :func:`flux_to_asinh_mag`.
 
     Returns:
         Flux in nJy, same shape as mag.
     """
     a = _ASINH_A
-    mu0 = _ASINH_MU0
-    return 2.0 * jnp.exp(-mu0 / a) * jnp.sinh((mu0 - mag) / a)
+    mu0_f = float(mu0)
+    return 2.0 * jnp.exp(-mu0_f / a) * jnp.sinh((mu0_f - mag) / a)
 
 
 # ---------------------------------------------------------------------------
@@ -196,6 +227,10 @@ class ParrotEmulator(SPSEmulator):
     out_std: jnp.ndarray
     _param_names: list[str] = eqx.field(static=True)
     _band_names: list[str] = eqx.field(static=True)
+    # Transform parameters — stored in checkpoint so predict() is self-contained.
+    # Legacy checkpoints without these fields default to mu0=35, floor=0.
+    _asinh_mu0: float = eqx.field(static=True)
+    _flux_floor: float = eqx.field(static=True)
 
     def __init__(
         self,
@@ -207,6 +242,8 @@ class ParrotEmulator(SPSEmulator):
         out_mean: np.ndarray,
         out_std: np.ndarray,
         key: jax.random.KeyArray,
+        asinh_mu0: float = _ASINH_MU0,
+        flux_floor: float = 0.0,
     ) -> None:
         """Initialise ParrotEmulator with random weights.
 
@@ -219,9 +256,17 @@ class ParrotEmulator(SPSEmulator):
             out_mean: Output (arsinh mag) normalisation mean, shape (N_bands,).
             out_std: Output (arsinh mag) normalisation std, shape (N_bands,).
             key: JAX random key for weight initialisation.
+            asinh_mu0: Zero-flux arsinh magnitude.  Controls the softening scale
+                (f_soft = 2*exp(-mu0/a)).  Use :func:`asinh_mu0_from_floor` to
+                derive this from ``flux_floor``.  Defaults to 35.0 for backward
+                compatibility; new emulators should pass a value ≈ 10.75.
+            flux_floor: Flux clip applied during training (nJy).  Stored for
+                reference only; inference does not clip.  Defaults to 0 (no clip).
         """
         self._param_names = param_names
         self._band_names = band_names
+        self._asinh_mu0 = float(asinh_mu0)
+        self._flux_floor = float(flux_floor)
 
         n_in = len(param_names)
         n_out = len(band_names)
@@ -264,6 +309,19 @@ class ParrotEmulator(SPSEmulator):
             x = jax.nn.gelu(layer(x), approximate=True)
         return self.layers[-1](x)
 
+    def _asinh_mag_to_flux_instance(self, mag: jnp.ndarray) -> jnp.ndarray:
+        """Instance-level inverse arsinh transform using self._asinh_mu0."""
+        a = _ASINH_A
+        mu0 = self._asinh_mu0
+        return 2.0 * jnp.exp(-mu0 / a) * jnp.sinh((mu0 - mag) / a)
+
+    def _flux_to_asinh_mag_instance(self, flux: jnp.ndarray) -> jnp.ndarray:
+        """Instance-level forward arsinh transform using self._asinh_mu0."""
+        a = _ASINH_A
+        mu0 = self._asinh_mu0
+        b = jnp.exp(mu0 / a) / 2.0
+        return -a * jnp.arcsinh(flux * b) + mu0
+
     def predict(self, params: jnp.ndarray) -> jnp.ndarray:
         """Predict photometry from SPS parameters.
 
@@ -281,7 +339,7 @@ class ParrotEmulator(SPSEmulator):
         p_norm = (params - self.in_mean) / (self.in_std + 1e-8)
         out_norm = jax.vmap(self._forward_normalised)(p_norm)  # (N_pixels, N_bands)
         asinh_mag = out_norm * self.out_std + self.out_mean
-        return asinh_mag_to_flux(asinh_mag)  # nJy
+        return self._asinh_mag_to_flux_instance(asinh_mag)  # nJy
 
     def save(self, path: str | Path) -> None:
         """Save the emulator to a self-contained checkpoint file.
@@ -322,6 +380,8 @@ class ParrotEmulator(SPSEmulator):
                 out_mean=np.array(self.out_mean),
                 out_std=np.array(self.out_std),
                 weights_bytes=np.frombuffer(buf.getvalue(), dtype=np.uint8),
+                asinh_mu0=np.array(self._asinh_mu0, dtype=np.float64),
+                flux_floor=np.array(self._flux_floor, dtype=np.float64),
             )
         logger.info(f"ParrotEmulator saved to {path}")
 
@@ -359,6 +419,9 @@ class ParrotEmulator(SPSEmulator):
             band_names = raw["band_names"].tolist()
             hidden_sizes = [int(h) for h in raw["hidden_sizes"]]
             weights_bytes = bytes(raw["weights_bytes"])
+            # Backward-compatible: old checkpoints lack these keys.
+            asinh_mu0 = float(raw["asinh_mu0"]) if "asinh_mu0" in raw else _ASINH_MU0
+            flux_floor = float(raw["flux_floor"]) if "flux_floor" in raw else 0.0
 
         n_p, n_b = len(param_names), len(band_names)
         dummy = cls(
@@ -370,6 +433,8 @@ class ParrotEmulator(SPSEmulator):
             out_mean=np.zeros(n_b),
             out_std=np.ones(n_b),
             key=jax.random.PRNGKey(0),
+            asinh_mu0=asinh_mu0,
+            flux_floor=flux_floor,
         )
         loaded = eqx.tree_deserialise_leaves(io.BytesIO(weights_bytes), dummy)
         logger.info(f"ParrotEmulator loaded from {path}")
@@ -433,6 +498,8 @@ class ParrotEmulator(SPSEmulator):
         seed: int = 0,
         log_interval: int = 10,
         checkpoint_path: str | Path | None = None,
+        flux_floor: float = DEFAULT_FLUX_FLOOR,
+        asinh_mu0: float | None = None,
     ) -> "ParrotEmulator":
         """Train a ParrotEmulator from a synference HDF5 model library.
 
@@ -444,8 +511,8 @@ class ParrotEmulator(SPSEmulator):
         match the paper's training setup.
 
         Loads ``Grid/Parameters`` and ``Grid/Photometry`` from the HDF5
-        library, selects the requested param/band columns, converts photometry
-        to arsinh magnitudes (Parrot transform), and trains the MLP.
+        library, selects the requested param/band columns, clips unphysically
+        small fluxes, converts photometry to arsinh magnitudes, and trains.
 
         Parameter names and filter codes are read from the library metadata.
         Both the old root-attr format (``ParameterNames``, ``FilterCodes``) and
@@ -475,6 +542,18 @@ class ParrotEmulator(SPSEmulator):
             log_interval: Log training/val loss every this many epochs.
             checkpoint_path: If given, overwrite with the best model after
                 each step completes (safety checkpoint).
+            flux_floor: Flux clip threshold (nJy).  Any training flux below
+                this value is replaced with 0, treating it as a genuine
+                non-detection.  SPS libraries contain values down to ~1e-48 nJy
+                that are pure numerical underflow; ``flux_floor = 1e-4`` nJy
+                covers all such artefacts while remaining below any conceivable
+                real detection (JWST 5σ ≈ 1–10 nJy).  Set to 0 to disable.
+            asinh_mu0: Zero-flux arsinh magnitude.  Controls the softening
+                scale: f_soft = 2 * exp(-mu0/a).  If ``None`` (default),
+                derived automatically as ``asinh_mu0_from_floor(flux_floor)``
+                when ``flux_floor > 0``, else 35.0 for backward compatibility.
+                Pass an explicit value to override (e.g. after inspecting the
+                flux distribution with :func:`asinh_mu0_from_floor`).
 
         Returns:
             Trained ParrotEmulator (best validation-loss weights from the
@@ -523,7 +602,31 @@ class ParrotEmulator(SPSEmulator):
         phot_np = phot_np[valid]
         logger.info(f"After finite-param filter: {params_np.shape[0]} models")
 
-        asinh_phot = _flux_to_asinh_mag_np(phot_np)
+        # Clip unphysically small fluxes to zero.
+        # SPS codes produce values as low as ~1e-48 nJy (float64 underflow
+        # artefacts from IGM absorption / dust attenuation).  These saturate
+        # to the zero-flux asinh-mag and waste dynamic range by forcing the
+        # network to model a spuriously large spread in the "undetected" regime.
+        # Treating all flux < flux_floor as exactly 0 compresses all undetected
+        # sources to a single clean target at mu0, simplifying the loss landscape.
+        if flux_floor > 0:
+            n_clipped = int((phot_np < flux_floor).sum())
+            phot_np = np.where(phot_np < flux_floor, 0.0, phot_np)
+            logger.info(
+                f"Flux floor {flux_floor:.2e} nJy: clipped {n_clipped:,} values "
+                f"({100*n_clipped/(phot_np.size):.1f}% of all band-fluxes) to zero"
+            )
+
+        # Choose asinh_mu0 to match the clip boundary.
+        # With mu0 = a*ln(2/flux_floor), f_soft ≈ flux_floor/2 so the linear→log
+        # transition sits right at the clip scale.  All clipped zeros map to
+        # exactly mu0; real fluxes above flux_floor enter the log regime and are
+        # encoded with full precision.
+        if asinh_mu0 is None:
+            asinh_mu0 = asinh_mu0_from_floor(flux_floor) if flux_floor > 0 else _ASINH_MU0
+        logger.info(f"asinh_mu0 = {asinh_mu0:.4f}  (flux_floor = {flux_floor:.2e} nJy)")
+
+        asinh_phot = _flux_to_asinh_mag_np(phot_np, mu0=asinh_mu0)
 
         n_total = params_np.shape[0]
 
@@ -546,6 +649,8 @@ class ParrotEmulator(SPSEmulator):
             out_mean=out_mean,
             out_std=out_std,
             key=key,
+            asinh_mu0=asinh_mu0,
+            flux_floor=flux_floor,
         )
 
         logger.info(
@@ -672,19 +777,20 @@ class ParrotEmulator(SPSEmulator):
 # ---------------------------------------------------------------------------
 
 
-def _flux_to_asinh_mag_np(flux: np.ndarray) -> np.ndarray:
+def _flux_to_asinh_mag_np(flux: np.ndarray, mu0: float = _ASINH_MU0) -> np.ndarray:
     """Convert flux array (nJy) to arsinh magnitudes using numpy.
 
     Used during training data preprocessing only (not on the JAX hot path).
 
     Args:
         flux: Flux array in nJy, any shape.
+        mu0: Zero-flux magnitude.  Pass the emulator's ``_asinh_mu0`` to match
+            training-time encoding.  Defaults to 35.0 for backward compatibility.
 
     Returns:
         arsinh magnitude array, same shape.
     """
     a = _ASINH_A
-    mu0 = _ASINH_MU0
     b = np.exp(mu0 / a) / 2.0
     return -a * np.arcsinh(flux * b) + mu0
 
