@@ -126,7 +126,15 @@ def main(argv=None):  # noqa: C901
     params_val = params_all[idx]
     phot_val = phot_all[idx]
 
-    print(f"Validation set: {n} samples")
+    # Apply the same flux floor used during training so the reference matches
+    # what the emulator was trained to predict.  Fluxes below the floor are
+    # genuine non-detections; the emulator correctly predicts ~0 for them and
+    # we should not penalise it for failing to reproduce 1e-48 nJy artifacts.
+    flux_floor = emulator._flux_floor
+    if flux_floor > 0:
+        phot_val = np.where(phot_val < flux_floor, 0.0, phot_val)
+
+    print(f"Validation set: {n} samples (flux_floor={flux_floor:.2e} nJy applied to reference)")
 
     # ------------------------------------------------------------------
     # Predict

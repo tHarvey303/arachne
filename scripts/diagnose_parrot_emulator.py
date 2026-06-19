@@ -169,13 +169,23 @@ def _load_and_predict(args, emulator):
     idx = rng.choice(len(params_all), size=n, replace=False)
     params_val = params_all[idx]
     phot_val = phot_all[idx]
-    print(f"Validation set: {n} samples, {len(param_names)} params, {len(band_names)} bands")
+
+    # Apply the same flux floor used during training so validation is apples-to-apples.
+    flux_floor = emulator._flux_floor
+    if flux_floor > 0:
+        phot_val = np.where(phot_val < flux_floor, 0.0, phot_val)
+
+    print(
+        f"Validation set: {n} samples, {len(param_names)} params, {len(band_names)} bands"
+        f" (flux_floor={flux_floor:.2e} nJy applied to reference)"
+    )
 
     pred_flux = np.asarray(emulator.predict(jnp.array(params_val)))  # (N, B)
 
-    # arsinh-mag residuals
-    true_mag = _flux_to_asinh_mag_np(phot_val)
-    pred_mag = _flux_to_asinh_mag_np(pred_flux)
+    # arsinh-mag residuals — use emulator's own mu0 to match training encoding
+    mu0 = emulator._asinh_mu0
+    true_mag = _flux_to_asinh_mag_np(phot_val, mu0=mu0)
+    pred_mag = _flux_to_asinh_mag_np(pred_flux, mu0=mu0)
     resid_mag = pred_mag - true_mag  # positive = over-predicted
 
     # % flux error (mask near-zero denominators)
