@@ -304,45 +304,64 @@ def warm_start(
 def run_nuts(
     log_posterior_fn,
     theta_init: jnp.ndarray,
+    inv_mass: jnp.ndarray,
     rng_key: jnp.ndarray,
-    n_warmup: int = 300,
     n_samples: int = 1000,
+    step_size: float | None = None,
 ) -> np.ndarray:
-    """Run BlackJAX NUTS with window adaptation.
+    """Run BlackJAX NUTS using Pathfinder's mass matrix — no warmup needed.
 
-    Mirrors NUTSSampler.run but accepts a raw log_posterior callable rather
-    than a ForwardModel, keeping this script free of spatial/image machinery.
+    Pathfinder already provides both a good starting position (theta_init) and
+    a diagonal inverse mass matrix (inv_mass) that approximates the posterior
+    covariance.  Passing inv_mass directly to the NUTS kernel eliminates the
+    need for window_adaptation, which would redundantly re-estimate it.
+
+    The only remaining unknown is the step size.  With good preconditioning
+    (inv_mass ≈ posterior covariance), parameters are approximately isotropic
+    in the preconditioned space, so a fixed heuristic ``0.5 / d^{1/4}`` works
+    well across a wide range of problems.  The acceptance rate printed at the
+    end is the main diagnostic: target 0.65–0.90.
+
+    This function is also directly vmappable over galaxy batches — it contains
+    no Python-level adaptation loop, only a ``jax.lax.scan`` sampling loop.
 
     Args:
         log_posterior_fn: Pure-JAX log-posterior callable.
-        theta_init: Starting position, shape (N_params,).
+        theta_init: Starting position (MAP from Pathfinder), shape (N_params,).
+        inv_mass: Diagonal inverse mass matrix from Pathfinder, shape (N_params,).
         rng_key: JAX PRNG key.
-        n_warmup: Number of dual-averaging warmup steps.
-        n_samples: Number of posterior samples to draw after warmup.
+        n_samples: Number of posterior samples to draw.
+        step_size: NUTS step size.  If None, uses ``0.5 / d^{0.25}`` (heuristic).
 
     Returns:
         Posterior samples, shape (n_samples, N_params).
     """
     import blackjax
 
+    d = theta_init.shape[0]
+    if step_size is None:
+        step_size = 0.5 / (d**0.25)
+
     logpost = jax.jit(log_posterior_fn)
-    print(f"\nRunning NUTS ({n_warmup} warmup + {n_samples} samples)...")
+    print(f"\nRunning NUTS ({n_samples} samples, step_size={step_size:.4g})...")
 
-    warmup = blackjax.window_adaptation(blackjax.nuts, logpost, target_acceptance_rate=0.8)
-    rng_key, warmup_key = jax.random.split(rng_key)
-    (state, params), _ = warmup.run(warmup_key, theta_init, n_warmup)
-    print(f"  Warmup done. Step size: {float(params['step_size']):.4g}")
-
-    nuts_kernel = blackjax.nuts(logpost, **params)
+    nuts_kernel = blackjax.nuts(logpost, step_size=step_size, inverse_mass_matrix=inv_mass)
+    state = nuts_kernel.init(theta_init)
 
     def one_step(carry, rng_k):
         state, info = nuts_kernel.step(rng_k, carry)
         return state, (state.position, info)
 
-    rng_key, sample_key = jax.random.split(rng_key)
-    _, (samples, infos) = jax.lax.scan(one_step, state, jax.random.split(sample_key, n_samples))
+    _, (samples, infos) = jax.lax.scan(one_step, state, jax.random.split(rng_key, n_samples))
 
-    print(f"  Mean acceptance rate: {float(jnp.mean(infos.acceptance_rate)):.3f}")
+    accept_rate = float(jnp.mean(infos.acceptance_rate))
+    print(f"  Mean acceptance rate: {accept_rate:.3f}", end="")
+    if accept_rate < 0.65:
+        print(f"  ← low, try --step-size {step_size * 0.5:.4g}")
+    elif accept_rate > 0.95:
+        print(f"  ← high, try --step-size {step_size * 2.0:.4g}")
+    else:
+        print()
     return np.array(samples)
 
 
@@ -444,8 +463,14 @@ def main() -> None:
         default=str(DEFAULT_EMULATOR),
         help=f"Path to ParrotEmulator checkpoint (.eqx). Default: {DEFAULT_EMULATOR}",
     )
-    parser.add_argument("--n-warmup", type=int, default=300, help="NUTS warmup steps.")
     parser.add_argument("--n-samples", type=int, default=1000, help="Posterior samples.")
+    parser.add_argument(
+        "--step-size",
+        type=float,
+        default=None,
+        help="NUTS step size. Default: 0.5 / d^0.25 heuristic. "
+        "Increase if acceptance rate >0.95, decrease if <0.65.",
+    )
     parser.add_argument("--seed", type=int, default=0, help="JAX PRNG seed.")
     args = parser.parse_args()
 
@@ -474,11 +499,13 @@ def main() -> None:
     rng_key = jax.random.PRNGKey(args.seed)
     rng_key, pf_key = jax.random.split(rng_key)
 
-    # 5. Pathfinder warm-start
-    theta_map, _ = warm_start(log_posterior_fn, theta0, pf_key)
+    # 5. Pathfinder: MAP position + diagonal inverse mass matrix
+    theta_map, inv_mass = warm_start(log_posterior_fn, theta0, pf_key)
 
-    # 6. NUTS
-    samples = run_nuts(log_posterior_fn, theta_map, rng_key, args.n_warmup, args.n_samples)
+    # 6. NUTS — uses Pathfinder's inv_mass directly, no window_adaptation
+    samples = run_nuts(
+        log_posterior_fn, theta_map, inv_mass, rng_key, args.n_samples, args.step_size
+    )
 
     # 7. Save + report
     save_results(samples, np.array(obs_flux), np.array(flux_err), true_phys)
