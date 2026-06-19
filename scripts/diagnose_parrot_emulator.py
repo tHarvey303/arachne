@@ -51,6 +51,9 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
+import numpy as np
+import matplotlib.pyplot as plt
+
 
 
 # ---------------------------------------------------------------------------
@@ -134,7 +137,6 @@ def _load_and_predict(args, emulator):
     """Load library subset, run predictions, return error arrays."""
     import h5py
     import jax.numpy as jnp
-    import numpy as np
 
     from arachne.emulator.parrot_emulator import (
         _flux_to_asinh_mag_np,
@@ -172,9 +174,8 @@ def _load_and_predict(args, emulator):
     pred_flux = np.asarray(emulator.predict(jnp.array(params_val)))  # (N, B)
 
     # arsinh-mag residuals
-    mu0 = emulator._asinh_mu0
-    true_mag = _flux_to_asinh_mag_np(phot_val, mu0=mu0)
-    pred_mag = _flux_to_asinh_mag_np(pred_flux, mu0=mu0)
+    true_mag = _flux_to_asinh_mag_np(phot_val)
+    pred_mag = _flux_to_asinh_mag_np(pred_flux)
     resid_mag = pred_mag - true_mag  # positive = over-predicted
 
     # % flux error (mask near-zero denominators)
@@ -228,8 +229,6 @@ def _print_summary(data, args):
     print(f"  Target (Parrot paper): < 1%")
     print(f"{'='*68}\n")
 
-    import numpy as np
-
     print(f"{'Band':45s}  {'med%err':>8s}  {'p84%err':>8s}  {'bias(mag)':>10s}  {'σ(mag)':>8s}")
     print("-" * 86)
     for i, bname in enumerate(band_names):
@@ -245,7 +244,6 @@ def _print_summary(data, args):
     print()
 
     # Per-parameter: which quantile range has highest error?
-    import numpy as np
 
     params_val = data["params_val"]
     # band-averaged abs % error per sample
@@ -277,9 +275,6 @@ def _print_summary(data, args):
 
 def _fig1_error_summary(data, output_dir):
     """Bar chart of per-band % flux error statistics with 1% reference line."""
-    import matplotlib.pyplot as plt
-    import numpy as np
-
     abs_pct = data["abs_pct_detected"]
     resid_mag = data["resid_mag"]
     band_names = data["band_names"]
@@ -340,8 +335,6 @@ def _fig1_error_summary(data, output_dir):
 
 def _fig2_param_profiles(data, args, output_dir):
     """1D per-parameter error profiles with sample-count histogram."""
-    import matplotlib.pyplot as plt
-    import numpy as np
 
     params_val = data["params_val"]
     abs_pct = data["abs_pct_detected"]
@@ -464,9 +457,6 @@ def _fig2_param_profiles(data, args, output_dir):
 
 def _fig3_2d_heatmaps(data, args, importances, output_dir):
     """2D error heatmaps: most-important parameter vs each other parameter."""
-    import matplotlib.pyplot as plt
-    import numpy as np
-
     params_val = data["params_val"]
     abs_pct = data["abs_pct_detected"]
     param_names = data["param_names"]
@@ -561,8 +551,6 @@ def _fig3_2d_heatmaps(data, args, importances, output_dir):
 
 def _fig4_flux_level(data, output_dir):
     """Abs % flux error vs log10(true flux) per band."""
-    import matplotlib.pyplot as plt
-    import numpy as np
 
     phot_val = data["phot_val"]
     abs_pct = data["abs_pct"]  # use unmasked here to show dropout behaviour
@@ -646,8 +634,7 @@ def _fig4_flux_level(data, output_dir):
 
 def _fig5_outliers(data, args, output_dir):
     """Parameter distributions for worst-performing samples vs. full set."""
-    import matplotlib.pyplot as plt
-    import numpy as np
+
 
     params_val = data["params_val"]
     abs_pct = data["abs_pct_detected"]
@@ -720,8 +707,6 @@ def _fig5_outliers(data, args, output_dir):
 
 def _fig6_correlation(data, output_dir):
     """Spearman correlation: |arsinh-mag residual| per band × each parameter."""
-    import matplotlib.pyplot as plt
-    import numpy as np
     from scipy.stats import spearmanr
 
     params_val = data["params_val"]
@@ -793,7 +778,6 @@ def _fig6_correlation(data, output_dir):
 def _save_hdf5(data, importances, output_dir):
     """Save all diagnostic arrays to HDF5 for notebook follow-up."""
     import h5py
-    import numpy as np
 
     path = output_dir / "diagnostics.h5"
     with h5py.File(path, "w") as f:
@@ -822,7 +806,6 @@ def main(argv=None):
     import matplotlib
     matplotlib.use("Agg")
 
-    import numpy as np
     from arachne.emulator.parrot_emulator import ParrotEmulator
 
     output_dir = Path(args.output_dir)

@@ -487,8 +487,8 @@ class ParrotEmulator(SPSEmulator):
     def from_synference_library(
         cls,
         library_path: str | Path,
-        param_names: list[str],
         band_names: list[str],
+        param_names: list[str] | str = 'all',
         hidden_sizes: list[int] | None = None,
         n_epochs: int = 1000,
         batch_size: int = 1000,
@@ -585,6 +585,9 @@ class ParrotEmulator(SPSEmulator):
 
             lib_param_names = _read_param_names(f)
             lib_band_names = _read_band_names(f)
+
+        if param_names == 'all':
+            param_names = lib_param_names
 
         logger.info(
             f"Library: {raw_params.shape[1]} models, "
@@ -815,12 +818,6 @@ def _read_param_names(f) -> list[str]:
     Returns:
         Ordered list of parameter name strings.
     """
-    # v4 format
-    if "Model" in f and "varying_param_names" in f["Model"].attrs:
-        varying = _decode_str_list(f["Model"].attrs["varying_param_names"])
-        stellar = _decode_str_list(f["Model"].attrs.get("stellar_params", []))
-        return varying + stellar
-
     # Legacy root attrs
     if "ParameterNames" in f.attrs:
         return _decode_str_list(f.attrs["ParameterNames"])
