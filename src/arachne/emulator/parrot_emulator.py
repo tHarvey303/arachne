@@ -712,12 +712,6 @@ def _read_param_names(f) -> list[str]:
     Returns:
         Ordered list of parameter name strings.
     """
-    # v4 format
-    if "Model" in f and "varying_param_names" in f["Model"].attrs:
-        varying = _decode_str_list(f["Model"].attrs["varying_param_names"])
-        stellar = _decode_str_list(f["Model"].attrs.get("stellar_params", []))
-        return varying + stellar
-
     # Legacy root attrs
     if "ParameterNames" in f.attrs:
         return _decode_str_list(f.attrs["ParameterNames"])
