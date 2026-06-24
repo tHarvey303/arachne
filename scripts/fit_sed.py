@@ -85,18 +85,18 @@ SPS_PARAM_NAMES = [
     "logsfr_ratio_4",
 ]
 PARAM_BOUNDS: dict[str, tuple[float, float]] = {
-    "redshift": (0.011, 1.410),
-    "log_mass": (11.850, 12.500),
-    "slope": (-0.300, -0.160),
-    "fesc_lya": (0.900, 1.000),
-    "dust_bump_amplitude": (4.500, 5.000),
-    "log10metallicity": (-2.173, -1.912),
-    "Av": (4.511, 5.012),
-    "logsfr_ratio_0": (23.325, 29.212),
-    "logsfr_ratio_1": (17.896, 23.865),
-    "logsfr_ratio_2": (-29.456, -23.521),
-    "logsfr_ratio_3": (24.008, 29.993),
-    "logsfr_ratio_4": (17.941, 23.883),
+    "redshift": (0.01, 14.0),
+    "log_mass": (4.0, 12.0),
+    "slope": (-0.3, 1.1),
+    "fesc_lya": (0.0, 1.0),
+    "dust_bump_amplitude": (0.0, 5.0),
+    "log10metallicity": (-4.0, -1.39),
+    "Av": (0.001, 5.0),
+    "logsfr_ratio_0": (-10.0, 10.0),
+    "logsfr_ratio_1": (-10.0, 10.0),
+    "logsfr_ratio_2": (-10.0, 10.0),
+    "logsfr_ratio_3": (-10.0, 10.0),
+    "logsfr_ratio_4": (-10.0, 10.0),
 }
 
 # True parameters for the mock SED — midpoints of each training range

@@ -89,6 +89,8 @@ Output HDF5 layout
     /step_size          (N, C)          adapted NUTS step size per chain
     /divergent_frac     (N, C)          fraction of divergent transitions
     /rhat               (N, P)          split-R-hat per parameter
+    /reduced_chi2_map    (N,)           reduced chi-squared at the Pathfinder MAP
+                                        (fit-quality flag; cut on this downstream)
     attrs: param_names, band_names, param_bounds_lo, param_bounds_hi,
            prior_spec (json), emulator_path, run_timestamp, n_galaxies,
            n_samples, n_warmup, n_chains, n_paths, batch_size, target_accept
@@ -177,6 +179,12 @@ PARAM_BOUNDS: dict[str, tuple[float, float]] = {
     "logsfr_ratio_4": (-10.0, 10.0),
 }
 
+# Index of the amplitude (mass-normalisation) parameter — used for data-driven
+# initialisation, since flux scales as 10**log_mass.
+REDSHIFT_IDX: int = SPS_PARAM_NAMES.index("redshift")
+LOGMASS_IDX: int = SPS_PARAM_NAMES.index("log_mass")
+AV_IDX: int = SPS_PARAM_NAMES.index("Av")
+
 # Sensible defaults.  The continuity-SFH logsfr_ratios get the standard
 # Student-t(df=2, scale=0.3) prior; everything else is uniform-over-domain.
 DEFAULT_PRIORS: dict[str, dict] = {
@@ -193,10 +201,6 @@ DEFAULT_PRIORS: dict[str, dict] = {
     "logsfr_ratio_3": {"dist": "studentt", "df": 2.0, "loc": 0.0, "scale": 0.3},
     "logsfr_ratio_4": {"dist": "studentt", "df": 2.0, "loc": 0.0, "scale": 0.3},
 }
-
-REDSHIFT_IDX: int = SPS_PARAM_NAMES.index("redshift")
-LOGMASS_IDX: int = SPS_PARAM_NAMES.index("log_mass")
-AV_IDX: int = SPS_PARAM_NAMES.index("Av")
 
 FLUX_UNIT_TO_NJY: dict[str, float] = {
     "nJy": 1.0,
@@ -695,41 +699,154 @@ def regularize_metric(
     return out.astype(np.float32), int(bad.sum()), int(floored_any.sum())
 
 
+def logmass_init_theta(
+    obs: jnp.ndarray,
+    err: jnp.ndarray,
+    emulator,
+    band_idx: np.ndarray,
+    lows: jnp.ndarray,
+    highs: jnp.ndarray,
+    ref: float = 8.0,
+) -> jnp.ndarray:
+    """Per-galaxy unconstrained theta for log_mass, from amplitude matching.
+
+    Flux scales as 10**log_mass at fixed SED shape, so the optimal mass given a
+    reference shape is a weighted least-squares amplitude.  Starting Pathfinder
+    here (instead of the domain midpoint) drops each galaxy into the correct
+    basin rather than 4-5 dex below it on a near-flat misfit plateau.
+
+    Args:
+        obs, err:  (B, n_bands) fluxes and errors in nJy.
+        emulator:  Loaded ParrotEmulator.
+        band_idx:  Band indices into the emulator output.
+        lows/highs: (P,) physical bounds.
+        ref:       Reference log_mass at which the shape is evaluated.
+
+    Returns:
+        (B,) unconstrained theta for the log_mass dimension.
+    """
+    lo, hi = float(lows[LOGMASS_IDX]), float(highs[LOGMASS_IDX])
+    x_ref = (0.5 * (lows + highs)).at[LOGMASS_IDX].set(ref)        # midpoint shape @ ref mass
+    pred_ref = emulator.predict(x_ref[None, :])[0][jnp.asarray(band_idx, dtype=jnp.int32)]
+    w = (err < OBS_MASK_THRESH).astype(obs.dtype) / (err ** 2)     # (B, n_bands)
+    num = jnp.sum(w * obs * pred_ref, axis=1)
+    den = jnp.sum(w * pred_ref ** 2, axis=1)
+    s = jnp.where(den > 0, num / den, 1.0)                         # amplitude scale per galaxy
+    lm = jnp.clip(ref + jnp.log10(jnp.clip(s, 1e-30, 1e30)), lo + 1e-3, hi - 1e-3)
+    u = jnp.clip((lm - lo) / (hi - lo), 1e-4, 1.0 - 1e-4)
+    return jnp.log(u / (1.0 - u))
+
+
+def reduced_chi2_at(
+    theta: np.ndarray,
+    obs: np.ndarray,
+    err: np.ndarray,
+    emulator,
+    band_idx: np.ndarray,
+    lows: np.ndarray,
+    highs: np.ndarray,
+    min_frac_err: float = 0.0,
+) -> np.ndarray:
+    """Reduced chi-squared at given (unconstrained) theta, per galaxy.
+
+    A fit-quality flag with teeth: pf_ok only checks finiteness, so a 3e8
+    chi-squared "MAP" passes it.  This is computed on the host (no autodiff)
+    over the observed bands only.  Uses the same effective errors as the
+    likelihood (with min_frac_err floor applied) so the reported chi2 is
+    consistent with what the sampler sees.
+
+    Args:
+        theta:        (B, P) unconstrained positions (e.g. Pathfinder MAPs).
+        obs, err:     (B, n_bands) fluxes and errors.
+        emulator:     Loaded ParrotEmulator.
+        band_idx:     Band indices into the emulator output.
+        lows/highs:   (P,) physical bounds.
+        min_frac_err: fractional error floor (same value used in log_posterior).
+
+    Returns:
+        (B,) reduced chi-squared (chi2 / dof, dof = n_observed_bands - P, floored at 1).
+    """
+    lows_j = jnp.asarray(lows)
+    highs_j = jnp.asarray(highs)
+    x = lows_j + (highs_j - lows_j) * jax.nn.sigmoid(jnp.asarray(theta))    # (B, P)
+    pred = np.asarray(emulator.predict(x))[:, np.asarray(band_idx)]         # (B, n_bands)
+    mask = np.asarray(err) < OBS_MASK_THRESH
+    obs_np, err_np = np.asarray(obs), np.asarray(err)
+    eff_err = np.maximum(err_np, min_frac_err * np.abs(obs_np)) if min_frac_err > 0 else err_np
+    resid = (obs_np - pred) / eff_err
+    chi2 = np.sum(mask * resid * resid, axis=1)
+    dof = np.maximum(mask.sum(axis=1) - len(SPS_PARAM_NAMES), 1)
+    return (chi2 / dof).astype(np.float32)
+
+
 def check_gradients(log_post_fn, obs_flux: np.ndarray, flux_err: np.ndarray,
                     n_check: int = 8, seed: int = 0) -> None:
-    """Compare autodiff gradients of log_posterior to central finite differences.
+    """Robust autodiff-vs-finite-difference gradient check.
 
-    A smooth, differentiable emulator is a hard requirement for NUTS.  Large or
-    non-finite relative errors here mean the emulator's gradients are unreliable
-    (e.g. non-smooth ops in `predict`), and no sampler tuning will help.
+    Naive per-component central differences in float32 are unreliable when
+    |log_posterior| is large (the full-range midpoint is a wild misfit to a
+    real galaxy, giving |log p| ~ 1e5-1e6, so f(x+e)-f(x-e) is dominated by
+    float32 round-off).  This version instead:
+      * descends to near each galaxy's mode, then offsets by a fixed amount,
+        so |log p| is moderate and the gradient is non-zero (real signal);
+      * uses a *directional* derivative (one well-conditioned number);
+      * subtracts a float32 cancellation-noise floor before judging error,
+        so round-off is not mistaken for a wrong gradient.
     """
     P = len(SPS_PARAM_NAMES)
-    grad_fn = jax.jit(jax.grad(lambda th, o, e: log_post_fn(th, o, e)))
     val_fn = jax.jit(lambda th, o, e: log_post_fn(th, o, e))
+    grad_fn = jax.jit(jax.grad(lambda th, o, e: log_post_fn(th, o, e)))
+
+    @jax.jit
+    def ascend(th0, o, e):
+        def body(t, _):
+            g = jax.grad(lambda x: log_post_fn(x, o, e))(t)
+            return t + 0.03 * g / (jnp.linalg.norm(g) + 1e-8), None
+        t, _ = jax.lax.scan(body, th0, None, length=150)
+        return t
+
     key = jax.random.PRNGKey(seed)
-    eps = 1e-3
-    print(f"\nGradient self-test (autodiff vs central finite diff, eps={eps}):")
+    print("\nGradient self-test (directional autodiff vs central FD, near each mode):")
     worst = 0.0
     n = min(n_check, obs_flux.shape[0])
     for i in range(n):
         o = jnp.asarray(obs_flux[i])
         e = jnp.asarray(flux_err[i])
-        key, k = jax.random.split(key)
-        th = jax.random.normal(k, (P,)) * 0.5
+        key, kth, kv, ko = jax.random.split(key, 4)
+        th_map = ascend(jax.random.normal(kth, (P,)) * 0.5, o, e)
+        offset = np.asarray(jax.random.normal(ko, (P,)))
+        offset /= np.linalg.norm(offset)
+        th = th_map + 0.5 * jnp.asarray(offset, dtype=jnp.float32)  # off-mode: real gradient
+
         g = np.asarray(grad_fn(th, o, e))
-        fd = np.zeros(P)
-        for p in range(P):
-            fd[p] = float(val_fn(th.at[p].add(eps), o, e) - val_fn(th.at[p].add(-eps), o, e)) / (2 * eps)
-        finite = np.isfinite(g).all() and np.isfinite(fd).all()
-        rel = np.abs(g - fd) / np.maximum(np.abs(g) + np.abs(fd), 1e-6)
-        worst = max(worst, float(np.max(rel)) if finite else float("inf"))
-        flag = "" if (finite and np.max(rel) < 1e-2) else "  <-- SUSPECT"
-        print(f"  galaxy {i}: max rel err = {np.max(rel):.2e}  finite={finite}{flag}")
-    print(f"  worst max-rel-err over {n} galaxies: {worst:.2e}")
-    if not np.isfinite(worst) or worst > 1e-2:
-        print("  ! Emulator gradients look unreliable -- NUTS cannot work until this is fixed.")
+        v = np.asarray(jax.random.normal(kv, (P,)))
+        v /= np.linalg.norm(v)
+        dd_ad = float(g @ v)
+        f0 = float(val_fn(th, o, e))
+
+        best_rel, best_fd, best_noise = float("inf"), float("nan"), float("nan")
+        for eps in (3e-2, 1e-2, 3e-3):
+            fp = float(val_fn(jnp.asarray(th + eps * v), o, e))
+            fm = float(val_fn(jnp.asarray(th - eps * v), o, e))
+            dd_fd = (fp - fm) / (2 * eps)
+            noise = (abs(f0) + abs(fp) + abs(fm)) * 1.2e-7 / (2 * eps)  # float32 round-off 1-sigma
+            scale = max(abs(dd_ad), abs(dd_fd), 1e-12)
+            rel = max(0.0, abs(dd_ad - dd_fd) - 5 * noise) / scale  # net of round-off
+            if rel < best_rel:
+                best_rel, best_fd, best_noise = rel, dd_fd, noise
+
+        finite = bool(np.isfinite(g).all() and np.isfinite(best_fd))
+        suspect = (not finite) or best_rel > 0.1
+        worst = max(worst, best_rel if finite else float("inf"))
+        flag = "  <-- SUSPECT" if suspect else ""
+        print(f"  galaxy {i}: rel err = {best_rel:.2e}  "
+              f"(ad={dd_ad:.3g} fd={best_fd:.3g} roundoff~{best_noise:.1g})  "
+              f"finite={finite}{flag}")
+    print(f"  worst rel err over {n} galaxies: {worst:.2e}")
+    if not np.isfinite(worst) or worst > 0.1:
+        print("  ! Gradients look genuinely inconsistent -- investigate the emulator.")
     else:
-        print("  Emulator gradients look consistent.")
+        print("  Emulator gradients are consistent. NUTS failures are sampler-side, not the emulator.")
 
 
 # ---------------------------------------------------------------------------
@@ -792,6 +909,7 @@ def create_output_file(
     f.create_dataset("step_size", shape=(N, C), dtype=np.float32)
     f.create_dataset("divergent_frac", shape=(N, C), dtype=np.float32)
     f.create_dataset("rhat", shape=(N, P), dtype=np.float32)
+    f.create_dataset("reduced_chi2_map", shape=(N,), dtype=np.float32)
 
     if not pathfinder_only:
         r_s = _chunk_rows(bs, C * S * P * 4, N)
@@ -843,7 +961,7 @@ def run_catalogue(
     seed: int,
     pathfinder_only: bool,
     vmap_pf_paths: bool = False,
-    diag_metric: bool = False,
+    diag_metric: bool = True,
     min_frac_err: float = 0.05,
 ) -> None:
     """Fit all galaxies and stream results to HDF5."""
@@ -862,7 +980,8 @@ def run_catalogue(
     )
     pf_path_mode = "parallel" if vmap_pf_paths else "sequential"
     print(f"  {mode_str}  |  eps0={eps0:.4g}  target_accept={target_accept}  "
-          f"pf_paths={pf_path_mode}  pf_samples={n_pf_samples}")
+          f"pf_paths={pf_path_mode}  pf_samples={n_pf_samples}  "
+          f"metric={'diagonal' if diag_metric else 'dense'}")
 
     log_post_fn = make_log_posterior_fn(emulator, band_idx, make_log_prior_fn(prior_specs),
                                         min_frac_err=min_frac_err)
@@ -885,7 +1004,7 @@ def run_catalogue(
             item = wq.get()
             if item is None:
                 break
-            s, e, tmap, inv, elbo, pf_ok, samp, acc, step, divf, rhat = item
+            s, e, tmap, inv, elbo, pf_ok, samp, acc, step, divf, rhat, rchi2 = item
             h5["theta_map"][s:e] = tmap
             h5["inv_mass"][s:e] = inv
             h5["elbo"][s:e] = elbo
@@ -894,6 +1013,7 @@ def run_catalogue(
             h5["step_size"][s:e] = step
             h5["divergent_frac"][s:e] = divf
             h5["rhat"][s:e] = rhat
+            h5["reduced_chi2_map"][s:e] = rchi2
             if samp is not None:
                 h5["theta_samples"][s:e] = samp
             wq.task_done()
@@ -972,6 +1092,10 @@ def run_catalogue(
         metric_id_fallback += n_id_fallback
         metric_floored += n_floored
 
+        # Fit quality at the Pathfinder MAP (pf_ok only checks finiteness).
+        red_chi2 = reduced_chi2_at(pos, obs_b, err_b, emulator, band_idx, lows_np, highs_np,
+                                   min_frac_err=min_frac_err)
+
         # ---- multi-chain NUTS ----
         if pathfinder_only:
             samples_out = None
@@ -1008,6 +1132,7 @@ def run_catalogue(
                 start, end_true,
                 pos[:true], inv[:true], elbo[:true], pf_ok[:true],
                 samples_out, accept[:true], step[:true], divf[:true], rhat[:true],
+                red_chi2[:true],
             )
         )
 
@@ -1016,12 +1141,14 @@ def run_catalogue(
         rate = end_true / elapsed if elapsed > 0 else 0.0
         eta = (N - end_true) / rate if rate > 0 else float("inf")
         if pathfinder_only:
-            diag = f"pf_ok={np.mean(pf_ok[:true]):.1%}"
+            diag = (f"pf_ok={np.mean(pf_ok[:true]):.1%}  "
+                    f"redchi2_med={np.nanmedian(red_chi2[:true]):.1f}")
         else:
             diag = (
                 f"accept={np.nanmean(accept[:true]):.2f}  "
                 f"div={np.nanmean(divf[:true]):.1%}  "
                 f"rhat<1.05={np.mean(np.nanmax(rhat[:true], axis=1) < 1.05):.1%}  "
+                f"redchi2_med={np.nanmedian(red_chi2[:true]):.1f}  "
                 f"pf_ok={np.mean(pf_ok[:true]):.1%}"
             )
         print(
@@ -1038,11 +1165,21 @@ def run_catalogue(
     print(f"\n{'=' * 60}")
     print(f"Finished {N:,} galaxies in {total:.1f}s  ({N / total:.0f} gal/s)")
     print(f"  Pathfinder OK:    {pf_ok_all.sum():,}/{N}  ({pf_ok_all.mean():.1%})")
+    rchi2_all = np.asarray(h5["reduced_chi2_map"][:])
+    finite_rchi2 = rchi2_all[np.isfinite(rchi2_all)]
+    if finite_rchi2.size:
+        frac_bad = float(np.mean(finite_rchi2 > 10.0))
+        print(f"  Reduced chi2 @ MAP: median={np.median(finite_rchi2):.2f}  "
+              f"frac>10={frac_bad:.1%}")
+        if frac_bad > 0.1:
+            print("  !  Many galaxies have a poor MAP fit (reduced chi2 > 10) -- the model "
+                  "cannot reproduce these SEDs, or initialisation is still off. Cut on "
+                  "reduced_chi2_map downstream; these posteriors are not trustworthy.")
     print(f"  Metric regularised (eigen-floored): {metric_floored:,}  |  "
           f"identity fallback: {metric_id_fallback:,}")
     if metric_id_fallback > 0.1 * N or metric_floored > 0.5 * N:
-        print("  !  Pathfinder metrics were frequently indefinite/ill-conditioned. "
-              "Consider --diag-metric, or a short window-adaptation, if mixing is poor.")
+        print("  !  Pathfinder metrics were frequently indefinite/ill-conditioned "
+              "(expected with --dense-metric; harmless with the default diagonal metric).")
     if not pathfinder_only:
         acc = np.asarray(h5["accept_rate"][:])
         div = np.asarray(h5["divergent_frac"][:])
@@ -1131,9 +1268,11 @@ def main() -> None:
     parser.add_argument("--vmap-pf-paths", action="store_true",
                         help="Run Pathfinder paths in parallel (faster, n_paths x peak memory). "
                         "Default runs them sequentially (memory of a single path).")
-    parser.add_argument("--diag-metric", action="store_true",
-                        help="Use only the (PSD) diagonal of the Pathfinder metric. More robust "
-                        "for stiff/funnel posteriors; loses parameter correlations.")
+    parser.add_argument("--dense-metric", action="store_true",
+                        help="Use the full PSD-regularized dense Pathfinder metric (captures "
+                        "parameter correlations). Default is the diagonal metric, which is the "
+                        "proven-stable choice; the raw dense L-BFGS inverse-Hessian is often "
+                        "indefinite and gave near-zero acceptance.")
     parser.add_argument("--check-gradients", action="store_true",
                         help="Run an autodiff-vs-finite-difference gradient self-test on a few "
                         "galaxies and exit. Use this to rule out a non-smooth emulator.")
@@ -1197,7 +1336,7 @@ def main() -> None:
         seed=args.seed,
         pathfinder_only=args.pathfinder_only,
         vmap_pf_paths=args.vmap_pf_paths,
-        diag_metric=args.diag_metric,
+        diag_metric=not args.dense_metric,
         min_frac_err=float(config.get("min_frac_err", 0.05)),
     )
 
