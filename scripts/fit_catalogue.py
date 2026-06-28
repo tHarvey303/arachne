@@ -269,6 +269,7 @@ _KNOWN_DISTS = {
 # ---------------------------------------------------------------------------
 
 def validate_prior_spec(name: str, spec: dict, bounds: tuple[float, float]) -> None:
+    """Raise ValueError if prior spec is invalid for the given parameter bounds."""
     dist = spec.get("dist", "uniform").lower()
     lo, hi = bounds
     if dist not in _KNOWN_DISTS:
@@ -286,6 +287,7 @@ def validate_prior_spec(name: str, spec: dict, bounds: tuple[float, float]) -> N
 
 
 def resolve_priors(config: dict) -> dict[str, dict]:
+    """Merge user-specified priors from config over the defaults for all SPS parameters."""
     priors: dict[str, dict] = {
         p: dict(DEFAULT_PRIORS.get(p, {"dist": "uniform"})) for p in SPS_PARAM_NAMES
     }
@@ -350,6 +352,7 @@ def make_log_prior_fn(prior_specs: dict[str, dict]):
 # ---------------------------------------------------------------------------
 
 def load_config(config_path: Path) -> dict:
+    """Load and validate a band-config JSON, adding resolved priors in place."""
     with open(config_path) as f:
         cfg = json.load(f)
     if "bands" not in cfg:
@@ -358,7 +361,9 @@ def load_config(config_path: Path) -> dict:
     cfg.setdefault("flux_unit", "nJy")
     unit = cfg["flux_unit"]
     if unit not in FLUX_UNIT_TO_NJY and unit != "ABmag":
-        raise ValueError(f"Unknown flux_unit {unit!r}. Use one of: {list(FLUX_UNIT_TO_NJY)} or 'ABmag'.")
+        raise ValueError(
+            f"Unknown flux_unit {unit!r}. Use one of: {list(FLUX_UNIT_TO_NJY)} or 'ABmag'."
+        )
     cfg.setdefault("min_frac_err", 0.05)
     cfg["resolved_priors"] = resolve_priors(cfg)
     non_uniform = {p: s for p, s in cfg["resolved_priors"].items() if s.get("dist") != "uniform"}
@@ -371,6 +376,7 @@ def load_config(config_path: Path) -> dict:
 
 
 def print_config_template(emulator_path: Path) -> None:
+    """Print a JSON config template to stdout for the given emulator's bands."""
     from arachne.emulator.parrot_emulator import ParrotEmulator
     emu = ParrotEmulator.load(emulator_path)
     bands = {}
@@ -439,6 +445,7 @@ def load_catalogue(catalogue_path: Path, config: dict) -> tuple[np.ndarray, np.n
 # ---------------------------------------------------------------------------
 
 def load_emulator_and_band_indices(emulator_path: Path, band_names: list[str]) -> tuple:
+    """Load the emulator and return (emulator, band_idx) for the requested bands."""
     from arachne.emulator.parrot_emulator import ParrotEmulator
     emu = ParrotEmulator.load(emulator_path)
     print(f"\nLoaded ParrotEmulator: {len(emu.param_names)} params, {len(emu.band_names)} bands")
@@ -672,7 +679,11 @@ def run_nss_galaxy(
     termination: float,
     n_samples_out: int,
 ) -> tuple:
-    """Run NSS on one galaxy.  Returns (samples_phys, logz, logz_err, ess, n_steps, n_dead, elapsed)."""
+    """Run NSS on one galaxy.
+
+    Returns:
+        Tuple of (samples_phys, logz, logz_err, ess, n_steps, n_dead, elapsed).
+    """
     lows_np  = np.array([PARAM_BOUNDS[p][0] for p in SPS_PARAM_NAMES], dtype=np.float32)
     highs_np = np.array([PARAM_BOUNDS[p][1] for p in SPS_PARAM_NAMES], dtype=np.float32)
     P = len(SPS_PARAM_NAMES)
@@ -730,6 +741,8 @@ def split_rhat(
         samples: (B, C, S, P).  If lows/highs provided, applies sigmoid to
                  convert from unconstrained to physical space before computing.
                  Pass lows=None for samples already in physical space.
+        lows: lower bounds (P,) for sigmoid transform; None skips transform.
+        highs: upper bounds (P,) for sigmoid transform; None skips transform.
 
     Returns:
         (B, P) split-R-hat.
@@ -927,6 +940,7 @@ def create_output_file_nuts(
     galaxy_ids: list,
     pathfinder_only: bool,
 ) -> h5py.File:
+    """Create and return an open HDF5 file pre-allocated for NUTS results."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
     f = h5py.File(output_path, "w")
     try:
@@ -941,9 +955,9 @@ def create_output_file_nuts(
     bs  = min(batch_size, N)
 
     r_map = _chunk_rows(bs, P * 4, N)
-    f.create_dataset("theta_map",        shape=(N, P),    dtype=np.float32, chunks=(r_map, P), **ckw)
+    f.create_dataset("theta_map", shape=(N, P), dtype=np.float32, chunks=(r_map, P), **ckw)
     r_inv = _chunk_rows(bs, P * P * 4, N)
-    f.create_dataset("inv_mass",         shape=(N, P, P), dtype=np.float32, chunks=(r_inv, P, P), **ckw)
+    f.create_dataset("inv_mass", shape=(N, P, P), dtype=np.float32, chunks=(r_inv, P, P), **ckw)
     f.create_dataset("elbo",             shape=(N,),      dtype=np.float32)
     f.create_dataset("pathfinder_ok",    shape=(N,),      dtype=bool)
     f.create_dataset("accept_rate",      shape=(N, C),    dtype=np.float32)
@@ -981,6 +995,7 @@ def create_output_file_nss(
     num_delete: int,
     termination: float,
 ) -> h5py.File:
+    """Create and return an open HDF5 file pre-allocated for NSS results."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
     f = h5py.File(output_path, "w")
     try:
@@ -1040,6 +1055,7 @@ def run_catalogue(
     diag_metric: bool = True,
     min_frac_err: float = 0.05,
 ) -> None:
+    """Run Pathfinder+NUTS fitting for each galaxy in the catalogue."""
     N, n_bands = obs_flux.shape
     P = len(SPS_PARAM_NAMES)
     band_names = [emulator.band_names[int(i)] for i in band_idx]
@@ -1266,6 +1282,7 @@ def run_catalogue_nss(
     min_frac_err: float,
     seed: int,
 ) -> None:
+    """Run NSS fitting for each galaxy in the catalogue."""
     if not _NSS_AVAILABLE:
         raise RuntimeError("blackjax.ns not available — cannot run NSS.")
 
@@ -1391,8 +1408,9 @@ def check_gpu_linalg() -> None:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
+    """CLI entry point: parse args, load data, and dispatch to NUTS or NSS fitter."""
     parser = argparse.ArgumentParser(
-        description="Fit a galaxy catalogue with GPU-batched Pathfinder+NUTS or Nested Slice Sampling (NSS).",
+        description="Fit a galaxy catalogue with GPU-batched Pathfinder+NUTS or NSS.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("catalogue", nargs="?", help="Input catalogue (FITS/CSV/HDF5)")
@@ -1403,8 +1421,10 @@ def main() -> None:
                         help="Inference method.  'nuts': GPU-batched Pathfinder+NUTS (fast, "
                              "batched).  'nss': Nested Slice Sampling (sequential, gradient-free, "
                              "provides logZ, better for multimodal posteriors).")
-    parser.add_argument("--n-galaxies", type=int, default=None,
-                        help="Fit only N galaxies (useful for testing or splitting across workers).")
+    parser.add_argument(
+        "--n-galaxies", type=int, default=None,
+        help="Fit only N galaxies (useful for testing or splitting across workers).",
+    )
     parser.add_argument("--row-start",  type=int, default=0,
                         help="First catalogue row to process (0-based). Use with --n-galaxies "
                              "to divide a catalogue across parallel workers.")

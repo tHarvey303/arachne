@@ -429,6 +429,7 @@ def create_output_file(
     compare_nuts: bool,
     run_args: dict,
 ) -> h5py.File:
+    """Create and return an open HDF5 file pre-allocated for NSS (and optional NUTS) results."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
     f = h5py.File(output_path, "w")
 
@@ -436,7 +437,11 @@ def create_output_file(
         f.create_dataset("galaxy_id", data=np.array(galaxy_ids, dtype=np.int64))
     except (ValueError, TypeError):
         dt = h5py.string_dtype()
-        f.create_dataset("galaxy_id", data=np.array([str(g) for g in galaxy_ids], dtype=object), dtype=dt)
+        f.create_dataset(
+            "galaxy_id",
+            data=np.array([str(g) for g in galaxy_ids], dtype=object),
+            dtype=dt,
+        )
 
     N, S, P = n_galaxies, n_samples_out, _P
     ckw = dict(compression="gzip", compression_opts=4)
@@ -500,6 +505,7 @@ def run_catalogue_nss(
     n_chains_nuts: int,
     chain_jitter: float,
 ) -> None:
+    """Run NSS fitting (and optional NUTS comparison) for each galaxy in the catalogue."""
     N, n_bands = obs_flux.shape
     band_names = [emulator.band_names[int(i)] for i in band_idx]
     lows_np = np.array([PARAM_BOUNDS[p][0] for p in SPS_PARAM_NAMES], dtype=np.float32)
@@ -688,8 +694,9 @@ def run_catalogue_nss(
 
 
 def main() -> None:
+    """CLI entry point: parse args, load data, and run NSS catalogue fitting."""
     parser = argparse.ArgumentParser(
-        description="Fit galaxy catalogue with Nested Slice Sampling (NSS) and optionally compare to NUTS.",
+        description="Fit galaxy catalogue with NSS (optionally compare to NUTS).",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("catalogue", help="Input catalogue (FITS/CSV/HDF5)")

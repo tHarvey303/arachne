@@ -347,7 +347,6 @@ def _fig2_param_profiles(data, args, output_dir):
     params_val = data["params_val"]
     abs_pct = data["abs_pct_detected"]
     param_names = data["param_names"]
-    band_names = data["band_names"]
     n_params = len(param_names)
     n_bins = args.n_bins
 
@@ -372,7 +371,10 @@ def _fig2_param_profiles(data, args, output_dir):
         bin_edges = np.unique(bin_edges)  # collapse duplicates for discrete params
         actual_bins = len(bin_edges) - 1
         if actual_bins < 2:
-            ax.text(0.5, 0.5, "insufficient range", ha="center", va="center", transform=ax.transAxes)
+            ax.text(
+                0.5, 0.5, "insufficient range",
+                ha="center", va="center", transform=ax.transAxes,
+            )
             ax.set_title(pname, fontsize=9)
             continue
 
@@ -475,7 +477,6 @@ def _fig3_2d_heatmaps(data, args, importances, output_dir):
     # Rank parameters by importance
     ranked = sorted(importances, key=importances.get, reverse=True)
     pivot = ranked[0]
-    pivot_idx = param_names.index(pivot)
 
     # Pairs: pivot vs all others, plus top-2 vs top-3 if budget allows
     other_params = [p for p in ranked if p != pivot]
@@ -611,7 +612,10 @@ def _fig4_flux_level(data, output_dir):
             alpha=0.25, color="steelblue",
         )
         ax.plot(centers[finite_b], med_e[finite_b], color="steelblue", lw=1.8, label="Median")
-        ax.plot(centers[finite_b], p84_e[finite_b], color="steelblue", lw=1, ls="--", label="84th pct")
+        ax.plot(
+            centers[finite_b], p84_e[finite_b],
+            color="steelblue", lw=1, ls="--", label="84th pct",
+        )
         ax.axhline(1.0, color="red", ls="--", lw=1, label="1% target")
 
         # Shade dropout regime (flux < 5 nJy, log < ~0.7)
@@ -675,8 +679,11 @@ def _fig5_outliers(data, args, output_dir):
         bins = np.linspace(lo, hi, 30)
         ax.hist(all_vals, bins=bins, density=True, histtype="step",
                 color="steelblue", lw=1.5, label=f"All (N={len(all_vals)})")
-        ax.hist(out_vals, bins=bins, density=True, histtype="stepfilled",
-                color="tomato", alpha=0.45, label=f"Worst {100-args.outlier_percentile:.0f}% (N={len(out_vals)})")
+        ax.hist(
+            out_vals, bins=bins, density=True, histtype="stepfilled",
+            color="tomato", alpha=0.45,
+            label=f"Worst {100-args.outlier_percentile:.0f}% (N={len(out_vals)})",
+        )
 
         # KS statistic
         from scipy.stats import ks_2samp
@@ -825,12 +832,6 @@ def main(argv=None):
 
     data = _load_and_predict(args, emulator)
     _print_summary(data, args)
-
-    try:
-        import matplotlib.pyplot as plt
-    except ImportError:
-        print("matplotlib not installed — skipping all plots.")
-        return 1
 
     _fig1_error_summary(data, output_dir)
     importances = _fig2_param_profiles(data, args, output_dir)

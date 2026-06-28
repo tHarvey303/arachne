@@ -67,7 +67,6 @@ def plot_corner(
         dpi:         figure resolution.
     """
     labels = [_LABELS.get(p, p) for p in param_names]
-    P = samples.shape[1]
 
     # Drop samples with any NaN/Inf (shouldn't happen but be safe).
     ok = np.isfinite(samples).all(axis=1)
@@ -114,13 +113,16 @@ def plot_corner(
 
 
 def main() -> None:
+    """CLI entry point: generate corner plots for NSS posterior samples."""
     parser = argparse.ArgumentParser(
         description="Corner plots from NSS HDF5 posterior samples.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("hdf5",       help="NSS results HDF5 file.")
-    parser.add_argument("--out-dir",  default=None,
-                        help="Output directory.  Defaults to <hdf5_stem>/corners/ next to the file.")
+    parser.add_argument(
+        "--out-dir", default=None,
+        help="Output directory.  Defaults to <hdf5_stem>/corners/ next to the file.",
+    )
     parser.add_argument("--n-galaxies", type=int, default=None,
                         help="Plot only the first N galaxies.")
     parser.add_argument("--galaxy-ids", type=int, nargs="+", default=None,

@@ -233,7 +233,6 @@ def report_recovery(samples, spatial_model, theta_true: np.ndarray):
     """Decode posterior samples and compare to truth SPS parameters."""
     print("\n--- Step 6: Parameter recovery ---")
 
-    n_samples = samples.shape[0]
     K = spatial_model.n_components
     N_sps = len(SPS_PARAM_NAMES)
     params_per_comp = 5 + N_sps  # mu_y, mu_x, log_sig_y, log_sig_x, atanh_rho + sps
@@ -268,6 +267,7 @@ def report_recovery(samples, spatial_model, theta_true: np.ndarray):
 
 
 def main():
+    """Entry point: generate mock JWST image, train emulator, and run spatial SED fitting."""
     lib_path = OUTDIR / "training_library.h5"
     if not lib_path.exists():
         raise FileNotFoundError(

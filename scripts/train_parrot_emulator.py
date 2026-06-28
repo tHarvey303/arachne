@@ -203,7 +203,8 @@ def main(argv=None):
     print(f"Bands    : {len(args.bands)} bands")
     print(f"Hidden   : {args.hidden}")
     print(f"Epochs   : {args.epochs}  Batch: {args.batch}  LR schedule: {args.lr_schedule}")
-    print(f"Flux floor: {args.flux_floor:.2e} nJy  asinh_mu0: {'auto' if args.asinh_mu0 is None else args.asinh_mu0}")
+    mu0_str = "auto" if args.asinh_mu0 is None else args.asinh_mu0
+    print(f"Flux floor: {args.flux_floor:.2e} nJy  asinh_mu0: {mu0_str}")
 
     emulator = ParrotEmulator.from_synference_library(
         library_path=args.library,

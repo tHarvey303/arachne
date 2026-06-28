@@ -372,7 +372,8 @@ def make_mock_images() -> dict:
 
 def _convolve_psf(image: np.ndarray, psf: np.ndarray) -> np.ndarray:
     from scipy.ndimage import convolve
-    return convolve(image.astype(np.float64), psf.astype(np.float64), mode="reflect").astype(np.float32)
+    result = convolve(image.astype(np.float64), psf.astype(np.float64), mode="reflect")
+    return result.astype(np.float32)
 
 
 def _analytic_mock(psf_kernel: np.ndarray) -> np.ndarray:
@@ -408,6 +409,7 @@ def _write_fits(array: np.ndarray, path: Path) -> None:
 
 
 def main() -> None:
+    """CLI entry point: generate synthetic JWST-like multi-band image cubes."""
     from synthesizer.grid import Grid
     from synthesizer.instruments import FilterCollection
 

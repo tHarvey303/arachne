@@ -18,6 +18,8 @@ def _rough(seed=0, H=8, W=8, C=2):
 
 
 class TestGradientPenaltyPrior:
+    """Tests for GradientPenaltyPrior."""
+
     def test_uniform_map_zero_penalty(self):
         """Spatially constant map has zero gradient → log_prob = 0."""
         prior = GradientPenaltyPrior(strength=1.0)
@@ -74,6 +76,8 @@ class TestGradientPenaltyPrior:
 
 
 class TestTotalVariationPrior:
+    """Tests for TotalVariationPrior."""
+
     def test_rough_map_negative(self):
         """Spatially varying map has log_prob < 0."""
         prior = TotalVariationPrior(strength=1.0)

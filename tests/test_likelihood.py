@@ -26,6 +26,8 @@ def _obs(flux, variance=None, mask=None):
 
 
 class TestGaussianLikelihood:
+    """Tests for GaussianLikelihood."""
+
     def test_returns_scalar(self):
         """log_likelihood returns a shape-() scalar."""
         obs = _obs(jnp.ones((2, 8, 8)))

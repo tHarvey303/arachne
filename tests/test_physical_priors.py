@@ -8,8 +8,11 @@ from arachne.priors.physical import IndependentUniformPrior, LogNormalPrior
 
 
 class TestIndependentUniformPrior:
+    """Tests for IndependentUniformPrior."""
+
     @pytest.fixture
     def prior(self):
+        """Three-dimensional uniform prior for testing."""
         return IndependentUniformPrior(
             lows=jnp.array([0.0, -1.0, 5.0]),
             highs=jnp.array([1.0, 1.0, 10.0]),
@@ -76,8 +79,11 @@ class TestIndependentUniformPrior:
 
 
 class TestLogNormalPrior:
+    """Tests for LogNormalPrior."""
+
     @pytest.fixture
     def prior(self):
+        """Two-dimensional log-normal prior for testing."""
         return LogNormalPrior(
             mu=jnp.array([9.0, 8.5]),
             sigma=jnp.array([1.0, 0.5]),

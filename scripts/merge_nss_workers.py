@@ -6,7 +6,7 @@ This script concatenates them in order and writes one combined HDF5.
 
 Usage
 -----
-    python scripts/merge_nss_workers.py worker_0/results.hdf5 worker_1/results.hdf5 ... -o results.hdf5
+    python scripts/merge_nss_workers.py worker_0/results.hdf5 worker_1/results.hdf5 -o results.hdf5
     python scripts/merge_nss_workers.py worker_*/results.hdf5 -o merged/results.hdf5
 """
 
@@ -20,6 +20,7 @@ import numpy as np
 
 
 def main() -> None:
+    """CLI entry point: merge per-worker NSS HDF5 outputs into a single file."""
     parser = argparse.ArgumentParser(
         description="Merge per-worker NSS HDF5 outputs.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,

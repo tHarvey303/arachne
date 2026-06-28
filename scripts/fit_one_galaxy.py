@@ -52,7 +52,6 @@ import numpy as np
 try:
     import blackjax
     import blackjax.vi.pathfinder as pf_mod
-    from blackjax.optimizers.lbfgs import lbfgs_inverse_hessian_formula_1
 except ImportError as e:  # pragma: no cover
     raise ImportError("pip install blackjax") from e
 
@@ -95,7 +94,9 @@ LOGMASS_IDX = SPS_PARAM_NAMES.index("log_mass")
 AV_IDX = SPS_PARAM_NAMES.index("Av")
 
 FLUX_UNIT_TO_NJY = {"nJy": 1.0, "uJy": 1e3, "ujy": 1e3, "µJy": 1e3, "mJy": 1e6, "Jy": 1e9}
-_KNOWN_DISTS = {"uniform", "loguniform", "normal", "studentt", "halfnormal", "exponential", "lognormal"}
+_KNOWN_DISTS = {
+    "uniform", "loguniform", "normal", "studentt", "halfnormal", "exponential", "lognormal",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -114,7 +115,8 @@ def _build_prior_logprob(spec, lo, hi):
         return lambda x: -0.5 * LOG2PI - math.log(sc) - 0.5 * ((x - loc) / sc) ** 2
     if dist == "studentt":
         df, loc, sc = float(spec["df"]), float(spec.get("loc", 0.0)), float(spec["scale"])
-        c = math.lgamma(0.5 * (df + 1)) - math.lgamma(0.5 * df) - 0.5 * math.log(df * math.pi) - math.log(sc)
+        c = (math.lgamma(0.5 * (df + 1)) - math.lgamma(0.5 * df)
+             - 0.5 * math.log(df * math.pi) - math.log(sc))
         return lambda x: c - 0.5 * (df + 1) * jnp.log1p(((x - loc) / sc) ** 2 / df)
     if dist == "halfnormal":
         sc = float(spec["scale"])
@@ -129,6 +131,7 @@ def _build_prior_logprob(spec, lo, hi):
 
 
 def make_log_prior_fn(prior_specs):
+    """Return a scalar log-prior function over the physical SPS parameter vector."""
     fns = [_build_prior_logprob(prior_specs[p], *PARAM_BOUNDS[p]) for p in SPS_PARAM_NAMES]
 
     def log_prior(x):
@@ -141,6 +144,7 @@ def make_log_prior_fn(prior_specs):
 
 
 def resolve_priors(config):
+    """Merge user prior overrides from config dict over the SPS parameter defaults."""
     priors = {p: dict(DEFAULT_PRIORS[p]) for p in SPS_PARAM_NAMES}
     for k, v in (config.get("priors", {}) or {}).items():
         if k not in SPS_PARAM_NAMES:
@@ -161,10 +165,12 @@ _HIGHS = jnp.array([PARAM_BOUNDS[p][1] for p in SPS_PARAM_NAMES], dtype=jnp.floa
 
 
 def to_phys(theta):
+    """Map unconstrained theta to physical SPS parameter space via sigmoid."""
     return _LOWS + (_HIGHS - _LOWS) * jax.nn.sigmoid(theta)
 
 
 def to_theta(x):
+    """Map physical SPS parameters to unconstrained space (inverse of to_phys)."""
     u = jnp.clip((jnp.asarray(x) - _LOWS) / (_HIGHS - _LOWS), 1e-4, 1.0 - 1e-4)
     return jnp.log(u / (1.0 - u))
 
@@ -175,6 +181,7 @@ def to_theta(x):
 
 
 def load_config(config_path):
+    """Load and validate a band-config JSON, resolving priors in place."""
     with open(config_path) as f:
         cfg = json.load(f)
     if "bands" not in cfg:
@@ -240,6 +247,7 @@ def make_mock(emulator, band_idx, seed=0):
 
 
 def load_emulator(emulator_path, band_names):
+    """Load the emulator and return (emulator, band_idx) for the requested bands."""
     from arachne.emulator.parrot_emulator import ParrotEmulator
 
     emu = ParrotEmulator.load(emulator_path)
@@ -258,6 +266,7 @@ def load_emulator(emulator_path, band_names):
 
 
 def make_log_posterior(emulator, band_idx, obs, err, log_prior_fn, min_frac_err=0.0):
+    """Build and return a jit-able log-posterior closure over unconstrained theta."""
     bidx = jnp.asarray(band_idx, jnp.int32)
     obs_j, err_j = jnp.asarray(obs), jnp.asarray(err)
     mask = (err_j < OBS_MASK_THRESH).astype(jnp.float32)
@@ -282,6 +291,7 @@ def make_log_posterior(emulator, band_idx, obs, err, log_prior_fn, min_frac_err=
 
 
 def reduced_chi2(theta, obs, err, emulator, band_idx, min_frac_err=0.0):
+    """Return (reduced_chi2, predicted_flux) at the given unconstrained theta."""
     x = to_phys(jnp.asarray(theta))
     pred = np.asarray(emulator.predict(x[None, :]))[0][np.asarray(band_idx)]
     mask = np.asarray(err) < OBS_MASK_THRESH
@@ -350,6 +360,7 @@ def robust_init(obs, err, emulator, band_idx, n_z=60, min_frac_err=0.0):
 
 
 def psd_metric(inv, diag_only, cond_cap=1e6):
+    """Project an inverse-mass matrix to the nearest PSD matrix, optionally diagonal."""
     inv = 0.5 * (inv + inv.T)
     w, V = jnp.linalg.eigh(inv)
     floor = jnp.where(w[-1] > 0, w[-1] / cond_cap, 1.0)
@@ -409,13 +420,18 @@ def sample_pathfinder_nuts(logpost, theta0, key, n_warmup, n_samples, n_chains,
             return out
 
         pos, ar, dv = run(state, skey)
-        samples.append(np.asarray(pos)); acc.append(float(np.mean(ar)))
-        div.append(float(np.mean(dv))); steps.append(float(params["step_size"]))
+        samples.append(np.asarray(pos))
+        acc.append(float(np.mean(ar)))
+        div.append(float(np.mean(dv)))
+        steps.append(float(params["step_size"]))
     return np.stack(samples), {"accept": acc, "divergence": div,
                                "step_size": steps, "metric": "diag" if diag_metric else "dense"}
 
 
-def sample_window_nuts(logpost, theta0, key, n_warmup, n_samples, n_chains, target_accept, diag_metric):
+def sample_window_nuts(
+    logpost, theta0, key, n_warmup, n_samples, n_chains, target_accept, diag_metric,
+):
+    """Run blackjax window-adaptation NUTS and return (samples, info dict)."""
     samples, acc, div, steps = [], [], [], []
     for c, init in enumerate(_chain_inits(theta0, key, n_chains, 0.3)):
         wkey, skey = jax.random.split(jax.random.fold_in(key, 100 + c))
@@ -436,8 +452,10 @@ def sample_window_nuts(logpost, theta0, key, n_warmup, n_samples, n_chains, targ
             return out
 
         pos, ar, dv = run(state, skey)
-        samples.append(np.asarray(pos)); acc.append(float(np.mean(ar)))
-        div.append(float(np.mean(dv))); steps.append(float(params["step_size"]))
+        samples.append(np.asarray(pos))
+        acc.append(float(np.mean(ar)))
+        div.append(float(np.mean(dv)))
+        steps.append(float(params["step_size"]))
     return np.stack(samples), {"accept": acc, "divergence": div,
                                "step_size": steps, "metric": "diag" if diag_metric else "dense"}
 
@@ -487,7 +505,8 @@ def sample_mclmc(logpost, theta0, key, n_warmup, n_samples, n_chains):
 # ---------------------------------------------------------------------------
 
 
-def split_rhat(samples):  # (C, S, P)
+def split_rhat(samples):
+    """Compute split-R-hat per parameter from samples shaped (C, S, P)."""
     C, S, P = samples.shape
     n = S // 2
     if n < 2:
@@ -529,7 +548,9 @@ def print_sed(obs, err, pred, band_names, min_frac_err=0.0):
 
 
 def print_recovery(phys, true_phys):
-    print(f"\n  {'parameter':<22}{'truth':>10}{'median':>10}{'-1sig':>9}{'+1sig':>9}{'bias/sig':>9}")
+    """Print posterior summary table comparing medians and ±1σ to truth."""
+    hdr = f"\n  {'parameter':<22}{'truth':>10}{'median':>10}{'-1sig':>9}{'+1sig':>9}{'bias/sig':>9}"
+    print(hdr)
     print("  " + "-" * 68)
     for i, name in enumerate(SPS_PARAM_NAMES):
         med = np.median(phys[:, i])
@@ -546,6 +567,7 @@ def print_recovery(phys, true_phys):
 
 
 def main():
+    """CLI entry point: fit a single galaxy SED with configurable sampler."""
     ap = argparse.ArgumentParser(description="Fit a single galaxy SED (debuggable).")
     ap.add_argument("catalogue", nargs="?", help="catalogue (FITS/CSV/HDF5)")
     ap.add_argument("config", nargs="?", help="band config JSON")
@@ -559,7 +581,8 @@ def main():
     ap.add_argument("--n-samples", type=int, default=1000)
     ap.add_argument("--n-chains", type=int, default=4)
     ap.add_argument("--target-accept", type=float, default=0.8)
-    ap.add_argument("--step-size", type=float, default=0.0, help="fixed NUTS step (pathfinder_nuts); 0=auto")
+    ap.add_argument("--step-size", type=float, default=0.0,
+                    help="fixed NUTS step (pathfinder_nuts); 0=auto")
     ap.add_argument("--dense-metric", action="store_true")
     ap.add_argument("--no-mass-init", action="store_true", help="start at domain midpoint instead")
     ap.add_argument("--seed", type=int, default=0)
@@ -591,8 +614,8 @@ def main():
         true_phys = None
 
     P = len(SPS_PARAM_NAMES)
-    print(f"\n=== Galaxy {gid} | {int((np.asarray(err) < OBS_MASK_THRESH).sum())}/{len(band_names)} "
-          f"bands | sampler={args.sampler} ===")
+    n_obs = int((np.asarray(err) < OBS_MASK_THRESH).sum())
+    print(f"\n=== Galaxy {gid} | {n_obs}/{len(band_names)} bands | sampler={args.sampler} ===")
 
     min_frac_err = float(cfg.get("min_frac_err", 0.05))
     print(f"Min fractional error floor: {min_frac_err:.1%}")
@@ -632,7 +655,9 @@ def main():
     rhat, ess = diagnostics(samples)
     phys = np.asarray(jax.vmap(to_phys)(jnp.asarray(samples.reshape(-1, P))))
     med_theta = np.median(samples.reshape(-1, P), axis=0)
-    rc_post, pred_post = reduced_chi2(med_theta, obs, err, emulator, band_idx, min_frac_err=min_frac_err)
+    rc_post, pred_post = reduced_chi2(
+        med_theta, obs, err, emulator, band_idx, min_frac_err=min_frac_err,
+    )
 
     print(f"\n--- diagnostics ({args.sampler}) ---")
     for k, v in info.items():
@@ -641,7 +666,10 @@ def main():
     print(f"  max R-hat: {np.nanmax(rhat):.3f}   "
           f"min ESS: {np.nanmin(ess):.0f}   ({samples.shape[0]}x{samples.shape[1]} draws)")
     worst = int(np.nanargmax(rhat))
-    print(f"  worst-mixing param: {SPS_PARAM_NAMES[worst]} (R-hat={rhat[worst]:.3f}, ESS={ess[worst]:.0f})")
+    print(
+        f"  worst-mixing param: {SPS_PARAM_NAMES[worst]}"
+        f" (R-hat={rhat[worst]:.3f}, ESS={ess[worst]:.0f})"
+    )
     print("\n  SED at posterior median:")
     print_sed(obs, err, pred_post, band_names, min_frac_err=min_frac_err)
     print_recovery(phys, true_phys)

@@ -39,10 +39,12 @@ def parse_flags(flag_col) -> np.ndarray:
 
 
 def nmad(dz: np.ndarray) -> float:
+    """Normalised median absolute deviation of a redshift error array."""
     return 1.4826 * float(np.median(np.abs(dz - np.median(dz))))
 
 
 def main() -> None:
+    """CLI entry point: plot spec-z vs NSS photo-z comparison."""
     parser = argparse.ArgumentParser(
         description="spec-z vs NSS photo-z comparison plot.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -88,7 +90,9 @@ def main() -> None:
     specz = np.array([cat_z[id_to_row[int(g)]] for g in gids if int(g) in id_to_row])
     flags = np.array([cat_flag[id_to_row[int(g)]] for g in gids if int(g) in id_to_row])
     keep  = np.array([int(g) in id_to_row for g in gids])
-    z_med  = z_med[keep];  z_elo = z_elo[keep];  z_ehi = z_ehi[keep]
+    z_med = z_med[keep]
+    z_elo = z_elo[keep]
+    z_ehi = z_ehi[keep]
 
     dz = (z_med - specz) / (1 + specz)
 

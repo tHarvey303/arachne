@@ -54,7 +54,9 @@ def main():
     psf_paths = {b: args.flux_dir / f"psf_{b.split('.')[-1].lower()}.fits" for b in band_names}
 
     print("Loading observations...")
-    obs = ObservationCube.from_fits(flux_paths=flux_paths, variance_paths=var_paths, band_names=band_names)
+    obs = ObservationCube.from_fits(
+        flux_paths=flux_paths, variance_paths=var_paths, band_names=band_names,
+    )
 
     print("Loading PSF models...")
     psf = PSFModel.from_fits(psf_paths)
