@@ -647,7 +647,7 @@ def build_nss_fns(
 
 
 def _logz_from_weights(logw: jnp.ndarray) -> tuple[float, float]:
-    """logZ point estimate and MC std from (N_particles, 100) log-weight matrix."""
+    """LogZ point estimate and MC std from (N_particles, 100) log-weight matrix."""
     lw = jnp.nan_to_num(logw, nan=jnp.nan_to_num(logw).min())
     logz_draws = jax.scipy.special.logsumexp(lw, axis=0)  # (100,)
     return float(logz_draws.mean()), float(logz_draws.std())
@@ -730,6 +730,7 @@ def split_rhat(
         samples: (B, C, S, P).  If lows/highs provided, applies sigmoid to
                  convert from unconstrained to physical space before computing.
                  Pass lows=None for samples already in physical space.
+
     Returns:
         (B, P) split-R-hat.
     """
@@ -1278,8 +1279,8 @@ def run_catalogue_nss(
     print(f"  num_live={num_live}  num_inner_steps={num_inner_steps}  "
           f"num_delete={num_delete}  termination={termination}", flush=True)
     print(f"  n_samples_out={n_samples_out}  min_frac_err={min_frac_err:.1%}", flush=True)
-    print(f"  Note: XLA compilation on first galaxy takes ~10-20 min; "
-          f"subsequent galaxies reuse the compiled binary.", flush=True)
+    print("  Note: XLA compilation on first galaxy takes ~10-20 min; "
+          "subsequent galaxies reuse the compiled binary.", flush=True)
 
     log_prior_fn = make_log_prior_fn(prior_specs)
     log_like_fn  = make_log_likelihood_physical(emulator, band_idx, min_frac_err)
@@ -1313,7 +1314,7 @@ def run_catalogue_nss(
         cache_hit = is_cache_used()
     except Exception:
         pass
-    source = "loaded from XLA cache" if cache_hit else f"freshly compiled"
+    source = "loaded from XLA cache" if cache_hit else "freshly compiled"
     print(f"  Done in {t_warmup:.1f}s ({source}).", flush=True)
 
     rng    = jax.random.PRNGKey(seed)   # reset for reproducibility

@@ -38,7 +38,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import h5py
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -142,7 +141,7 @@ def load_observations():
         band_names=FILTER_CODES,
         pixel_scale=PIXEL_SCALE,
     )
-    print(f"\n--- Step 3: Observation ---")
+    print("\n--- Step 3: Observation ---")
     print(f"  Shape: {obs.flux.shape}  ({obs.n_bands} bands, {obs.image_shape} pix)")
     print(f"  Flux range: [{obs.flux.min():.1f}, {obs.flux.max():.1f}] nJy")
     return obs
@@ -170,7 +169,7 @@ def build_forward_model(obs, psf_model, emulator):
         param_bounds=PARAM_BOUNDS,
         image_shape=(NPIX, NPIX),
     )
-    print(f"\n--- Step 4: Forward model ---")
+    print("\n--- Step 4: Forward model ---")
     print(f"  Spatial model: K=2 GMM, {spatial_model.n_params} free params")
 
     fwd = ForwardModel.build(obs=obs, psf_model=psf_model,
@@ -197,7 +196,7 @@ def run_nuts(fwd, spatial_model, theta_true: np.ndarray):
     """Run NUTSSampler, initialised near the truth."""
     from arachne.inference.nuts_sampler import NUTSSampler
 
-    print(f"\n--- Step 5: NUTS sampling ---")
+    print("\n--- Step 5: NUTS sampling ---")
 
     # Initialise with small perturbation around truth
     rng = np.random.default_rng(1)
@@ -232,10 +231,7 @@ def run_nuts(fwd, spatial_model, theta_true: np.ndarray):
 
 def report_recovery(samples, spatial_model, theta_true: np.ndarray):
     """Decode posterior samples and compare to truth SPS parameters."""
-    import jax.numpy as jnp
-    from arachne.spatial.gmm import GaussianMixtureSpatialModel
-
-    print(f"\n--- Step 6: Parameter recovery ---")
+    print("\n--- Step 6: Parameter recovery ---")
 
     n_samples = samples.shape[0]
     K = spatial_model.n_components

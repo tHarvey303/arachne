@@ -88,19 +88,18 @@ _SCRIPT_DIR = Path(__file__).parent
 sys.path.insert(0, str(_SCRIPT_DIR))
 
 from fit_catalogue import (  # noqa: E402
-    SPS_PARAM_NAMES,
-    PARAM_BOUNDS,
-    LOG2PI,
-    MISSING_SIGMA,
-    OBS_MASK_THRESH,
     DEFAULT_EMULATOR,
-    load_config,
-    load_catalogue,
-    load_emulator_and_band_indices,
-    make_log_prior_fn,
-    make_log_posterior_fn,
-    split_rhat,
+    LOG2PI,
+    OBS_MASK_THRESH,
+    PARAM_BOUNDS,
+    SPS_PARAM_NAMES,
     check_gpu_linalg,
+    load_catalogue,
+    load_config,
+    load_emulator_and_band_indices,
+    make_log_posterior_fn,
+    make_log_prior_fn,
+    split_rhat,
 )
 
 DEFAULT_NSS_OUTPUT = Path("outputs/catalogue_fit/results_nss.hdf5")
@@ -187,7 +186,7 @@ def build_nss_fns(
 
 
 def _logz_from_weights(logw: jnp.ndarray):
-    """logZ point estimate and MC std from log-weight matrix (N, 100)."""
+    """LogZ point estimate and MC std from log-weight matrix (N, 100)."""
     lw = jnp.nan_to_num(logw, nan=jnp.nan_to_num(logw).min())
     # logsumexp over particles for each of the 100 shrinkage draws
     logz_draws = jax.scipy.special.logsumexp(lw, axis=0)  # (100,)
@@ -221,7 +220,7 @@ def run_nss_galaxy(
 ):
     """Run NSS on one galaxy.
 
-    Returns
+    Returns:
     -------
     samples_phys : ndarray (n_samples_out, P)
         Posterior samples in physical parameter space.
@@ -639,7 +638,7 @@ def run_catalogue_nss(
     print(f"Done: {N} galaxies in {total:.1f}s")
 
     nss_arr = np.array(nss_times)
-    print(f"\nNSS timing (excl. first-galaxy JIT):")
+    print("\nNSS timing (excl. first-galaxy JIT):")
     print(f"  median {np.median(nss_arr):.2f}s  mean {np.mean(nss_arr):.2f}s  "
           f"total {nss_arr.sum():.1f}s")
     print(f"  logZ:  mean={np.nanmean(h5['nss_logZ'][:]):.2f}  "
@@ -653,7 +652,7 @@ def run_catalogue_nss(
     if compare_nuts and nuts_times:
         nuts_arr = np.array(nuts_times)
         ratio = np.median(nss_arr) / np.median(nuts_arr)
-        print(f"\nNUTS timing:")
+        print("\nNUTS timing:")
         print(f"  median {np.median(nuts_arr):.2f}s  mean {np.mean(nuts_arr):.2f}s")
         rh_n = np.array(h5["nuts_rhat"][:])
         worst_n = np.nanmax(rh_n, axis=1)

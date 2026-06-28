@@ -27,7 +27,6 @@ Then use the emulator in arachne:
 import argparse
 from pathlib import Path
 
-import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import numpy as np
@@ -73,7 +72,7 @@ def parse_args():
 def main():
     args = parse_args()
 
-    print(f"Training SPSMLPEmulator")
+    print("Training SPSMLPEmulator")
     print(f"  Library:     {args.library}")
     print(f"  Params:      {args.param_names}")
     print(f"  Bands:       {args.band_names}")
@@ -103,6 +102,7 @@ def main():
 def _make_validation_plot(emulator: SPSMLPEmulator, args) -> None:
     """Quick scatter plot: predicted vs true flux for a random validation subset."""
     import h5py
+
     from arachne.emulator.jax_mlp_emulator import _decode_str_attr, _select_indices
 
     with h5py.File(args.library, "r") as f:

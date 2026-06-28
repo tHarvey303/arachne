@@ -47,8 +47,8 @@ from pathlib import Path
 
 import h5py
 import numpy as np
-from astropy.io import fits
 from astropy.cosmology import Planck18 as cosmo
+from astropy.io import fits
 from scipy.signal import windows
 from unyt import Msun, yr
 
@@ -205,8 +205,6 @@ def make_psf_kernel() -> np.ndarray:
 
 def make_mock_images() -> dict:
     """Generate mock images and save FITS files.  Returns truth parameter dict."""
-    from scipy.ndimage import convolve
-
     print("\n--- Step 2: Mock FITS images ---")
 
     # ---- truth parameters for K=2 GMM ----
@@ -309,6 +307,7 @@ def make_mock_images() -> dict:
 
     if emulator is not None:
         import jax.numpy as jnp
+
         from arachne.data.observation import ObservationCube
         from arachne.data.psf import PSFModel
         from arachne.forward_model.pipeline import ForwardModel
@@ -342,7 +341,6 @@ def make_mock_images() -> dict:
               f"flux range [{true_image.min():.1f}, {true_image.max():.1f}] nJy")
     else:
         # Analytic proxy: Gaussian blobs with rough SED colours
-        from scipy.ndimage import convolve as scipy_convolve
         true_image = _analytic_mock(psf_kernel)
 
     np.save(OUTDIR / "true_image.npy", true_image)

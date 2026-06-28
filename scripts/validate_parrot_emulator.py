@@ -27,7 +27,6 @@ import sys
 from pathlib import Path
 
 
-
 def parse_args(argv=None):
     """Parse command-line arguments for validation."""
     p = argparse.ArgumentParser(

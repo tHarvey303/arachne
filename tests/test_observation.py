@@ -5,8 +5,6 @@ import pytest
 
 from arachne.data.observation import ObservationCube
 
-from arachne.data.observation import ObservationCube
-
 
 def test_observation_shapes(tiny_observation):
     """ObservationCube has consistent array shapes."""

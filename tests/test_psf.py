@@ -200,6 +200,7 @@ class TestPSFModelFromFits:
     def test_3d_psf_takes_first_plane(self, tmp_path):
         """A (1, H, W) PSF FITS file is reduced to (H, W) by taking the first plane."""
         from astropy.io import fits as afits
+
         from arachne.data.psf import PSFModel
         k3d = np.ones((1, 9, 9), dtype=np.float32) / 81.0
         fp = tmp_path / "psf_3d.fits"

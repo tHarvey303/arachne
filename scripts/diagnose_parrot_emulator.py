@@ -51,10 +51,9 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
-import numpy as np
+
 import matplotlib.pyplot as plt
-
-
+import numpy as np
 
 # ---------------------------------------------------------------------------
 # CLI
@@ -236,7 +235,7 @@ def _print_summary(data, args):
     print(f"\n{'='*68}")
     print(f"  Abs %% flux error (all bands / all samples above {args.detect_threshold} nJy)")
     print(f"  Median: {med_pct:.2f}%   84th-pct: {p84_pct:.2f}%   95th-pct: {p95_pct:.2f}%")
-    print(f"  Target (Parrot paper): < 1%")
+    print("  Target (Parrot paper): < 1%")
     print(f"{'='*68}\n")
 
     print(f"{'Band':45s}  {'med%err':>8s}  {'p84%err':>8s}  {'bias(mag)':>10s}  {'σ(mag)':>8s}")
@@ -345,7 +344,6 @@ def _fig1_error_summary(data, output_dir):
 
 def _fig2_param_profiles(data, args, output_dir):
     """1D per-parameter error profiles with sample-count histogram."""
-
     params_val = data["params_val"]
     abs_pct = data["abs_pct_detected"]
     param_names = data["param_names"]
@@ -561,7 +559,6 @@ def _fig3_2d_heatmaps(data, args, importances, output_dir):
 
 def _fig4_flux_level(data, output_dir):
     """Abs % flux error vs log10(true flux) per band."""
-
     phot_val = data["phot_val"]
     abs_pct = data["abs_pct"]  # use unmasked here to show dropout behaviour
     band_names = data["band_names"]
@@ -644,8 +641,6 @@ def _fig4_flux_level(data, output_dir):
 
 def _fig5_outliers(data, args, output_dir):
     """Parameter distributions for worst-performing samples vs. full set."""
-
-
     params_val = data["params_val"]
     abs_pct = data["abs_pct_detected"]
     param_names = data["param_names"]
@@ -841,7 +836,7 @@ def main(argv=None):
     importances = _fig2_param_profiles(data, args, output_dir)
 
     ranked = sorted(importances, key=importances.get, reverse=True)
-    print(f"\nParameter importance ranking (variance of per-bin median error):")
+    print("\nParameter importance ranking (variance of per-bin median error):")
     for rank, pname in enumerate(ranked, 1):
         print(f"  {rank}. {pname:30s}  var={importances[pname]:.4f}")
 
