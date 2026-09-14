@@ -1530,9 +1530,8 @@ def main() -> None:
     if args.sampler == "nss":
         if not _NSS_AVAILABLE:
             raise RuntimeError(
-                "blackjax.ns not found.  The installed blackjax does not include the "
-                "nested-sampling utilities.  Install the fork:\n"
-                "  pip install git+https://github.com/<fork>/blackjax"
+                "blackjax.ns not found.  Nested sampling requires blackjax>=1.6:\n"
+                "  pip install 'blackjax>=1.6.2'"
             )
         run_catalogue_nss(
             obs_flux, flux_err, galaxy_ids, emulator, band_idx,
