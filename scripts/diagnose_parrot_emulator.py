@@ -818,13 +818,13 @@ def main(argv=None):
     import matplotlib
     matplotlib.use("Agg")
 
-    from arachne.emulator.parrot_emulator import ParrotEmulator
+    from arachne.emulator.parrot_emulator_v2 import load_emulator
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"Loading emulator: {args.emulator}")
-    emulator = ParrotEmulator.load(args.emulator)
+    emulator = load_emulator(args.emulator)
     print(
         f"  {len(emulator.param_names)} params: {emulator.param_names}\n"
         f"  {len(emulator.band_names)} bands"

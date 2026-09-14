@@ -377,8 +377,8 @@ def load_config(config_path: Path) -> dict:
 
 def print_config_template(emulator_path: Path) -> None:
     """Print a JSON config template to stdout for the given emulator's bands."""
-    from arachne.emulator.parrot_emulator import ParrotEmulator
-    emu = ParrotEmulator.load(emulator_path)
+    from arachne.emulator.parrot_emulator_v2 import load_emulator
+    emu = load_emulator(emulator_path)
     bands = {}
     for b in emu.band_names:
         safe = b.replace("/", "_").replace(".", "_")
@@ -446,8 +446,8 @@ def load_catalogue(catalogue_path: Path, config: dict) -> tuple[np.ndarray, np.n
 
 def load_emulator_and_band_indices(emulator_path: Path, band_names: list[str]) -> tuple:
     """Load the emulator and return (emulator, band_idx) for the requested bands."""
-    from arachne.emulator.parrot_emulator import ParrotEmulator
-    emu = ParrotEmulator.load(emulator_path)
+    from arachne.emulator.parrot_emulator_v2 import load_emulator
+    emu = load_emulator(emulator_path)
     print(f"\nLoaded ParrotEmulator: {len(emu.param_names)} params, {len(emu.band_names)} bands")
     if emu.param_names != SPS_PARAM_NAMES:
         raise ValueError(f"Emulator params {emu.param_names} != expected {SPS_PARAM_NAMES}")

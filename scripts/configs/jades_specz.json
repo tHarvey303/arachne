@@ -1,0 +1,19 @@
+{
+  "id_col": "UNIQUE_ID",
+  "flux_unit": "nJy",
+  "min_frac_err": 0.15,
+  "bands": {
+    "HST/ACS_WFC.F435W": {"flux": "FLUX_TOTAL_F435W", "err": "FLUXERR_TOTAL_F435W"},
+    "HST/ACS_WFC.F606W": {"flux": "FLUX_TOTAL_F606W", "err": "FLUXERR_TOTAL_F606W"},
+    "HST/ACS_WFC.F814W": {"flux": "FLUX_TOTAL_F814W", "err": "FLUXERR_TOTAL_F814W"},
+    "JWST/NIRCam.F090W": {"flux": "FLUX_TOTAL_F090W", "err": "FLUXERR_TOTAL_F090W"},
+    "JWST/NIRCam.F115W": {"flux": "FLUX_TOTAL_F115W", "err": "FLUXERR_TOTAL_F115W"},
+    "JWST/NIRCam.F150W": {"flux": "FLUX_TOTAL_F150W", "err": "FLUXERR_TOTAL_F150W"},
+    "JWST/NIRCam.F200W": {"flux": "FLUX_TOTAL_F200W", "err": "FLUXERR_TOTAL_F200W"},
+    "JWST/NIRCam.F277W": {"flux": "FLUX_TOTAL_F277W", "err": "FLUXERR_TOTAL_F277W"},
+    "JWST/NIRCam.F335M": {"flux": "FLUX_TOTAL_F335M", "err": "FLUXERR_TOTAL_F335M"},
+    "JWST/NIRCam.F356W": {"flux": "FLUX_TOTAL_F356W", "err": "FLUXERR_TOTAL_F356W"},
+    "JWST/NIRCam.F410M": {"flux": "FLUX_TOTAL_F410M", "err": "FLUXERR_TOTAL_F410M"},
+    "JWST/NIRCam.F444W": {"flux": "FLUX_TOTAL_F444W", "err": "FLUXERR_TOTAL_F444W"}
+  }
+}

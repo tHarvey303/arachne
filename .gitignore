@@ -36,6 +36,7 @@ docs/build/
 
 # JAX / ML
 *.npy
+*.npz
 *.h5
 *.hdf5
 *.pkl
@@ -50,3 +51,6 @@ docs/build/
 # Directory structure is committed via outputs/.gitkeep; contents are not.
 outputs/emulators/
 outputs/validation/
+outputs/sed_fitting/
+scripts/outputs/
+scripts/experiments/*.log

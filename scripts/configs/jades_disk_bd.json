@@ -1,0 +1,10 @@
+{
+  "id_col": "Id",
+  "flux_unit": "uJy",
+  "bands": {
+    "JWST/NIRCam.F115W": {"flux": "flux_disk_f115w_bd", "err": "flux_disk_f115w_bd_err"},
+    "JWST/NIRCam.F150W": {"flux": "flux_disk_f150w_bd", "err": "flux_disk_f150w_bd_err"},
+    "JWST/NIRCam.F277W": {"flux": "flux_disk_f277w_bd", "err": "flux_disk_f277w_bd_err"},
+    "JWST/NIRCam.F444W": {"flux": "flux_disk_f444w_bd", "err": "flux_disk_f444w_bd_err"}
+  }
+}

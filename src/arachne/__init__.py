@@ -6,6 +6,7 @@ from arachne.emulator.base import SPSEmulator
 from arachne.emulator.jax_emulator import JAXFlowEmulator
 from arachne.emulator.jax_mlp_emulator import SPSMLPEmulator
 from arachne.emulator.parrot_emulator import ParrotEmulator
+from arachne.emulator.parrot_emulator_v2 import ParrotEmulatorV2, load_emulator
 from arachne.forward_model.pipeline import ForwardModel
 from arachne.inference.mclmc_sampler import MCLMCSampler, run_pathfinder
 from arachne.inference.nuts_sampler import NUTSResult, NUTSSampler
@@ -25,6 +26,8 @@ __all__ = [
     "SPSEmulator",
     "SPSMLPEmulator",
     "ParrotEmulator",
+    "ParrotEmulatorV2",
+    "load_emulator",
     "JAXFlowEmulator",
     "ForwardModel",
     "NUTSSampler",

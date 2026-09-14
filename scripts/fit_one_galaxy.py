@@ -248,9 +248,9 @@ def make_mock(emulator, band_idx, seed=0):
 
 def load_emulator(emulator_path, band_names):
     """Load the emulator and return (emulator, band_idx) for the requested bands."""
-    from arachne.emulator.parrot_emulator import ParrotEmulator
+    from arachne.emulator.parrot_emulator_v2 import load_emulator as _load_any
 
-    emu = ParrotEmulator.load(emulator_path)
+    emu = _load_any(emulator_path)
     if emu.param_names != SPS_PARAM_NAMES:
         raise ValueError(f"Emulator params {emu.param_names} != {SPS_PARAM_NAMES}")
     missing = [b for b in band_names if b not in emu.band_names]

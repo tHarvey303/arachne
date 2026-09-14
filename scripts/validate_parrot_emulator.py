@@ -79,12 +79,12 @@ def main(argv=None):  # noqa: C901
     import numpy as np
 
     from arachne.emulator.parrot_emulator import (
-        ParrotEmulator,
         _flux_to_asinh_mag_np,
         _read_band_names,
         _read_param_names,
         _select_indices,
     )
+    from arachne.emulator.parrot_emulator_v2 import load_emulator
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -92,7 +92,7 @@ def main(argv=None):  # noqa: C901
     # ------------------------------------------------------------------
     # Load emulator (self-contained — no architecture args required)
     # ------------------------------------------------------------------
-    emulator = ParrotEmulator.load(args.emulator)
+    emulator = load_emulator(args.emulator)
     print(f"Loaded emulator: {len(emulator.param_names)} params, {len(emulator.band_names)} bands")
 
     # Allow CLI overrides; default to what the checkpoint already knows.

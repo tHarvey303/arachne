@@ -133,9 +133,9 @@ def load_emulator_and_band_indices(
         ValueError: If the checkpoint's param names differ from ``SPS_PARAM_NAMES``,
                     or if any JADES band is absent from the emulator's band list.
     """
-    from arachne.emulator.parrot_emulator import ParrotEmulator
+    from arachne.emulator.parrot_emulator_v2 import load_emulator
 
-    emulator = ParrotEmulator.load(emulator_path)
+    emulator = load_emulator(emulator_path)
     print(f"Loaded ParrotEmulator from {emulator_path}")
     print(f"  {len(emulator.param_names)} params, {len(emulator.band_names)} bands")
 
