@@ -232,11 +232,11 @@ def _print_summary(data, args):
     p84_pct = float(np.nanpercentile(abs_pct, 84))
     p95_pct = float(np.nanpercentile(abs_pct, 95))
 
-    print(f"\n{'='*68}")
+    print(f"\n{'=' * 68}")
     print(f"  Abs %% flux error (all bands / all samples above {args.detect_threshold} nJy)")
     print(f"  Median: {med_pct:.2f}%   84th-pct: {p84_pct:.2f}%   95th-pct: {p95_pct:.2f}%")
     print("  Target (Parrot paper): < 1%")
-    print(f"{'='*68}\n")
+    print(f"{'=' * 68}\n")
 
     print(f"{'Band':45s}  {'med%err':>8s}  {'p84%err':>8s}  {'bias(mag)':>10s}  {'σ(mag)':>8s}")
     print("-" * 86)
@@ -271,10 +271,7 @@ def _print_summary(data, args):
         bin_meds = [np.nanmedian(e) if len(e) > 0 else np.nan for e in bin_errs]
         worst_bin = int(np.nanargmax(bin_meds))
         lo, hi = bin_edges[worst_bin], bin_edges[worst_bin + 1]
-        print(
-            f"{pname:30s}  [{lo:+.3f}, {hi:+.3f}]"
-            f"{'':8s}{np.nanmax(bin_meds):>24.2f}%"
-        )
+        print(f"{pname:30s}  [{lo:+.3f}, {hi:+.3f}]{'':8s}{np.nanmax(bin_meds):>24.2f}%")
 
 
 # ---------------------------------------------------------------------------
@@ -372,8 +369,12 @@ def _fig2_param_profiles(data, args, output_dir):
         actual_bins = len(bin_edges) - 1
         if actual_bins < 2:
             ax.text(
-                0.5, 0.5, "insufficient range",
-                ha="center", va="center", transform=ax.transAxes,
+                0.5,
+                0.5,
+                "insufficient range",
+                ha="center",
+                va="center",
+                transform=ax.transAxes,
             )
             ax.set_title(pname, fontsize=9)
             continue
@@ -401,8 +402,13 @@ def _fig2_param_profiles(data, args, output_dir):
         # Also compute per-band profiles to show the spread across bands
         ax_twin = ax.twinx()
         ax_twin.bar(
-            centers, counts, width=np.diff(bin_edges), color="lightgray",
-            alpha=0.5, label="N samples", zorder=0,
+            centers,
+            counts,
+            width=np.diff(bin_edges),
+            color="lightgray",
+            alpha=0.5,
+            label="N samples",
+            zorder=0,
         )
         ax_twin.set_ylabel("N samples", fontsize=7, color="gray")
         ax_twin.tick_params(axis="y", labelcolor="gray", labelsize=6)
@@ -417,8 +423,14 @@ def _fig2_param_profiles(data, args, output_dir):
             zorder=2,
         )
         ax.plot(
-            centers[finite_bins], med_e[finite_bins],
-            color="steelblue", lw=2, marker="o", ms=4, label="Median", zorder=3,
+            centers[finite_bins],
+            med_e[finite_bins],
+            color="steelblue",
+            lw=2,
+            marker="o",
+            ms=4,
+            label="Median",
+            zorder=3,
         )
         ax.axhline(1.0, color="red", ls="--", lw=1, label="1% target", zorder=4)
         ax.set_xlabel(pname, fontsize=8)
@@ -567,9 +579,14 @@ def _fig4_flux_level(data, output_dir):
 
     # Select a representative subset of bands for clarity
     highlight = [
-        b for b in [
-            "JWST/NIRCam.F200W", "JWST/NIRCam.F277W", "JWST/NIRCam.F444W",
-            "HST/ACS_WFC.F814W", "CTIO/DECam.r", "JWST/MIRI.F560W",
+        b
+        for b in [
+            "JWST/NIRCam.F200W",
+            "JWST/NIRCam.F277W",
+            "JWST/NIRCam.F444W",
+            "HST/ACS_WFC.F814W",
+            "CTIO/DECam.r",
+            "JWST/MIRI.F560W",
         ]
         if b in band_names
     ]
@@ -608,20 +625,32 @@ def _fig4_flux_level(data, output_dir):
 
         finite_b = np.isfinite(med_e)
         ax.fill_between(
-            centers[finite_b], med_e[finite_b], p84_e[finite_b],
-            alpha=0.25, color="steelblue",
+            centers[finite_b],
+            med_e[finite_b],
+            p84_e[finite_b],
+            alpha=0.25,
+            color="steelblue",
         )
         ax.plot(centers[finite_b], med_e[finite_b], color="steelblue", lw=1.8, label="Median")
         ax.plot(
-            centers[finite_b], p84_e[finite_b],
-            color="steelblue", lw=1, ls="--", label="84th pct",
+            centers[finite_b],
+            p84_e[finite_b],
+            color="steelblue",
+            lw=1,
+            ls="--",
+            label="84th pct",
         )
         ax.axhline(1.0, color="red", ls="--", lw=1, label="1% target")
 
         # Shade dropout regime (flux < 5 nJy, log < ~0.7)
         dropout_log = np.log10(5.0)
-        ax.axvspan(ax.get_xlim()[0] if ax.get_xlim()[0] < dropout_log else dropout_log - 2,
-                   dropout_log, color="orange", alpha=0.10, label="faint (<5 nJy)")
+        ax.axvspan(
+            ax.get_xlim()[0] if ax.get_xlim()[0] < dropout_log else dropout_log - 2,
+            dropout_log,
+            color="orange",
+            alpha=0.10,
+            label="faint (<5 nJy)",
+        )
 
         ax.set_xlabel("log₁₀(true flux / nJy)", fontsize=9)
         ax.set_ylabel("Abs % flux error", fontsize=9)
@@ -656,7 +685,7 @@ def _fig5_outliers(data, args, output_dir):
     n_out = outlier_mask.sum()
 
     print(
-        f"\nOutlier analysis: {n_out} samples ({100*n_out/len(sample_err):.1f}%) "
+        f"\nOutlier analysis: {n_out} samples ({100 * n_out / len(sample_err):.1f}%) "
         f"with band-avg abs %% error ≥ {threshold:.2f}%"
     )
 
@@ -677,16 +706,28 @@ def _fig5_outliers(data, args, output_dir):
 
         lo, hi = all_vals.min(), all_vals.max()
         bins = np.linspace(lo, hi, 30)
-        ax.hist(all_vals, bins=bins, density=True, histtype="step",
-                color="steelblue", lw=1.5, label=f"All (N={len(all_vals)})")
         ax.hist(
-            out_vals, bins=bins, density=True, histtype="stepfilled",
-            color="tomato", alpha=0.45,
-            label=f"Worst {100-args.outlier_percentile:.0f}% (N={len(out_vals)})",
+            all_vals,
+            bins=bins,
+            density=True,
+            histtype="step",
+            color="steelblue",
+            lw=1.5,
+            label=f"All (N={len(all_vals)})",
+        )
+        ax.hist(
+            out_vals,
+            bins=bins,
+            density=True,
+            histtype="stepfilled",
+            color="tomato",
+            alpha=0.45,
+            label=f"Worst {100 - args.outlier_percentile:.0f}% (N={len(out_vals)})",
         )
 
         # KS statistic
         from scipy.stats import ks_2samp
+
         ks_stat, ks_p = ks_2samp(all_vals, out_vals)
         ax.set_title(f"{pname}\nKS={ks_stat:.3f}, p={ks_p:.2e}", fontsize=8)
         ax.set_xlabel(pname, fontsize=8)
@@ -700,7 +741,7 @@ def _fig5_outliers(data, args, output_dir):
 
     fig.suptitle(
         f"Outlier analysis: parameter distributions\n"
-        f"worst {100-args.outlier_percentile:.0f}% (band-avg abs % flux error "
+        f"worst {100 - args.outlier_percentile:.0f}% (band-avg abs % flux error "
         f"≥ {threshold:.2f}%) vs full validation set",
         fontsize=11,
         y=1.02,
@@ -759,8 +800,15 @@ def _fig6_correlation(data, output_dir):
         for bi in range(n_bands):
             r = corr_matrix[pi, bi]
             if abs(r) > 0.25:
-                ax.text(bi, pi, f"{r:.2f}", ha="center", va="center", fontsize=5,
-                        color="white" if abs(r) > 0.5 else "black")
+                ax.text(
+                    bi,
+                    pi,
+                    f"{r:.2f}",
+                    ha="center",
+                    va="center",
+                    fontsize=5,
+                    color="white" if abs(r) > 0.5 else "black",
+                )
 
     fig.tight_layout()
     path = output_dir / "fig6_band_param_correlation.png"
@@ -794,8 +842,13 @@ def _save_hdf5(data, importances, output_dir):
     path = output_dir / "diagnostics.h5"
     with h5py.File(path, "w") as f:
         for key in (
-            "params_val", "phot_val", "pred_flux",
-            "resid_mag", "abs_resid_mag", "abs_pct", "abs_pct_detected",
+            "params_val",
+            "phot_val",
+            "pred_flux",
+            "resid_mag",
+            "abs_resid_mag",
+            "abs_pct",
+            "abs_pct_detected",
         ):
             f.create_dataset(key, data=data[key].astype(np.float32), compression="gzip")
         f.attrs["param_names"] = np.array(data["param_names"], dtype="S")
@@ -816,6 +869,7 @@ def main(argv=None):
     args = parse_args(argv)
 
     import matplotlib
+
     matplotlib.use("Agg")
 
     from arachne.emulator.parrot_emulator_v2 import load_emulator
@@ -846,6 +900,7 @@ def main(argv=None):
 
     try:
         from scipy.stats import ks_2samp  # noqa: F401 (just check availability)
+
         _fig5_outliers(data, args, output_dir)
         _fig6_correlation(data, output_dir)
     except ImportError:

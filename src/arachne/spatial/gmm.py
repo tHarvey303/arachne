@@ -6,10 +6,25 @@ import jax
 import jax.numpy as jnp
 
 from arachne.spatial.base import SpatialModel
+from arachne.utils.logging import setup_named_logger
+
+logger = setup_named_logger(__name__)
 
 
 class GaussianMixtureSpatialModel(SpatialModel):
     """K-component Gaussian Mixture Model spatial model.
+
+    .. warning::
+
+        **This model blends SPS *parameters*, not light.**  The mixture
+        weights are normalised to sum to 1 at every pixel, so the model has
+        no surface-brightness profile: every pixel carries a *full* galaxy's
+        stellar mass, and a single "disk" component fills the entire frame
+        at constant flux.  It is only appropriate for describing smooth
+        spatial *gradients* of SPS parameters across an already-resolved
+        source.  For bulge/disk-style decompositions where components
+        contribute additive flux, use
+        :class:`arachne.spatial.additive.AdditiveComponentModel` instead.
 
     Each Gaussian component occupies a region of the image and carries its own
     SPS parameter vector.  Per-pixel SPS parameters are the mixture-weighted
@@ -36,9 +51,13 @@ class GaussianMixtureSpatialModel(SpatialModel):
 
     Prior
     -----
-    - Component means: soft Gaussian penalty to keep components inside the image.
+    - Component means: Normal(image centre, size/4) per coordinate — keeps
+      components inside the image.
     - log_sigma: Normal(0, 1) — discourages extreme component widths.
-    - SPS params: independent uniform within bounds (flat in sigmoid space).
+    - atanh_rho: Normal(0, 1).
+    - SPS params: independent uniform within physical bounds.  The sigmoid
+      log-Jacobian is included so the prior is flat in *physical* space,
+      not in the unconstrained sigmoid space.
 
     Attributes:
         n_components: Number of Gaussian components K.
@@ -63,6 +82,12 @@ class GaussianMixtureSpatialModel(SpatialModel):
             param_bounds: Dict of param_name → (lo, hi) physical bounds.
             image_shape: (H, W) spatial dimensions of the galaxy image.
         """
+        logger.warning(
+            "GaussianMixtureSpatialModel blends SPS parameters, not light: mixture "
+            "weights are normalised per pixel, so there is no surface-brightness "
+            "profile and every pixel carries a full galaxy mass. For bulge/disk "
+            "decompositions prefer AdditiveComponentModel."
+        )
         self.n_components = n_components
         self.sps_param_names = sps_param_names
         self.param_bounds = param_bounds
@@ -180,10 +205,12 @@ class GaussianMixtureSpatialModel(SpatialModel):
         """Compute the log-prior for the GMM parameters.
 
         Prior structure:
-        - Component centres: soft Gaussian penalty to keep within image extent.
+        - Component centres: Normal(image centre, size/4) per coordinate.
         - log_sigma: Standard Normal — encourages moderate component widths.
         - atanh_rho: Standard Normal — mild regularisation on correlation.
-        - SPS params: uniform in sigmoid space (flat, no penalty).
+        - SPS params: uniform in *physical* space.  Implemented as the
+          normalised sigmoid log-Jacobian ``log_sigmoid(raw) + log_sigmoid(-raw)``
+          summed over all SPS entries.
 
         Args:
             theta: Unconstrained parameter vector of shape (n_params,).
@@ -199,13 +226,21 @@ class GaussianMixtureSpatialModel(SpatialModel):
             mu = theta_k[:2]  # mu_y, mu_x
             log_sigma = theta_k[2:4]
             atanh_rho = theta_k[4]
+            sps_raw = theta_k[5:]
 
-            # Soft Gaussian prior on centres — keep within image
-            mu_prior = -0.5 * ((mu[0] / self._H) ** 2 + (mu[1] / self._W) ** 2)
+            # Gaussian prior on centres: Normal(image centre, size/4)
+            mu_prior = -0.5 * (
+                ((mu[0] - 0.5 * self._H) / (0.25 * self._H)) ** 2
+                + ((mu[1] - 0.5 * self._W) / (0.25 * self._W)) ** 2
+            )
             # Normal(0, 1) on log_sigma — moderate component widths
             log_sigma_prior = -0.5 * jnp.sum(log_sigma**2)
             # Normal(0, 1) on atanh_rho — mild regularisation
             rho_prior = -0.5 * atanh_rho**2
-            return mu_prior + log_sigma_prior + rho_prior
+            # Sigmoid log-Jacobian: normalised log-density of a prior uniform
+            # in physical SPS space, pulled back to raw (no log(hi-lo) term;
+            # consistent with AdditiveComponentModel so logZ is comparable).
+            jac = jnp.sum(jax.nn.log_sigmoid(sps_raw) + jax.nn.log_sigmoid(-sps_raw))
+            return mu_prior + log_sigma_prior + rho_prior + jac
 
         return jnp.sum(jax.vmap(component_log_prior)(theta_components))

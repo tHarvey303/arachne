@@ -129,7 +129,7 @@ def make_log_likelihood_physical(emulator, band_idx: np.ndarray, min_frac_err: f
             if min_frac_err > 0
             else flux_err
         )
-        chi2 = jnp.sum(mask * (obs_flux - pred) ** 2 / eff_err ** 2)
+        chi2 = jnp.sum(mask * (obs_flux - pred) ** 2 / eff_err**2)
         log_norm = jnp.sum(mask * (-0.5 * LOG2PI - jnp.log(eff_err)))
         return jnp.where(in_bounds, log_norm - 0.5 * chi2, -jnp.inf)
 
@@ -157,7 +157,9 @@ def build_nss_fns(
 
     @jax.jit
     def nss_init(initial_samples, obs_flux, flux_err):
-        def ll(x): return log_like_fn(x, obs_flux, flux_err)
+        def ll(x):
+            return log_like_fn(x, obs_flux, flux_err)
+
         algo = blackjax.nss(
             logprior_fn=log_prior_fn,
             loglikelihood_fn=ll,
@@ -168,7 +170,9 @@ def build_nss_fns(
 
     @jax.jit
     def nss_step(rng_key, state, obs_flux, flux_err):
-        def ll(x): return log_like_fn(x, obs_flux, flux_err)
+        def ll(x):
+            return log_like_fn(x, obs_flux, flux_err)
+
         algo = blackjax.nss(
             logprior_fn=log_prior_fn,
             loglikelihood_fn=ll,
@@ -273,12 +277,12 @@ def run_nss_galaxy(
     # --- post-process ---
     final_state = finalise(state, dead)
     rng_key, w_key, s_key = jax.random.split(rng_key, 3)
-    logw = log_weights(w_key, final_state)           # (N_total, 100)
+    logw = log_weights(w_key, final_state)  # (N_total, 100)
     logz, logz_err = _logz_from_weights(logw)
     ess = _ess_from_weights(logw)
 
     resampled = ns_resample(s_key, final_state, shape=n_samples_out)
-    samples_phys = np.array(resampled.position, dtype=np.float32)   # (S, P)
+    samples_phys = np.array(resampled.position, dtype=np.float32)  # (S, P)
 
     n_dead = len(dead) * dead[0].particles.loglikelihood.shape[0] if dead else 0
 
@@ -341,6 +345,7 @@ def build_nuts_fns(
         chain_inits : (C, P) unconstrained starting points
         Returns (samples_C_S_P, accept_C)
         """
+
         def lp(theta):
             return log_post_fn(theta, obs_flux, flux_err)
 
@@ -365,15 +370,13 @@ def build_nuts_fns(
                 st, info = kern.step(k, st)
                 return st, (st.position, info.acceptance_rate)
 
-            _, (samples, ar) = jax.lax.scan(
-                samp_step, state, jax.random.split(samp_key, n_samples)
-            )
+            _, (samples, ar) = jax.lax.scan(samp_step, state, jax.random.split(samp_key, n_samples))
             return samples, jnp.mean(ar), eps_final
 
         samples_CSP, accept_C, eps_C = jax.vmap(_one_chain)(
             chain_inits, jax.random.split(rng_key, n_chains)
         )
-        return samples_CSP, accept_C   # (C, S, P), (C,)
+        return samples_CSP, accept_C  # (C, S, P), (C,)
 
     return nuts_run_galaxy
 
@@ -405,7 +408,7 @@ def run_nuts_galaxy(
     # Convert unconstrained → physical
     lows = np.array([PARAM_BOUNDS[p][0] for p in SPS_PARAM_NAMES], dtype=np.float32)
     highs = np.array([PARAM_BOUNDS[p][1] for p in SPS_PARAM_NAMES], dtype=np.float32)
-    s = np.array(samples_CSP, dtype=np.float32)   # (C, S, P)
+    s = np.array(samples_CSP, dtype=np.float32)  # (C, S, P)
     phys = lows + (highs - lows) / (1.0 + np.exp(-s))
 
     return phys, np.array(accept_C, dtype=np.float32), elapsed
@@ -446,8 +449,7 @@ def create_output_file(
     N, S, P = n_galaxies, n_samples_out, _P
     ckw = dict(compression="gzip", compression_opts=4)
 
-    f.create_dataset("nss_samples", shape=(N, S, P), dtype=np.float32,
-                     chunks=(1, S, P), **ckw)
+    f.create_dataset("nss_samples", shape=(N, S, P), dtype=np.float32, chunks=(1, S, P), **ckw)
     f.create_dataset("nss_logZ", shape=(N,), dtype=np.float32)
     f.create_dataset("nss_logZ_err", shape=(N,), dtype=np.float32)
     f.create_dataset("nss_ess", shape=(N,), dtype=np.float32)
@@ -458,8 +460,13 @@ def create_output_file(
 
     if compare_nuts:
         C = n_chains
-        f.create_dataset("nuts_samples", shape=(N, C, n_samples_nuts, P), dtype=np.float32,
-                         chunks=(1, C, n_samples_nuts, P), **ckw)
+        f.create_dataset(
+            "nuts_samples",
+            shape=(N, C, n_samples_nuts, P),
+            dtype=np.float32,
+            chunks=(1, C, n_samples_nuts, P),
+            **ckw,
+        )
         f.create_dataset("nuts_accept", shape=(N, C), dtype=np.float32)
         f.create_dataset("nuts_rhat", shape=(N, P), dtype=np.float32)
         f.create_dataset("nuts_time", shape=(N,), dtype=np.float32)
@@ -512,43 +519,72 @@ def run_catalogue_nss(
     highs_np = np.array([PARAM_BOUNDS[p][1] for p in SPS_PARAM_NAMES], dtype=np.float32)
 
     print(f"\nNSS catalogue fit: {N} galaxies", flush=True)
-    print(f"  num_live={num_live}  num_inner_steps={num_inner_steps}  "
-          f"num_delete={num_delete}  termination={termination}", flush=True)
+    print(
+        f"  num_live={num_live}  num_inner_steps={num_inner_steps}  "
+        f"num_delete={num_delete}  termination={termination}",
+        flush=True,
+    )
     print(f"  n_samples_out={n_samples_out}  min_frac_err={min_frac_err:.1%}", flush=True)
     if compare_nuts:
-        eps0 = 0.5 / (_P ** 0.25)
-        print(f"  NUTS comparison: n_chains={n_chains_nuts}  n_warmup={n_warmup_nuts}  "
-              f"n_samples={n_samples_nuts}  eps0={eps0:.4g}", flush=True)
+        eps0 = 0.5 / (_P**0.25)
+        print(
+            f"  NUTS comparison: n_chains={n_chains_nuts}  n_warmup={n_warmup_nuts}  "
+            f"n_samples={n_samples_nuts}  eps0={eps0:.4g}",
+            flush=True,
+        )
 
     log_prior_fn = make_log_prior_fn(prior_specs)
     log_like_fn = make_log_likelihood_physical(emulator, band_idx, min_frac_err)
 
     nss_init_fn, nss_step_fn = build_nss_fns(
-        emulator, band_idx, log_prior_fn, log_like_fn,
-        num_inner_steps, num_delete,
+        emulator,
+        band_idx,
+        log_prior_fn,
+        log_like_fn,
+        num_inner_steps,
+        num_delete,
     )
 
     nuts_fn = None
     if compare_nuts:
-        eps0 = 0.5 / (_P ** 0.25)
+        eps0 = 0.5 / (_P**0.25)
         nuts_fn = build_nuts_fns(
-            emulator, band_idx, log_prior_fn, min_frac_err,
-            n_samples_nuts, n_warmup_nuts, n_chains_nuts,
-            eps0, target_accept=0.8,
+            emulator,
+            band_idx,
+            log_prior_fn,
+            min_frac_err,
+            n_samples_nuts,
+            n_warmup_nuts,
+            n_chains_nuts,
+            eps0,
+            target_accept=0.8,
         )
 
     run_args = dict(
-        num_live=num_live, num_inner_steps=num_inner_steps,
-        num_delete=num_delete, termination=float(termination),
-        n_samples_nss=n_samples_out, min_frac_err=float(min_frac_err),
+        num_live=num_live,
+        num_inner_steps=num_inner_steps,
+        num_delete=num_delete,
+        termination=float(termination),
+        n_samples_nss=n_samples_out,
+        min_frac_err=float(min_frac_err),
     )
     if compare_nuts:
-        run_args.update(n_chains_nuts=n_chains_nuts, n_warmup_nuts=n_warmup_nuts,
-                        n_samples_nuts=n_samples_nuts)
+        run_args.update(
+            n_chains_nuts=n_chains_nuts, n_warmup_nuts=n_warmup_nuts, n_samples_nuts=n_samples_nuts
+        )
 
     h5 = create_output_file(
-        output_path, N, n_samples_out, n_chains_nuts, n_samples_nuts,
-        band_names, emulator_path, prior_specs, galaxy_ids, compare_nuts, run_args,
+        output_path,
+        N,
+        n_samples_out,
+        n_chains_nuts,
+        n_samples_nuts,
+        band_names,
+        emulator_path,
+        prior_specs,
+        galaxy_ids,
+        compare_nuts,
+        run_args,
     )
 
     # Warm-up JIT on first galaxy (don't time it)
@@ -557,9 +593,9 @@ def run_catalogue_nss(
     rng, k0 = jax.random.split(rng)
     obs0 = jnp.asarray(obs_flux[0:1], dtype=jnp.float32)[0]
     err0 = jnp.asarray(flux_err[0:1], dtype=jnp.float32)[0]
-    live0 = jax.random.uniform(k0, (num_live, _P),
-                                minval=jnp.asarray(lows_np),
-                                maxval=jnp.asarray(highs_np))
+    live0 = jax.random.uniform(
+        k0, (num_live, _P), minval=jnp.asarray(lows_np), maxval=jnp.asarray(highs_np)
+    )
     _st = nss_init_fn(live0, obs0, err0)
     rng, _k = jax.random.split(rng)
     _st, _ = nss_step_fn(_k, _st, obs0, err0)
@@ -571,7 +607,7 @@ def run_catalogue_nss(
         jax.block_until_ready(_s)
     print("  JIT compile done.", flush=True)
 
-    rng = jax.random.PRNGKey(seed)   # reset for reproducibility
+    rng = jax.random.PRNGKey(seed)  # reset for reproducibility
     t_global = time.perf_counter()
 
     nss_times: list[float] = []
@@ -584,9 +620,13 @@ def run_catalogue_nss(
         rng, nss_key = jax.random.split(rng)
         samp_phys, logz, logz_err, ess, n_steps, n_dead, nss_t = run_nss_galaxy(
             nss_key,
-            obs_flux[i], flux_err[i],
-            nss_init_fn, nss_step_fn,
-            num_live, termination, n_samples_out,
+            obs_flux[i],
+            flux_err[i],
+            nss_init_fn,
+            nss_step_fn,
+            num_live,
+            termination,
+            n_samples_out,
         )
         nss_times.append(nss_t)
 
@@ -594,7 +634,8 @@ def run_catalogue_nss(
         # samp_phys is already in physical space — no sigmoid transform needed.
         rhat_nss = split_rhat(
             samp_phys[np.newaxis, np.newaxis, :, :],
-            lows=None, highs=None,
+            lows=None,
+            highs=None,
         )[0]  # (P,)
 
         h5["nss_samples"][i] = samp_phys
@@ -606,16 +647,22 @@ def run_catalogue_nss(
         h5["nss_time"][i] = nss_t
         h5["nss_rhat"][i] = rhat_nss
 
-        diag = (f"logZ={logz:.2f}±{logz_err:.2f}  ESS={ess:.0f}  "
-                f"n_dead={n_dead}  rhat_max={np.nanmax(rhat_nss):.3f}  "
-                f"t={nss_t:.1f}s")
+        diag = (
+            f"logZ={logz:.2f}±{logz_err:.2f}  ESS={ess:.0f}  "
+            f"n_dead={n_dead}  rhat_max={np.nanmax(rhat_nss):.3f}  "
+            f"t={nss_t:.1f}s"
+        )
 
         # ---- NUTS (optional) ----
         if nuts_fn is not None:
             rng, nuts_key = jax.random.split(rng)
             phys_CSP, accept_C, nuts_t = run_nuts_galaxy(
-                nuts_key, obs_flux[i], flux_err[i],
-                nuts_fn, n_chains_nuts, chain_jitter,
+                nuts_key,
+                obs_flux[i],
+                flux_err[i],
+                nuts_fn,
+                n_chains_nuts,
+                chain_jitter,
             )
             nuts_times.append(nuts_t)
 
@@ -623,7 +670,8 @@ def run_catalogue_nss(
             # phys_CSP is already sigmoid-transformed — no second transform.
             rhat_nuts = split_rhat(
                 phys_CSP[np.newaxis, :, :, :],
-                lows=None, highs=None,
+                lows=None,
+                highs=None,
             )[0]  # (P,)
 
             h5["nuts_samples"][i] = phys_CSP
@@ -631,8 +679,10 @@ def run_catalogue_nss(
             h5["nuts_rhat"][i] = rhat_nuts
             h5["nuts_time"][i] = nuts_t
 
-            diag += (f"  |  NUTS: accept={np.mean(accept_C):.2f}  "
-                     f"rhat_max={np.nanmax(rhat_nuts):.3f}  t={nuts_t:.1f}s")
+            diag += (
+                f"  |  NUTS: accept={np.mean(accept_C):.2f}  "
+                f"rhat_max={np.nanmax(rhat_nuts):.3f}  t={nuts_t:.1f}s"
+            )
 
         elapsed_total = time.perf_counter() - t_global
         eta = elapsed_total / (i + 1) * (N - i - 1)
@@ -645,15 +695,17 @@ def run_catalogue_nss(
 
     nss_arr = np.array(nss_times)
     print("\nNSS timing (excl. first-galaxy JIT):")
-    print(f"  median {np.median(nss_arr):.2f}s  mean {np.mean(nss_arr):.2f}s  "
-          f"total {nss_arr.sum():.1f}s")
-    print(f"  logZ:  mean={np.nanmean(h5['nss_logZ'][:]):.2f}  "
-          f"std={np.nanstd(h5['nss_logZ'][:]):.2f}")
+    print(
+        f"  median {np.median(nss_arr):.2f}s  mean {np.mean(nss_arr):.2f}s  "
+        f"total {nss_arr.sum():.1f}s"
+    )
+    print(
+        f"  logZ:  mean={np.nanmean(h5['nss_logZ'][:]):.2f}  std={np.nanstd(h5['nss_logZ'][:]):.2f}"
+    )
     print(f"  ESS:   median={np.nanmedian(h5['nss_ess'][:]):.0f}")
     rh = np.array(h5["nss_rhat"][:])
     worst = np.nanmax(rh, axis=1)
-    print(f"  Rhat<1.05: {np.mean(worst < 1.05):.1%}  "
-          f"(>1.1: {np.mean(worst > 1.1):.1%})")
+    print(f"  Rhat<1.05: {np.mean(worst < 1.05):.1%}  (>1.1: {np.mean(worst > 1.1):.1%})")
 
     if compare_nuts and nuts_times:
         nuts_arr = np.array(nuts_times)
@@ -662,27 +714,32 @@ def run_catalogue_nss(
         print(f"  median {np.median(nuts_arr):.2f}s  mean {np.mean(nuts_arr):.2f}s")
         rh_n = np.array(h5["nuts_rhat"][:])
         worst_n = np.nanmax(rh_n, axis=1)
-        print(f"  Rhat<1.05: {np.mean(worst_n < 1.05):.1%}  "
-              f"(>1.1: {np.mean(worst_n > 1.1):.1%})")
-        print(f"\nSpeed ratio (NSS/NUTS per galaxy): {ratio:.1f}x  "
-              f"{'(NSS slower)' if ratio > 1 else '(NSS faster)'}")
+        print(f"  Rhat<1.05: {np.mean(worst_n < 1.05):.1%}  (>1.1: {np.mean(worst_n > 1.1):.1%})")
+        print(
+            f"\nSpeed ratio (NSS/NUTS per galaxy): {ratio:.1f}x  "
+            f"{'(NSS slower)' if ratio > 1 else '(NSS faster)'}"
+        )
 
         # Per-parameter comparison
-        nss_s = np.array(h5["nss_samples"][:])       # (N, S, P)
-        nuts_s = np.array(h5["nuts_samples"][:])      # (N, C, S, P)
-        nuts_flat = nuts_s.reshape(N, -1, _P)          # (N, C*S, P)
+        nss_s = np.array(h5["nss_samples"][:])  # (N, S, P)
+        nuts_s = np.array(h5["nuts_samples"][:])  # (N, C, S, P)
+        nuts_flat = nuts_s.reshape(N, -1, _P)  # (N, C*S, P)
         print(f"\nPosterior mean comparison (NSS vs NUTS, averaged over {N} galaxies):")
-        print(f"  {'param':<22}  {'NSS mean':>9}  {'NUTS mean':>9}  "
-              f"{'NSS std':>9}  {'NUTS std':>9}  {'Δmean/σ':>8}")
+        print(
+            f"  {'param':<22}  {'NSS mean':>9}  {'NUTS mean':>9}  "
+            f"{'NSS std':>9}  {'NUTS std':>9}  {'Δmean/σ':>8}"
+        )
         for pi, pname in enumerate(SPS_PARAM_NAMES):
-            nss_m = nss_s[:, :, pi].mean(axis=1)    # (N,)
+            nss_m = nss_s[:, :, pi].mean(axis=1)  # (N,)
             nuts_m = nuts_flat[:, :, pi].mean(axis=1)
             nss_sig = nss_s[:, :, pi].std(axis=1)
             nuts_sig = nuts_flat[:, :, pi].std(axis=1)
             delta = np.abs(nss_m - nuts_m) / np.maximum(nss_sig, 1e-10)
-            print(f"  {pname:<22}  {nss_m.mean():>9.3f}  {nuts_m.mean():>9.3f}  "
-                  f"{nss_sig.mean():>9.3f}  {nuts_sig.mean():>9.3f}  "
-                  f"{delta.mean():>8.3f}")
+            print(
+                f"  {pname:<22}  {nss_m.mean():>9.3f}  {nuts_m.mean():>9.3f}  "
+                f"{nss_sig.mean():>9.3f}  {nuts_sig.mean():>9.3f}  "
+                f"{delta.mean():>8.3f}"
+            )
 
     print(f"\n  Output: {output_path}")
     h5.close()
@@ -703,33 +760,63 @@ def main() -> None:
     parser.add_argument("config", help="Band config JSON (same format as fit_catalogue.py)")
     parser.add_argument("--emulator", default=str(DEFAULT_EMULATOR))
     parser.add_argument("--output", default=str(DEFAULT_NSS_OUTPUT))
-    parser.add_argument("--n-galaxies", type=int, default=None,
-                        help="Subset of galaxies to fit (default: all).")
-    parser.add_argument("--num-live", type=int, default=500,
-                        help="Number of NS live particles (>= ~50*P for 12-param problem).")
-    parser.add_argument("--num-inner-steps", type=int, default=24,
-                        help="HRSS inner steps per replacement (recommend 2*P=24).")
-    parser.add_argument("--num-delete", type=int, default=50,
-                        help="Dead particles per NS iteration (vmapped in parallel; larger "
-                             "= fewer Python iterations, better GPU utilisation).")
-    parser.add_argument("--termination", type=float, default=-3.0,
-                        help="Stop when logZ_live - logZ < termination (log scale).")
-    parser.add_argument("--n-samples-out", type=int, default=500,
-                        help="NS posterior samples to resample and store.")
+    parser.add_argument(
+        "--n-galaxies", type=int, default=None, help="Subset of galaxies to fit (default: all)."
+    )
+    parser.add_argument(
+        "--num-live",
+        type=int,
+        default=500,
+        help="Number of NS live particles (>= ~50*P for 12-param problem).",
+    )
+    parser.add_argument(
+        "--num-inner-steps",
+        type=int,
+        default=24,
+        help="HRSS inner steps per replacement (recommend 2*P=24).",
+    )
+    parser.add_argument(
+        "--num-delete",
+        type=int,
+        default=50,
+        help="Dead particles per NS iteration (vmapped in parallel; larger "
+        "= fewer Python iterations, better GPU utilisation).",
+    )
+    parser.add_argument(
+        "--termination",
+        type=float,
+        default=-3.0,
+        help="Stop when logZ_live - logZ < termination (log scale).",
+    )
+    parser.add_argument(
+        "--n-samples-out", type=int, default=500, help="NS posterior samples to resample and store."
+    )
     parser.add_argument("--seed", type=int, default=0)
 
     # NUTS comparison
-    parser.add_argument("--compare-nuts", action="store_true",
-                        help="Also run per-galaxy NUTS (dual-averaging, no Pathfinder) "
-                             "for performance comparison.")
-    parser.add_argument("--n-samples", type=int, default=500,
-                        help="NUTS samples per chain (if --compare-nuts).")
-    parser.add_argument("--n-warmup", type=int, default=300,
-                        help="NUTS dual-averaging warmup steps (if --compare-nuts).")
-    parser.add_argument("--n-chains", type=int, default=2,
-                        help="NUTS chains per galaxy (if --compare-nuts).")
-    parser.add_argument("--chain-jitter", type=float, default=0.5,
-                        help="Std of NUTS chain init perturbations (unconstrained space).")
+    parser.add_argument(
+        "--compare-nuts",
+        action="store_true",
+        help="Also run per-galaxy NUTS (dual-averaging, no Pathfinder) for performance comparison.",
+    )
+    parser.add_argument(
+        "--n-samples", type=int, default=500, help="NUTS samples per chain (if --compare-nuts)."
+    )
+    parser.add_argument(
+        "--n-warmup",
+        type=int,
+        default=300,
+        help="NUTS dual-averaging warmup steps (if --compare-nuts).",
+    )
+    parser.add_argument(
+        "--n-chains", type=int, default=2, help="NUTS chains per galaxy (if --compare-nuts)."
+    )
+    parser.add_argument(
+        "--chain-jitter",
+        type=float,
+        default=0.5,
+        help="Std of NUTS chain init perturbations (unconstrained space).",
+    )
 
     args = parser.parse_args()
 
@@ -741,9 +828,7 @@ def main() -> None:
 
     config = load_config(Path(args.config))
     obs_flux, flux_err, galaxy_ids = load_catalogue(Path(args.catalogue), config)
-    emulator, band_idx = load_emulator_and_band_indices(
-        emulator_path, list(config["bands"].keys())
-    )
+    emulator, band_idx = load_emulator_and_band_indices(emulator_path, list(config["bands"].keys()))
 
     if args.n_galaxies is not None:
         n = min(args.n_galaxies, len(galaxy_ids))

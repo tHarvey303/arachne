@@ -17,6 +17,7 @@ Usage
 Defaults reproduce the configuration selected by the Optuna search in
 ``scripts/experiments/hpo_lab.py``.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -26,14 +27,18 @@ from train_parrot_emulator import _DEFAULT_BANDS
 
 
 def parse_args(argv=None):
+    """Parse command-line arguments."""
     p = argparse.ArgumentParser(
         description="Train a ParrotEmulatorV2 (mass-factorised, Fourier-z).",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument("--library", required=True)
     p.add_argument("--output", default="outputs/emulators/parrot_emulator_v2.eqx")
-    p.add_argument("--checkpoint", default=None,
-                   help="best-val safety checkpoint path (default: <output>.best.eqx)")
+    p.add_argument(
+        "--checkpoint",
+        default=None,
+        help="best-val safety checkpoint path (default: <output>.best.eqx)",
+    )
     p.add_argument("--params", nargs="+", default="all")
     p.add_argument("--bands", nargs="+", default=_DEFAULT_BANDS)
     p.add_argument("--arch", choices=["mlp", "resmlp"], default="mlp")
@@ -56,6 +61,7 @@ def parse_args(argv=None):
 
 
 def main(argv=None):
+    """Train a ParrotEmulatorV2 from a synference library and save the checkpoint."""
     args = parse_args(argv)
     import os
 
@@ -64,14 +70,16 @@ def main(argv=None):
     os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
     checkpoint = args.checkpoint
     if checkpoint is None:
-        stem = args.output[:-len(".eqx")] if args.output.endswith(".eqx") else args.output
+        stem = args.output[: -len(".eqx")] if args.output.endswith(".eqx") else args.output
         checkpoint = stem + ".best.eqx"
 
     print(f"Library : {args.library}")
     print(f"Output  : {args.output}")
-    print(f"Arch    : {args.arch} width={args.width} "
-          f"{'depth=' + str(args.depth) if args.arch == 'mlp' else 'blocks=' + str(args.blocks)} "
-          f"fourier_k={args.fourier_k}")
+    print(
+        f"Arch    : {args.arch} width={args.width} "
+        f"{'depth=' + str(args.depth) if args.arch == 'mlp' else 'blocks=' + str(args.blocks)} "
+        f"fourier_k={args.fourier_k}"
+    )
     print(f"Training: {args.epochs} epochs, batch={args.batch}, lr={args.lr}")
 
     emulator = ParrotEmulatorV2.from_synference_library(

@@ -20,6 +20,15 @@ class SpatialModel(ABC):
     Subclasses may optionally override ``log_prior_from_decoded`` to avoid
     re-decoding theta when decoded params are already available (e.g. in
     ``ForwardModel.log_posterior``).  The default delegates to ``log_prior``.
+
+    Subclasses may also override ``model_image`` when the unconvolved model
+    image is not naturally a per-pixel emulator evaluation (e.g.
+    ``AdditiveComponentModel`` evaluates the emulator once per component and
+    multiplies by surface-brightness profiles).  The default implementation
+    is ``decode -> emulator.predict -> reshape``.
+
+    Models with a proper (normalisable) prior may implement ``sample_prior``
+    for use by nested sampling.
     """
 
     @property
@@ -78,3 +87,47 @@ class SpatialModel(ABC):
             Scalar log-prior value.
         """
         return self.log_prior(theta)
+
+    def model_image(
+        self,
+        theta: jnp.ndarray,
+        emulator,
+        image_shape: tuple,
+    ) -> jnp.ndarray:
+        """Compute the unconvolved model image (N_bands, H, W).
+
+        Default implementation: decode theta to per-pixel physical SPS
+        parameters, evaluate the emulator on every pixel, and reshape the
+        (H*W, N_bands) flux table to an image cube.  Subclasses may override
+        this to use a cheaper or physically different construction.
+
+        Args:
+            theta: Unconstrained parameter vector of shape (n_params,).
+            emulator: ``SPSEmulator`` whose ``predict`` maps (N, N_sps) -> (N, N_bands).
+            image_shape: Spatial dimensions (H, W).
+
+        Returns:
+            Unconvolved model image of shape (N_bands, H, W) in nJy.
+        """
+        H, W = image_shape
+        pixel_params = self.decode(theta, (H, W))  # (H*W, N_sps)
+        pixel_fluxes = emulator.predict(pixel_params)  # (H*W, N_bands)
+        n_bands = pixel_fluxes.shape[1]
+        return pixel_fluxes.T.reshape(n_bands, H, W)
+
+    def sample_prior(self, key, n: int) -> jnp.ndarray:
+        """Draw ``n`` samples of theta from the prior.
+
+        Used by nested sampling; implement for models with a proper prior.
+        The default raises ``NotImplementedError``.
+
+        Args:
+            key: ``jax.random`` PRNG key.
+            n: Number of samples to draw.
+
+        Returns:
+            Array of shape (n, n_params) of unconstrained theta vectors.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not define a proper prior to sample from."
+        )

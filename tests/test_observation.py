@@ -101,14 +101,15 @@ def test_mask_default_all_valid():
 def _write_fits(path, data, header=None):
     """Write a 2-D numpy array to a FITS file."""
     from astropy.io import fits as afits
+
     hdu = afits.PrimaryHDU(data, header=header)
     afits.HDUList([hdu]).writeto(str(path), overwrite=True)
 
 
-def _make_tan_wcs(ra=150.0, dec=2.0, crpix_x=17, crpix_y=17,
-                  pixel_scale_deg=0.031 / 3600):
+def _make_tan_wcs(ra=150.0, dec=2.0, crpix_x=17, crpix_y=17, pixel_scale_deg=0.031 / 3600):
     """Return a minimal astropy WCS with a TAN projection."""
     from astropy.wcs import WCS as AstroWCS
+
     w = AstroWCS(naxis=2)
     w.wcs.crpix = [crpix_x, crpix_y]
     w.wcs.crval = [ra, dec]
@@ -172,7 +173,7 @@ class TestFromFits:
             flux_paths=[fp],
             variance_paths=[vp],
             band_names=["F115W"],
-            cutout_center=(16, 16),   # (cy, cx) pixel coords (no WCS)
+            cutout_center=(16, 16),  # (cy, cx) pixel coords (no WCS)
             cutout_size=8,
         )
         assert obs.flux.shape == (1, 8, 8)
@@ -208,7 +209,7 @@ class TestFromFits:
             flux_paths=flux_paths,
             variance_paths=var_paths,
             band_names=["F115W", "F200W", "F277W"],
-            cutout_center=(150.0, 2.0),   # (RA, Dec) = crval → image centre
+            cutout_center=(150.0, 2.0),  # (RA, Dec) = crval → image centre
             cutout_size=cutout_size,
         )
         assert obs.flux.shape == (3, cutout_size, cutout_size), (

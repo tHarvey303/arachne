@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Diagnostic plots for NSS bulge+disk fixed-z fits.
+r"""Diagnostic plots for NSS bulge+disk fixed-z fits.
 
 Loads completed per-worker HDF5 files, concatenates them, and produces
 three figures: run QC, physical parameter distributions, and science plots.
@@ -16,46 +16,55 @@ Usage
 from __future__ import annotations
 
 import argparse
-import sys
 from pathlib import Path
 
 import h5py
 import matplotlib
+
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
+import matplotlib.pyplot as plt
 import numpy as np
 from astropy.table import Table
 
 PARAM_NAMES = [
-    "redshift", "log_mass", "slope", "fesc_lya", "dust_bump_amplitude",
-    "log10metallicity", "Av",
-    "logsfr_ratio_0", "logsfr_ratio_1", "logsfr_ratio_2",
-    "logsfr_ratio_3", "logsfr_ratio_4",
+    "redshift",
+    "log_mass",
+    "slope",
+    "fesc_lya",
+    "dust_bump_amplitude",
+    "log10metallicity",
+    "Av",
+    "logsfr_ratio_0",
+    "logsfr_ratio_1",
+    "logsfr_ratio_2",
+    "logsfr_ratio_3",
+    "logsfr_ratio_4",
 ]
 PARAM_LABELS = {
-    "redshift":            r"$z$ (fixed)",
-    "log_mass":            r"$\log M_\star / M_\odot$",
-    "slope":               r"$\delta$ (attenuation slope)",
-    "fesc_lya":            r"$f_\mathrm{esc,Ly\alpha}$",
+    "redshift": r"$z$ (fixed)",
+    "log_mass": r"$\log M_\star / M_\odot$",
+    "slope": r"$\delta$ (attenuation slope)",
+    "fesc_lya": r"$f_\mathrm{esc,Ly\alpha}$",
     "dust_bump_amplitude": r"$B_{2175}$ (dust bump)",
-    "log10metallicity":    r"$\log Z / Z_\odot$",
-    "Av":                  r"$A_V$ (mag)",
-    "logsfr_ratio_0":      r"$\log \mathrm{SFR}_0/\mathrm{SFR}_1$",
-    "logsfr_ratio_1":      r"$\log \mathrm{SFR}_1/\mathrm{SFR}_2$",
-    "logsfr_ratio_2":      r"$\log \mathrm{SFR}_2/\mathrm{SFR}_3$",
-    "logsfr_ratio_3":      r"$\log \mathrm{SFR}_3/\mathrm{SFR}_4$",
-    "logsfr_ratio_4":      r"$\log \mathrm{SFR}_4/\mathrm{SFR}_5$",
+    "log10metallicity": r"$\log Z / Z_\odot$",
+    "Av": r"$A_V$ (mag)",
+    "logsfr_ratio_0": r"$\log \mathrm{SFR}_0/\mathrm{SFR}_1$",
+    "logsfr_ratio_1": r"$\log \mathrm{SFR}_1/\mathrm{SFR}_2$",
+    "logsfr_ratio_2": r"$\log \mathrm{SFR}_2/\mathrm{SFR}_3$",
+    "logsfr_ratio_3": r"$\log \mathrm{SFR}_3/\mathrm{SFR}_4$",
+    "logsfr_ratio_4": r"$\log \mathrm{SFR}_4/\mathrm{SFR}_5$",
 }
 
 C_BULGE = "#d62728"
-C_DISK  = "#1f77b4"
-ALPHA   = 0.7
+C_DISK = "#1f77b4"
+ALPHA = 0.7
 
 
 # ---------------------------------------------------------------------------
 # Data loading
 # ---------------------------------------------------------------------------
+
 
 def load_workers(work_dir: Path, workers: list[int], component: str) -> dict:
     """Load and concatenate HDF5 files from multiple workers."""
@@ -66,17 +75,19 @@ def load_workers(work_dir: Path, workers: list[int], component: str) -> dict:
             print(f"  WARNING: {p} not found — skipping worker {w}", flush=True)
             continue
         with h5py.File(p, "r") as f:
-            parts.append({
-                "galaxy_id":   f["galaxy_id"][:],
-                "z_fixed":     f["z_fixed"][:],
-                "nss_samples": f["nss_samples"][:],    # (N, S, 12)
-                "nss_logZ":    f["nss_logZ"][:],
-                "nss_logZ_err":f["nss_logZ_err"][:],
-                "nss_ess":     f["nss_ess"][:],
-                "nss_n_dead":  f["nss_n_dead"][:],
-                "nss_rhat":    f["nss_rhat"][:],       # (N, 12)
-                "nss_time":    f["nss_time"][:],
-            })
+            parts.append(
+                {
+                    "galaxy_id": f["galaxy_id"][:],
+                    "z_fixed": f["z_fixed"][:],
+                    "nss_samples": f["nss_samples"][:],  # (N, S, 12)
+                    "nss_logZ": f["nss_logZ"][:],
+                    "nss_logZ_err": f["nss_logZ_err"][:],
+                    "nss_ess": f["nss_ess"][:],
+                    "nss_n_dead": f["nss_n_dead"][:],
+                    "nss_rhat": f["nss_rhat"][:],  # (N, 12)
+                    "nss_time": f["nss_time"][:],
+                }
+            )
         print(f"  loaded w{w}/{component}: {parts[-1]['galaxy_id'].shape[0]} galaxies")
 
     if not parts:
@@ -94,7 +105,9 @@ def percentiles(samples: np.ndarray, q=(16, 50, 84)):
 # Figure 1: Run QC
 # ---------------------------------------------------------------------------
 
+
 def fig_qc(B: dict, D: dict, out_path: Path, dpi: int = 150) -> None:
+    """Plot the fit-quality diagnostics figure for bulge and disk fits."""
     fig, axes = plt.subplots(2, 3, figsize=(15, 9))
     fig.suptitle("NSS Run QC — Bulge & Disk", fontsize=13, y=1.01)
 
@@ -102,11 +115,12 @@ def fig_qc(B: dict, D: dict, out_path: Path, dpi: int = 150) -> None:
     for comp, data, c in [("Bulge", B, C_BULGE), ("Disk", D, C_DISK)]:
         logz = data["nss_logZ"]
         lo = np.percentile(logz, 1)
-        hi = np.percentile(logz, 99)
         n_bad = (logz < lo).sum()
         good = logz[logz >= lo]
         ax = axes[0, 0]
-        ax.hist(good, bins=80, color=c, alpha=ALPHA, label=f"{comp} (N={len(logz)}, {n_bad} clipped)")
+        ax.hist(
+            good, bins=80, color=c, alpha=ALPHA, label=f"{comp} (N={len(logz)}, {n_bad} clipped)"
+        )
     ax.set_xlabel("log Z (NSS evidence)")
     ax.set_ylabel("Count")
     ax.set_title("Evidence distribution (1–99th pctile)")
@@ -116,8 +130,13 @@ def fig_qc(B: dict, D: dict, out_path: Path, dpi: int = 150) -> None:
     # logZ_err
     ax = axes[0, 1]
     for comp, data, c in [("Bulge", B, C_BULGE), ("Disk", D, C_DISK)]:
-        ax.hist(np.clip(data["nss_logZ_err"], 0, np.percentile(data["nss_logZ_err"], 99)),
-                bins=60, color=c, alpha=ALPHA, label=comp)
+        ax.hist(
+            np.clip(data["nss_logZ_err"], 0, np.percentile(data["nss_logZ_err"], 99)),
+            bins=60,
+            color=c,
+            alpha=ALPHA,
+            label=comp,
+        )
     ax.set_xlabel(r"$\sigma(\log Z)$")
     ax.set_title("Evidence uncertainty")
     ax.legend(fontsize=8)
@@ -146,8 +165,7 @@ def fig_qc(B: dict, D: dict, out_path: Path, dpi: int = 150) -> None:
     for comp, data, c in [("Bulge", B, C_BULGE), ("Disk", D, C_DISK)]:
         nd = data["nss_n_dead"]
         frac_min = (nd == nd.min()).mean() * 100
-        ax.hist(nd, bins=80, color=c, alpha=ALPHA,
-                label=f"{comp} (1-step: {frac_min:.1f}%)")
+        ax.hist(nd, bins=80, color=c, alpha=ALPHA, label=f"{comp} (1-step: {frac_min:.1f}%)")
     ax.set_xlabel("Dead particles")
     ax.set_title("NSS iterations (n_dead)")
     ax.legend(fontsize=8)
@@ -156,8 +174,13 @@ def fig_qc(B: dict, D: dict, out_path: Path, dpi: int = 150) -> None:
     ax = axes[1, 2]
     for comp, data, c in [("Bulge", B, C_BULGE), ("Disk", D, C_DISK)]:
         t = data["nss_time"]
-        ax.hist(t[t < np.percentile(t, 99)], bins=60, color=c, alpha=ALPHA,
-                label=f"{comp} (med={np.median(t):.1f}s)")
+        ax.hist(
+            t[t < np.percentile(t, 99)],
+            bins=60,
+            color=c,
+            alpha=ALPHA,
+            label=f"{comp} (med={np.median(t):.1f}s)",
+        )
     ax.set_xlabel("Time per galaxy (s)")
     ax.set_title("Fitting time")
     ax.legend(fontsize=8)
@@ -173,7 +196,9 @@ def fig_qc(B: dict, D: dict, out_path: Path, dpi: int = 150) -> None:
 # Figure 2: Physical parameter distributions
 # ---------------------------------------------------------------------------
 
+
 def fig_params(B: dict, D: dict, out_path: Path, dpi: int = 150) -> None:
+    """Plot the recovered SPS parameter distributions for bulge and disk."""
     # Use only well-converged galaxies (n_dead > minimum = 50)
     bm = B["nss_n_dead"] > 50
     dm = D["nss_n_dead"] > 50
@@ -189,8 +214,7 @@ def fig_params(B: dict, D: dict, out_path: Path, dpi: int = 150) -> None:
     Dwidth = Dq[1] - Dq[0]
 
     # Parameters to show (skip redshift = fixed, skip SFR ratios for space)
-    show = ["log_mass", "Av", "log10metallicity", "slope",
-            "dust_bump_amplitude", "fesc_lya"]
+    show = ["log_mass", "Av", "log10metallicity", "slope", "dust_bump_amplitude", "fesc_lya"]
     show_idx = [PARAM_NAMES.index(p) for p in show]
 
     fig, axes = plt.subplots(3, len(show), figsize=(18, 11))
@@ -206,7 +230,7 @@ def fig_params(B: dict, D: dict, out_path: Path, dpi: int = 150) -> None:
         hi = max(np.percentile(vb, 99), np.percentile(vd, 99))
         bins = np.linspace(lo, hi, 50)
         ax.hist(vb, bins=bins, color=C_BULGE, alpha=ALPHA, label="Bulge", density=True)
-        ax.hist(vd, bins=bins, color=C_DISK,  alpha=ALPHA, label="Disk",  density=True)
+        ax.hist(vd, bins=bins, color=C_DISK, alpha=ALPHA, label="Disk", density=True)
         ax.set_xlabel(label, fontsize=8)
         if col == 0:
             ax.set_ylabel("Density", fontsize=8)
@@ -222,7 +246,7 @@ def fig_params(B: dict, D: dict, out_path: Path, dpi: int = 150) -> None:
         hi = max(np.percentile(wb, 99), np.percentile(wd, 99))
         bins = np.linspace(lo, hi, 50)
         ax.hist(wb, bins=bins, color=C_BULGE, alpha=ALPHA, density=True)
-        ax.hist(wd, bins=bins, color=C_DISK,  alpha=ALPHA, density=True)
+        ax.hist(wd, bins=bins, color=C_DISK, alpha=ALPHA, density=True)
         ax.set_xlabel(label, fontsize=8)
         if col == 0:
             ax.set_ylabel("Density", fontsize=8)
@@ -231,10 +255,24 @@ def fig_params(B: dict, D: dict, out_path: Path, dpi: int = 150) -> None:
 
         # Row 2: posterior width vs median (scatter, both components)
         ax = axes[2, col]
-        ax.hexbin(vb, wb, gridsize=40, cmap="Reds",  mincnt=1,
-                  extent=[lo, hi, 0, np.percentile(wb, 99)], alpha=0.85)
-        ax.hexbin(vd, wd, gridsize=40, cmap="Blues", mincnt=1,
-                  extent=[lo, hi, 0, np.percentile(wd, 99)], alpha=0.7)
+        ax.hexbin(
+            vb,
+            wb,
+            gridsize=40,
+            cmap="Reds",
+            mincnt=1,
+            extent=[lo, hi, 0, np.percentile(wb, 99)],
+            alpha=0.85,
+        )
+        ax.hexbin(
+            vd,
+            wd,
+            gridsize=40,
+            cmap="Blues",
+            mincnt=1,
+            extent=[lo, hi, 0, np.percentile(wd, 99)],
+            alpha=0.7,
+        )
         ax.set_xlabel(label, fontsize=8)
         if col == 0:
             ax.set_ylabel("CI width", fontsize=8)
@@ -251,11 +289,12 @@ def fig_params(B: dict, D: dict, out_path: Path, dpi: int = 150) -> None:
 # Figure 3: Science — bulge vs disk comparisons
 # ---------------------------------------------------------------------------
 
+
 def fig_science(B: dict, D: dict, cat_path: Path, out_path: Path, dpi: int = 150) -> None:
+    """Plot the science comparison figure against the catalogue at ``cat_path``."""
     cat = Table.read(cat_path)
-    cat_id   = np.array(cat["Id"],      dtype=np.int64)
-    cat_bt   = np.array(cat["BT_f444w"], dtype=float)
-    cat_z    = np.array(cat["zfinal"],  dtype=float)
+    cat_id = np.array(cat["Id"], dtype=np.int64)
+    cat_bt = np.array(cat["BT_f444w"], dtype=float)
 
     # --- match bulge to disk by galaxy_id ---
     # Only use well-converged galaxies
@@ -264,7 +303,7 @@ def fig_science(B: dict, D: dict, cat_path: Path, out_path: Path, dpi: int = 150
 
     bid_all = B["galaxy_id"][bm]
     did_all = D["galaxy_id"][dm]
-    shared  = np.intersect1d(bid_all, did_all)
+    shared = np.intersect1d(bid_all, did_all)
     print(f"  Shared bulge+disk IDs: {len(shared)}")
 
     b_idx = {gid: i for i, gid in enumerate(bid_all)}
@@ -273,59 +312,54 @@ def fig_science(B: dict, D: dict, cat_path: Path, out_path: Path, dpi: int = 150
 
     ib = np.array([b_idx[g] for g in shared])
     id_ = np.array([d_idx[g] for g in shared])
-    ic  = np.array([c_idx[g] for g in shared if g in c_idx])
-    shared_cat = np.array([g for g in shared if g in c_idx])
 
     Bsamp = B["nss_samples"][bm]
     Dsamp = D["nss_samples"][dm]
     i_mass = PARAM_NAMES.index("log_mass")
-    i_av   = PARAM_NAMES.index("Av")
-    i_met  = PARAM_NAMES.index("log10metallicity")
+    i_av = PARAM_NAMES.index("Av")
+    i_met = PARAM_NAMES.index("log10metallicity")
 
-    Bmed = np.median(Bsamp, axis=1)   # (N_b, 12)
+    Bmed = np.median(Bsamp, axis=1)  # (N_b, 12)
     Dmed = np.median(Dsamp, axis=1)
 
-    bM  = Bmed[ib, i_mass]   # log_mass bulge (matched)
-    dM  = Dmed[id_, i_mass]  # log_mass disk  (matched)
+    bM = Bmed[ib, i_mass]  # log_mass bulge (matched)
+    dM = Dmed[id_, i_mass]  # log_mass disk  (matched)
     bAv = Bmed[ib, i_av]
     dAv = Dmed[id_, i_av]
-    bZ  = Bmed[ib, i_met]
-    dZ  = Dmed[id_, i_met]
-    zz  = B["z_fixed"][bm][ib]
+    bZ = Bmed[ib, i_met]
+    dZ = Dmed[id_, i_met]
+    zz = B["z_fixed"][bm][ib]
 
     # Bulge mass fraction from NSS
-    Mb  = 10 ** bM
-    Md  = 10 ** dM
+    Mb = 10**bM
+    Md = 10**dM
     nss_f_bulge = Mb / (Mb + Md)
 
     # Catalogue BT_f444w for the matched sample
-    ic2 = np.array([c_idx[g] for g in shared_cat])
-    bt_matched = cat_bt[ic2]
-    shared_cat_set = set(shared_cat.tolist())
-    shared_bt = np.array([g in shared_cat_set for g in shared])
     bt444 = np.array([cat_bt[c_idx[g]] if g in c_idx else np.nan for g in shared])
 
     # All bulge medians for mass distribution
-    all_bM  = Bmed[:, i_mass]
-    all_dM  = Dmed[:, i_mass]
-    all_bZ  = B["z_fixed"][bm]
-    all_dZ  = D["z_fixed"][dm]
+    all_bM = Bmed[:, i_mass]
+    all_dM = Dmed[:, i_mass]
+    all_bZ = B["z_fixed"][bm]
+    all_dZ = D["z_fixed"][dm]
 
     # --- total stellar mass per galaxy (bulge+disk) ---
     total_log_mass = np.log10(Mb + Md)
 
     # ----------------------------------------------------------------
     fig = plt.figure(figsize=(18, 13))
-    gs  = gridspec.GridSpec(3, 3, figure=fig, hspace=0.45, wspace=0.35)
+    gs = gridspec.GridSpec(3, 3, figure=fig, hspace=0.45, wspace=0.35)
     fig.suptitle("Bulge+Disk Science Diagnostics", fontsize=13)
 
     # (0,0) Bulge vs disk log_mass scatter coloured by z
     ax = fig.add_subplot(gs[0, 0])
     sc = ax.scatter(dM, bM, c=zz, s=2, cmap="plasma", vmin=0, vmax=3, alpha=0.4, rasterized=True)
     plt.colorbar(sc, ax=ax, label="$z$", shrink=0.85)
-    lims = [min(dM.min(), bM.min())-0.1, max(dM.max(), bM.max())+0.1]
+    lims = [min(dM.min(), bM.min()) - 0.1, max(dM.max(), bM.max()) + 0.1]
     ax.plot(lims, lims, "k-", lw=0.8, zorder=0)
-    ax.set_xlim(lims); ax.set_ylim(lims)
+    ax.set_xlim(lims)
+    ax.set_ylim(lims)
     ax.set_xlabel(r"$\log M_\mathrm{disk} / M_\odot$")
     ax.set_ylabel(r"$\log M_\mathrm{bulge} / M_\odot$")
     ax.set_title(f"Bulge vs disk mass (N={len(bM)})")
@@ -334,8 +368,14 @@ def fig_science(B: dict, D: dict, cat_path: Path, out_path: Path, dpi: int = 150
     # (0,1) NSS bulge fraction vs catalogue BT_f444w
     ax = fig.add_subplot(gs[0, 1])
     good_bt = np.isfinite(bt444) & (bt444 > 0)
-    ax.hexbin(bt444[good_bt], nss_f_bulge[good_bt],
-              gridsize=50, cmap="viridis", mincnt=1, extent=[0,1,0,1])
+    ax.hexbin(
+        bt444[good_bt],
+        nss_f_bulge[good_bt],
+        gridsize=50,
+        cmap="viridis",
+        mincnt=1,
+        extent=[0, 1, 0, 1],
+    )
     ax.plot([0, 1], [0, 1], "w-", lw=1.0)
     ax.set_xlabel("BT$_{F444W}$ (catalogue morphology)")
     ax.set_ylabel(r"$M_\mathrm{bulge}/(M_\mathrm{bulge}+M_\mathrm{disk})$ (NSS)")
@@ -351,8 +391,17 @@ def fig_science(B: dict, D: dict, cat_path: Path, out_path: Path, dpi: int = 150
     # (1,0) log_mass distribution, all galaxies
     ax = fig.add_subplot(gs[1, 0])
     bins = np.linspace(6, 13, 60)
-    ax.hist(all_bM, bins=bins, color=C_BULGE, alpha=ALPHA, label=f"Bulge (N={len(all_bM)})", density=True)
-    ax.hist(all_dM, bins=bins, color=C_DISK,  alpha=ALPHA, label=f"Disk (N={len(all_dM)})", density=True)
+    ax.hist(
+        all_bM,
+        bins=bins,
+        color=C_BULGE,
+        alpha=ALPHA,
+        label=f"Bulge (N={len(all_bM)})",
+        density=True,
+    )
+    ax.hist(
+        all_dM, bins=bins, color=C_DISK, alpha=ALPHA, label=f"Disk (N={len(all_dM)})", density=True
+    )
     ax.set_xlabel(r"$\log M_\star / M_\odot$ (median posterior)")
     ax.set_ylabel("Density")
     ax.set_title("Stellar mass distributions")
@@ -387,12 +436,18 @@ def fig_science(B: dict, D: dict, cat_path: Path, out_path: Path, dpi: int = 150
 
     # (2,1) Bulge log_mass vs redshift vs disk
     ax = fig.add_subplot(gs[2, 1])
-    ax.hexbin(all_bZ, all_bM, gridsize=40, cmap="Reds",  mincnt=1, alpha=0.85)
+    ax.hexbin(all_bZ, all_bM, gridsize=40, cmap="Reds", mincnt=1, alpha=0.85)
     ax.hexbin(all_dZ, all_dM, gridsize=40, cmap="Blues", mincnt=1, alpha=0.7)
     # Legend patches
     from matplotlib.patches import Patch
-    ax.legend(handles=[Patch(color=C_BULGE, alpha=0.8, label="Bulge"),
-                       Patch(color=C_DISK,  alpha=0.8, label="Disk")], fontsize=8)
+
+    ax.legend(
+        handles=[
+            Patch(color=C_BULGE, alpha=0.8, label="Bulge"),
+            Patch(color=C_DISK, alpha=0.8, label="Disk"),
+        ],
+        fontsize=8,
+    )
     ax.set_xlabel("Redshift $z$")
     ax.set_ylabel(r"$\log M_\star / M_\odot$")
     ax.set_title("Mass vs redshift by component")
@@ -401,10 +456,15 @@ def fig_science(B: dict, D: dict, cat_path: Path, out_path: Path, dpi: int = 150
     ax = fig.add_subplot(gs[2, 2])
     all_bAv = Bmed[:, i_av]
     all_dAv = Dmed[:, i_av]
-    ax.hexbin(all_bZ, all_bAv, gridsize=40, cmap="Reds",  mincnt=1, alpha=0.85)
+    ax.hexbin(all_bZ, all_bAv, gridsize=40, cmap="Reds", mincnt=1, alpha=0.85)
     ax.hexbin(all_dZ, all_dAv, gridsize=40, cmap="Blues", mincnt=1, alpha=0.7)
-    ax.legend(handles=[Patch(color=C_BULGE, alpha=0.8, label="Bulge"),
-                       Patch(color=C_DISK,  alpha=0.8, label="Disk")], fontsize=8)
+    ax.legend(
+        handles=[
+            Patch(color=C_BULGE, alpha=0.8, label="Bulge"),
+            Patch(color=C_DISK, alpha=0.8, label="Disk"),
+        ],
+        fontsize=8,
+    )
     ax.set_xlabel("Redshift $z$")
     ax.set_ylabel(r"$A_V$ (mag)")
     ax.set_title("Dust attenuation vs redshift")
@@ -418,14 +478,18 @@ def fig_science(B: dict, D: dict, cat_path: Path, out_path: Path, dpi: int = 150
 # Figure 4: Per-parameter posterior widths (violin)
 # ---------------------------------------------------------------------------
 
+
 def fig_violin(B: dict, D: dict, out_path: Path, dpi: int = 150) -> None:
+    """Plot violin distributions of bulge versus disk parameters."""
     bm = B["nss_n_dead"] > 50
     dm = D["nss_n_dead"] > 50
 
-    Bwidth = (np.percentile(B["nss_samples"][bm], 84, axis=1)
-              - np.percentile(B["nss_samples"][bm], 16, axis=1))  # (N, 12)
-    Dwidth = (np.percentile(D["nss_samples"][dm], 84, axis=1)
-              - np.percentile(D["nss_samples"][dm], 16, axis=1))
+    Bwidth = np.percentile(B["nss_samples"][bm], 84, axis=1) - np.percentile(
+        B["nss_samples"][bm], 16, axis=1
+    )  # (N, 12)
+    Dwidth = np.percentile(D["nss_samples"][dm], 84, axis=1) - np.percentile(
+        D["nss_samples"][dm], 16, axis=1
+    )
 
     # Show all free params (skip redshift = column 0, fixed)
     free = list(range(1, 12))
@@ -436,13 +500,18 @@ def fig_violin(B: dict, D: dict, out_path: Path, dpi: int = 150) -> None:
 
     for ax, data, width, comp, c in [
         (axes[0], B, Bwidth, "Bulge", C_BULGE),
-        (axes[1], D, Dwidth, "Disk",  C_DISK),
+        (axes[1], D, Dwidth, "Disk", C_DISK),
     ]:
         vdata = [width[:, i] for i in free]
         # Clip each to 1–99th pctile for violin stability
         vdata_clipped = [v[v < np.percentile(v, 99)] for v in vdata]
-        parts = ax.violinplot(vdata_clipped, positions=range(len(free)),
-                              showmedians=True, showextrema=False, widths=0.7)
+        parts = ax.violinplot(
+            vdata_clipped,
+            positions=range(len(free)),
+            showmedians=True,
+            showextrema=False,
+            widths=0.7,
+        )
         for pc in parts["bodies"]:
             pc.set_facecolor(c)
             pc.set_alpha(0.7)
@@ -451,7 +520,7 @@ def fig_violin(B: dict, D: dict, out_path: Path, dpi: int = 150) -> None:
         ax.set_xticks(range(len(free)))
         ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=8)
         ax.set_ylabel("84–16% CI width")
-        ax.set_title(f"{comp} (N={len(data['nss_logZ'][bm if comp=='Bulge' else dm])})")
+        ax.set_title(f"{comp} (N={len(data['nss_logZ'][bm if comp == 'Bulge' else dm])})")
         ax.set_ylim(bottom=0)
         ax.grid(axis="y", alpha=0.3)
 
@@ -465,17 +534,23 @@ def fig_violin(B: dict, D: dict, out_path: Path, dpi: int = 150) -> None:
 # Main
 # ---------------------------------------------------------------------------
 
+
 def main() -> None:
+    """Command-line entry point."""
     parser = argparse.ArgumentParser(
         description="Diagnostic plots for NSS bulge+disk fits.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
-        "--work-dir", default="/cosma7/data/dp276/dc-harv3/work/outputs/nss_bulge_disk",
+        "--work-dir",
+        default="/cosma7/data/dp276/dc-harv3/work/outputs/nss_bulge_disk",
         help="Directory containing per-worker subdirs (w1/, w2/, ...).",
     )
     parser.add_argument(
-        "--workers", type=int, nargs="+", default=list(range(1, 7)),
+        "--workers",
+        type=int,
+        nargs="+",
+        default=list(range(1, 7)),
         help="Worker indices to load.",
     )
     parser.add_argument(
@@ -490,7 +565,7 @@ def main() -> None:
     args = parser.parse_args()
 
     work_dir = Path(args.work_dir)
-    out_dir  = Path(args.out_dir)
+    out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"Loading workers {args.workers} …")

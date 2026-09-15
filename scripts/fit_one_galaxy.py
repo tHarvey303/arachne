@@ -63,16 +63,31 @@ OBS_MASK_THRESH = MISSING_SIGMA * 0.5
 LOG2PI = math.log(2.0 * math.pi)
 
 SPS_PARAM_NAMES = [
-    "redshift", "log_mass", "slope", "fesc_lya", "dust_bump_amplitude",
-    "log10metallicity", "Av", "logsfr_ratio_0", "logsfr_ratio_1",
-    "logsfr_ratio_2", "logsfr_ratio_3", "logsfr_ratio_4",
+    "redshift",
+    "log_mass",
+    "slope",
+    "fesc_lya",
+    "dust_bump_amplitude",
+    "log10metallicity",
+    "Av",
+    "logsfr_ratio_0",
+    "logsfr_ratio_1",
+    "logsfr_ratio_2",
+    "logsfr_ratio_3",
+    "logsfr_ratio_4",
 ]
 PARAM_BOUNDS = {
-    "redshift": (0.01, 14.0), "log_mass": (4.0, 12.0), "slope": (-0.3, 1.1),
-    "fesc_lya": (0.0, 1.0), "dust_bump_amplitude": (0.0, 5.0),
-    "log10metallicity": (-4.0, -1.39), "Av": (0.001, 5.0),
-    "logsfr_ratio_0": (-10.0, 10.0), "logsfr_ratio_1": (-10.0, 10.0),
-    "logsfr_ratio_2": (-10.0, 10.0), "logsfr_ratio_3": (-10.0, 10.0),
+    "redshift": (0.01, 14.0),
+    "log_mass": (4.0, 12.0),
+    "slope": (-0.3, 1.1),
+    "fesc_lya": (0.0, 1.0),
+    "dust_bump_amplitude": (0.0, 5.0),
+    "log10metallicity": (-4.0, -1.39),
+    "Av": (0.001, 5.0),
+    "logsfr_ratio_0": (-10.0, 10.0),
+    "logsfr_ratio_1": (-10.0, 10.0),
+    "logsfr_ratio_2": (-10.0, 10.0),
+    "logsfr_ratio_3": (-10.0, 10.0),
     "logsfr_ratio_4": (-10.0, 10.0),
 }
 DEFAULT_PRIORS = {p: {"dist": "uniform"} for p in SPS_PARAM_NAMES}
@@ -83,10 +98,18 @@ for i in range(5):
 # of the wide bounds, which are unphysical: Av=2.5, Z=-2.7, ...).  Only the SED
 # shape matters here; z is gridded and log_mass is amplitude-solved.
 REF_INIT_PHYS = {
-    "redshift": 1.0, "log_mass": 8.0, "slope": 0.0, "fesc_lya": 0.5,
-    "dust_bump_amplitude": 0.0, "log10metallicity": -2.0, "Av": 0.3,
-    "logsfr_ratio_0": 0.0, "logsfr_ratio_1": 0.0, "logsfr_ratio_2": 0.0,
-    "logsfr_ratio_3": 0.0, "logsfr_ratio_4": 0.0,
+    "redshift": 1.0,
+    "log_mass": 8.0,
+    "slope": 0.0,
+    "fesc_lya": 0.5,
+    "dust_bump_amplitude": 0.0,
+    "log10metallicity": -2.0,
+    "Av": 0.3,
+    "logsfr_ratio_0": 0.0,
+    "logsfr_ratio_1": 0.0,
+    "logsfr_ratio_2": 0.0,
+    "logsfr_ratio_3": 0.0,
+    "logsfr_ratio_4": 0.0,
 }
 
 REDSHIFT_IDX = SPS_PARAM_NAMES.index("redshift")
@@ -95,7 +118,13 @@ AV_IDX = SPS_PARAM_NAMES.index("Av")
 
 FLUX_UNIT_TO_NJY = {"nJy": 1.0, "uJy": 1e3, "ujy": 1e3, "µJy": 1e3, "mJy": 1e6, "Jy": 1e9}
 _KNOWN_DISTS = {
-    "uniform", "loguniform", "normal", "studentt", "halfnormal", "exponential", "lognormal",
+    "uniform",
+    "loguniform",
+    "normal",
+    "studentt",
+    "halfnormal",
+    "exponential",
+    "lognormal",
 }
 
 
@@ -115,8 +144,12 @@ def _build_prior_logprob(spec, lo, hi):
         return lambda x: -0.5 * LOG2PI - math.log(sc) - 0.5 * ((x - loc) / sc) ** 2
     if dist == "studentt":
         df, loc, sc = float(spec["df"]), float(spec.get("loc", 0.0)), float(spec["scale"])
-        c = (math.lgamma(0.5 * (df + 1)) - math.lgamma(0.5 * df)
-             - 0.5 * math.log(df * math.pi) - math.log(sc))
+        c = (
+            math.lgamma(0.5 * (df + 1))
+            - math.lgamma(0.5 * df)
+            - 0.5 * math.log(df * math.pi)
+            - math.log(sc)
+        )
         return lambda x: c - 0.5 * (df + 1) * jnp.log1p(((x - loc) / sc) ** 2 / df)
     if dist == "halfnormal":
         sc = float(spec["scale"])
@@ -275,7 +308,7 @@ def make_log_posterior(emulator, band_idx, obs, err, log_prior_fn, min_frac_err=
     # approximation error, calibration uncertainty, and model incompleteness.
     if min_frac_err > 0.0:
         err_j = jnp.maximum(err_j, min_frac_err * jnp.abs(obs_j))
-    inv_var = 1.0 / (err_j ** 2)
+    inv_var = 1.0 / (err_j**2)
     log_range = jnp.log(_HIGHS - _LOWS)
 
     def log_posterior(theta):
@@ -324,7 +357,7 @@ def robust_init(obs, err, emulator, band_idx, n_z=60, min_frac_err=0.0):
     ref = np.clip(ref, np.asarray(_LOWS), np.asarray(_HIGHS))
 
     # Build full (n_z * n_av, P) candidate grid
-    zz, aa = np.meshgrid(z_grid, av_grid, indexing="ij")   # (n_z, n_av)
+    zz, aa = np.meshgrid(z_grid, av_grid, indexing="ij")  # (n_z, n_av)
     zz, aa = zz.ravel(), aa.ravel()
     n_cands = len(zz)
     cands = np.tile(ref, (n_cands, 1))
@@ -335,10 +368,10 @@ def robust_init(obs, err, emulator, band_idx, n_z=60, min_frac_err=0.0):
     preds = np.asarray(emulator.predict(jnp.asarray(cands, jnp.float32)))[:, np.asarray(band_idx)]
     mask = np.asarray(err) < OBS_MASK_THRESH
     eff_err = np.maximum(err, min_frac_err * np.abs(obs)) if min_frac_err > 0 else np.asarray(err)
-    w = mask / eff_err ** 2
+    w = mask / eff_err**2
     num = np.sum(w * np.asarray(obs) * preds, axis=1)
-    den = np.sum(w * preds ** 2, axis=1)
-    s = np.where(den > 0, num / den, 1.0)                       # amplitude per (z, Av)
+    den = np.sum(w * preds**2, axis=1)
+    s = np.where(den > 0, num / den, 1.0)  # amplitude per (z, Av)
     lm = np.clip(REF_INIT_PHYS["log_mass"] + np.log10(np.clip(s, 1e-30, 1e30)), lm_lo, lm_hi)
     chi2 = np.sum(w * (np.asarray(obs)[None, :] - s[:, None] * preds) ** 2, axis=1)
     dof = max(int(mask.sum()) - len(SPS_PARAM_NAMES), 1)
@@ -349,8 +382,12 @@ def robust_init(obs, err, emulator, band_idx, n_z=60, min_frac_err=0.0):
     x0[AV_IDX] = aa[j]
     x0[LOGMASS_IDX] = lm[j]
     theta0 = to_theta(jnp.asarray(x0, jnp.float32))
-    info = {"best_z": float(zz[j]), "best_Av": float(aa[j]), "best_logmass": float(lm[j]),
-            "init_redchi2": float(chi2[j] / dof)}
+    info = {
+        "best_z": float(zz[j]),
+        "best_Av": float(aa[j]),
+        "best_logmass": float(lm[j]),
+        "init_redchi2": float(chi2[j] / dof),
+    }
     return theta0, info
 
 
@@ -384,8 +421,9 @@ def _chain_inits(theta0, key, n_chains, jitter):
     return out
 
 
-def sample_pathfinder_nuts(logpost, theta0, key, n_warmup, n_samples, n_chains,
-                           target_accept, diag_metric):
+def sample_pathfinder_nuts(
+    logpost, theta0, key, n_warmup, n_samples, n_chains, target_accept, diag_metric
+):
     """Pathfinder for MAP init, then window_adaptation for step size + mass matrix.
 
     Using Pathfinder's fixed step size heuristic causes high divergence rates when
@@ -397,14 +435,17 @@ def sample_pathfinder_nuts(logpost, theta0, key, n_warmup, n_samples, n_chains,
     pf_key, sample_key = jax.random.split(key)
     state, _ = pf_mod.approximate(pf_key, logpost, theta0, num_samples=256)
     pf_map = state.position
-    print(f"  Pathfinder MAP logpost = {float(logpost(pf_map)):+.2f}  "
-          f"(start logpost = {float(logpost(theta0)):+.2f})")
+    print(
+        f"  Pathfinder MAP logpost = {float(logpost(pf_map)):+.2f}  "
+        f"(start logpost = {float(logpost(theta0)):+.2f})"
+    )
 
     samples, acc, div, steps = [], [], [], []
     for c, init in enumerate(_chain_inits(pf_map, sample_key, n_chains, 0.3)):
         wkey, skey = jax.random.split(jax.random.fold_in(sample_key, 100 + c))
         warmup = blackjax.window_adaptation(
-            blackjax.nuts, logpost,
+            blackjax.nuts,
+            logpost,
             target_acceptance_rate=target_accept,
             is_mass_matrix_diagonal=diag_metric,
         )
@@ -416,6 +457,7 @@ def sample_pathfinder_nuts(logpost, theta0, key, n_warmup, n_samples, n_chains,
             def step(s, kk):
                 s, info = nuts.step(kk, s)
                 return s, (s.position, info.acceptance_rate, info.is_divergent)
+
             _, out = jax.lax.scan(step, st, jax.random.split(k, n_samples))
             return out
 
@@ -424,19 +466,31 @@ def sample_pathfinder_nuts(logpost, theta0, key, n_warmup, n_samples, n_chains,
         acc.append(float(np.mean(ar)))
         div.append(float(np.mean(dv)))
         steps.append(float(params["step_size"]))
-    return np.stack(samples), {"accept": acc, "divergence": div,
-                               "step_size": steps, "metric": "diag" if diag_metric else "dense"}
+    return np.stack(samples), {
+        "accept": acc,
+        "divergence": div,
+        "step_size": steps,
+        "metric": "diag" if diag_metric else "dense",
+    }
 
 
 def sample_window_nuts(
-    logpost, theta0, key, n_warmup, n_samples, n_chains, target_accept, diag_metric,
+    logpost,
+    theta0,
+    key,
+    n_warmup,
+    n_samples,
+    n_chains,
+    target_accept,
+    diag_metric,
 ):
     """Run blackjax window-adaptation NUTS and return (samples, info dict)."""
     samples, acc, div, steps = [], [], [], []
     for c, init in enumerate(_chain_inits(theta0, key, n_chains, 0.3)):
         wkey, skey = jax.random.split(jax.random.fold_in(key, 100 + c))
         warmup = blackjax.window_adaptation(
-            blackjax.nuts, logpost,
+            blackjax.nuts,
+            logpost,
             target_acceptance_rate=target_accept,
             is_mass_matrix_diagonal=diag_metric,
         )
@@ -448,6 +502,7 @@ def sample_window_nuts(
             def step(s, kk):
                 s, info = nuts.step(kk, s)
                 return s, (s.position, info.acceptance_rate, info.is_divergent)
+
             _, out = jax.lax.scan(step, st, jax.random.split(k, n_samples))
             return out
 
@@ -456,8 +511,12 @@ def sample_window_nuts(
         acc.append(float(np.mean(ar)))
         div.append(float(np.mean(dv)))
         steps.append(float(params["step_size"]))
-    return np.stack(samples), {"accept": acc, "divergence": div,
-                               "step_size": steps, "metric": "diag" if diag_metric else "dense"}
+    return np.stack(samples), {
+        "accept": acc,
+        "divergence": div,
+        "step_size": steps,
+        "metric": "diag" if diag_metric else "dense",
+    }
 
 
 def sample_mclmc(logpost, theta0, key, n_warmup, n_samples, n_chains):
@@ -477,8 +536,11 @@ def sample_mclmc(logpost, theta0, key, n_warmup, n_samples, n_chains):
             )
 
         tuned_state, params = blackjax.mclmc_find_L_and_step_size(
-            mclmc_kernel=kernel, num_steps=n_warmup, state=init_state,
-            rng_key=tk, diagonal_preconditioning=True,
+            mclmc_kernel=kernel,
+            num_steps=n_warmup,
+            state=init_state,
+            rng_key=tk,
+            diagonal_preconditioning=True,
         )
         # Guard (#761): tuning can wander to a junk point. Keep tuned L/step,
         # but restart from our good init if the tuned state is much worse.
@@ -492,6 +554,7 @@ def sample_mclmc(logpost, theta0, key, n_warmup, n_samples, n_chains):
             def step(s, kk):
                 s, _info = alg.step(kk, s)
                 return s, s.position
+
             _, pos = jax.lax.scan(step, st, jax.random.split(k, n_samples))
             return pos
 
@@ -524,11 +587,13 @@ def diagnostics(samples):
     """Return (rhat (P,), ess (P,)) using blackjax.diagnostics if available."""
     try:
         from blackjax.diagnostics import potential_scale_reduction
+
         rhat = np.asarray(potential_scale_reduction(samples, chain_axis=0, sample_axis=1))
     except Exception:
         rhat = split_rhat(samples)
     try:
         from blackjax.diagnostics import effective_sample_size
+
         ess = np.asarray(effective_sample_size(samples, chain_axis=0, sample_axis=1))
     except Exception:
         ess = np.full(samples.shape[-1], np.nan)
@@ -541,8 +606,10 @@ def print_sed(obs, err, pred, band_names, min_frac_err=0.0):
     print(f"  {'band':<26} {'obs':>11} {'eff_err':>10} {'pred':>11} {'(o-p)/e':>8}")
     for b, name in enumerate(band_names):
         if err[b] < OBS_MASK_THRESH:
-            print(f"  {name:<26} {obs[b]:11.4g} {eff_err[b]:10.3g} {pred[b]:11.4g} "
-                  f"{(obs[b] - pred[b]) / eff_err[b]:8.2f}")
+            print(
+                f"  {name:<26} {obs[b]:11.4g} {eff_err[b]:10.3g} {pred[b]:11.4g} "
+                f"{(obs[b] - pred[b]) / eff_err[b]:8.2f}"
+            )
         else:
             print(f"  {name:<26} {'(masked)':>11}")
 
@@ -575,14 +642,16 @@ def main():
     ap.add_argument("--index", type=int, default=None, help="row index of galaxy")
     ap.add_argument("--id", default=None, help="galaxy id (needs id_col in config)")
     ap.add_argument("--mock", action="store_true", help="fit a synthetic galaxy (known truth)")
-    ap.add_argument("--sampler", choices=["pathfinder_nuts", "window_nuts", "mclmc"],
-                    default="pathfinder_nuts")
+    ap.add_argument(
+        "--sampler", choices=["pathfinder_nuts", "window_nuts", "mclmc"], default="pathfinder_nuts"
+    )
     ap.add_argument("--n-warmup", type=int, default=500)
     ap.add_argument("--n-samples", type=int, default=1000)
     ap.add_argument("--n-chains", type=int, default=4)
     ap.add_argument("--target-accept", type=float, default=0.8)
-    ap.add_argument("--step-size", type=float, default=0.0,
-                    help="fixed NUTS step (pathfinder_nuts); 0=auto")
+    ap.add_argument(
+        "--step-size", type=float, default=0.0, help="fixed NUTS step (pathfinder_nuts); 0=auto"
+    )
     ap.add_argument("--dense-metric", action="store_true")
     ap.add_argument("--no-mass-init", action="store_true", help="start at domain midpoint instead")
     ap.add_argument("--seed", type=int, default=0)
@@ -594,12 +663,23 @@ def main():
 
     # ---- data ----
     if args.mock:
-        cfg = {"flux_unit": "nJy", "id_col": None,
-               "bands": {b: {} for b in [
-                   "JWST/NIRCam.F090W", "JWST/NIRCam.F115W", "JWST/NIRCam.F150W",
-                   "JWST/NIRCam.F200W", "JWST/NIRCam.F277W", "JWST/NIRCam.F356W",
-                   "JWST/NIRCam.F444W"]},
-               "resolved_priors": resolve_priors({})}
+        cfg = {
+            "flux_unit": "nJy",
+            "id_col": None,
+            "bands": {
+                b: {}
+                for b in [
+                    "JWST/NIRCam.F090W",
+                    "JWST/NIRCam.F115W",
+                    "JWST/NIRCam.F150W",
+                    "JWST/NIRCam.F200W",
+                    "JWST/NIRCam.F277W",
+                    "JWST/NIRCam.F356W",
+                    "JWST/NIRCam.F444W",
+                ]
+            },
+            "resolved_priors": resolve_priors({}),
+        }
         band_names = list(cfg["bands"].keys())
         emulator, band_idx = load_emulator(emu_path, band_names)
         obs, err, true_phys = make_mock(emulator, band_idx, args.seed)
@@ -609,7 +689,8 @@ def main():
             ap.error("catalogue and config required unless --mock")
         cfg = load_config(Path(args.config))
         obs, err, gid, band_names = load_one_galaxy(
-            Path(args.catalogue), cfg, index=args.index, gal_id=args.id)
+            Path(args.catalogue), cfg, index=args.index, gal_id=args.id
+        )
         emulator, band_idx = load_emulator(emu_path, band_names)
         true_phys = None
 
@@ -619,9 +700,14 @@ def main():
 
     min_frac_err = float(cfg.get("min_frac_err", 0.05))
     print(f"Min fractional error floor: {min_frac_err:.1%}")
-    log_post = make_log_posterior(emulator, band_idx, obs, err,
-                                  make_log_prior_fn(cfg["resolved_priors"]),
-                                  min_frac_err=min_frac_err)
+    log_post = make_log_posterior(
+        emulator,
+        band_idx,
+        obs,
+        err,
+        make_log_prior_fn(cfg["resolved_priors"]),
+        min_frac_err=min_frac_err,
+    )
 
     # ---- initialisation ----
     if args.no_mass_init:
@@ -629,42 +715,68 @@ def main():
         print("Init: domain midpoint (--no-mass-init)")
     else:
         theta0, iinfo = robust_init(obs, err, emulator, band_idx, min_frac_err=min_frac_err)
-        print(f"Init (z,Av-grid): z={iinfo['best_z']:.3f}  Av={iinfo['best_Av']:.2f}  "
-              f"log_mass={iinfo['best_logmass']:.2f}  reduced_chi2={iinfo['init_redchi2']:.2f}")
+        print(
+            f"Init (z,Av-grid): z={iinfo['best_z']:.3f}  Av={iinfo['best_Av']:.2f}  "
+            f"log_mass={iinfo['best_logmass']:.2f}  reduced_chi2={iinfo['init_redchi2']:.2f}"
+        )
     rc0, pred0 = reduced_chi2(theta0, obs, err, emulator, band_idx, min_frac_err=min_frac_err)
     print(f"Reduced chi2 at init: {rc0:.2f}")
     print_sed(obs, err, pred0, band_names, min_frac_err=min_frac_err)
 
     # ---- sample ----
     key = jax.random.PRNGKey(args.seed)
-    print(f"\nSampling: {args.sampler}  chains={args.n_chains}  "
-          f"warmup={args.n_warmup}  samples={args.n_samples}")
+    print(
+        f"\nSampling: {args.sampler}  chains={args.n_chains}  "
+        f"warmup={args.n_warmup}  samples={args.n_samples}"
+    )
     if args.sampler == "pathfinder_nuts":
         samples, info = sample_pathfinder_nuts(
-            log_post, theta0, key, args.n_warmup, args.n_samples, args.n_chains,
-            args.target_accept, not args.dense_metric)
+            log_post,
+            theta0,
+            key,
+            args.n_warmup,
+            args.n_samples,
+            args.n_chains,
+            args.target_accept,
+            not args.dense_metric,
+        )
     elif args.sampler == "window_nuts":
         samples, info = sample_window_nuts(
-            log_post, theta0, key, args.n_warmup, args.n_samples, args.n_chains,
-            args.target_accept, not args.dense_metric)
+            log_post,
+            theta0,
+            key,
+            args.n_warmup,
+            args.n_samples,
+            args.n_chains,
+            args.target_accept,
+            not args.dense_metric,
+        )
     else:
         samples, info = sample_mclmc(
-            log_post, theta0, key, args.n_warmup, args.n_samples, args.n_chains)
+            log_post, theta0, key, args.n_warmup, args.n_samples, args.n_chains
+        )
 
     # ---- diagnostics ----
     rhat, ess = diagnostics(samples)
     phys = np.asarray(jax.vmap(to_phys)(jnp.asarray(samples.reshape(-1, P))))
     med_theta = np.median(samples.reshape(-1, P), axis=0)
     rc_post, pred_post = reduced_chi2(
-        med_theta, obs, err, emulator, band_idx, min_frac_err=min_frac_err,
+        med_theta,
+        obs,
+        err,
+        emulator,
+        band_idx,
+        min_frac_err=min_frac_err,
     )
 
     print(f"\n--- diagnostics ({args.sampler}) ---")
     for k, v in info.items():
         print(f"  {k}: {v}")
     print(f"  reduced chi2 @ posterior median: {rc_post:.2f}")
-    print(f"  max R-hat: {np.nanmax(rhat):.3f}   "
-          f"min ESS: {np.nanmin(ess):.0f}   ({samples.shape[0]}x{samples.shape[1]} draws)")
+    print(
+        f"  max R-hat: {np.nanmax(rhat):.3f}   "
+        f"min ESS: {np.nanmin(ess):.0f}   ({samples.shape[0]}x{samples.shape[1]} draws)"
+    )
     worst = int(np.nanargmax(rhat))
     print(
         f"  worst-mixing param: {SPS_PARAM_NAMES[worst]}"

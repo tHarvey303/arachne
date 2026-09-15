@@ -39,8 +39,8 @@ from arachne.utils.logging import setup_named_logger
 logger = setup_named_logger(__name__)
 
 _ASINH_A: float = 2.5 * np.log10(np.e)  # ≈ 1.0857
-DEFAULT_FLUX_FLOOR: float = 1e-4        # nJy (per 1e9 Msun in unit-flux space)
-_Z_SCALE: float = 14.0                  # redshift normalisation for Fourier features
+DEFAULT_FLUX_FLOOR: float = 1e-4  # nJy (per 1e9 Msun in unit-flux space)
+_Z_SCALE: float = 14.0  # redshift normalisation for Fourier features
 
 
 def _mu0_from_floor(floor: float) -> float:
@@ -147,6 +147,7 @@ class ParrotEmulatorV2(SPSEmulator):
     _cfg: str = eqx.field(static=True)  # JSON string (hashable for jit)
 
     def __init__(self, param_names, band_names, cfg, in_mean, in_std, out_mean, key):
+        """Build an untrained emulator with the given normalisation statistics."""
         self._param_names = list(param_names)
         self._band_names = list(band_names)
         cfg = dict(cfg)
@@ -161,14 +162,17 @@ class ParrotEmulatorV2(SPSEmulator):
     # -- config helpers ------------------------------------------------------
     @property
     def cfg(self) -> dict:
+        """Architecture/feature configuration as a dict (parsed from the stored JSON)."""
         return json.loads(self._cfg)
 
     @property
     def param_names(self) -> list[str]:
+        """Ordered emulator input parameter names."""
         return self._param_names
 
     @property
     def band_names(self) -> list[str]:
+        """Ordered output band names."""
         return self._band_names
 
     # Compatibility with validate/diagnose scripts written for V1: metrics are
@@ -193,7 +197,7 @@ class ParrotEmulatorV2(SPSEmulator):
         feats = [x]
         k, kmax = 1, cfg["fourier_k"]
         if kmax > 0:
-            zn = params[:, cfg["i_z"]:cfg["i_z"] + 1] / _Z_SCALE
+            zn = params[:, cfg["i_z"] : cfg["i_z"] + 1] / _Z_SCALE
             while k <= kmax:
                 feats.append(jnp.sin(2 * jnp.pi * k * zn))
                 feats.append(jnp.cos(2 * jnp.pi * k * zn))
@@ -215,6 +219,7 @@ class ParrotEmulatorV2(SPSEmulator):
 
     # -- persistence -----------------------------------------------------------
     def save(self, path: str | Path) -> None:
+        """Serialise config, names and weights to a self-contained ``.eqx`` (npz) file."""
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         buf = io.BytesIO()
@@ -231,18 +236,20 @@ class ParrotEmulatorV2(SPSEmulator):
 
     @classmethod
     def load(cls, path: str | Path) -> "ParrotEmulatorV2":
+        """Load a checkpoint written by :meth:`save`."""
         with np.load(str(path), allow_pickle=False) as raw:
             if "v2_config" not in raw:
                 raise ValueError(
-                    f"{path} is not a ParrotEmulatorV2 checkpoint; "
-                    "use ParrotEmulator.load instead."
+                    f"{path} is not a ParrotEmulatorV2 checkpoint; use ParrotEmulator.load instead."
                 )
             cfg = json.loads(str(raw["v2_config"]))
             param_names = raw["param_names"].tolist()
             band_names = raw["band_names"].tolist()
             weights = bytes(raw["weights_bytes"])
         dummy = cls(
-            param_names, band_names, cfg,
+            param_names,
+            band_names,
+            cfg,
             in_mean=np.zeros(cfg["n_in"], np.float32),
             in_std=np.ones(cfg["n_in"], np.float32),
             out_mean=np.zeros(cfg["n_out"], np.float32),
@@ -309,8 +316,10 @@ class ParrotEmulatorV2(SPSEmulator):
             mask = np.ones(len(params_raw), bool)
             mask[exclude_rows] = False
             params_raw, flux_raw = params_raw[mask], flux_raw[mask]
-        logger.info(f"Library: {len(params_raw)} usable rows, "
-                    f"{len(param_names)} params, {len(band_names)} bands")
+        logger.info(
+            f"Library: {len(params_raw)} usable rows, "
+            f"{len(param_names)} params, {len(band_names)} bands"
+        )
 
         i_mass = param_names.index("log_mass") if "log_mass" in param_names else -1
         i_z = param_names.index("redshift")
@@ -329,28 +338,52 @@ class ParrotEmulatorV2(SPSEmulator):
             f_t = np.where(flux_raw < flux_floor, 0.0, flux_raw)
         y_all = _flux_to_mag_np(f_t, mu0_train)
 
-        keep_idx = [i for i in range(len(param_names))
-                    if not (mass_norm and not keep_mass_input and i == i_mass)]
-        sfr_cols = [keep_idx.index(i) for i, n in enumerate(param_names)
-                    if n.startswith("logsfr_ratio") and i in keep_idx] if sfr_arsinh else []
+        keep_idx = [
+            i
+            for i in range(len(param_names))
+            if not (mass_norm and not keep_mass_input and i == i_mass)
+        ]
+        sfr_cols = (
+            [
+                keep_idx.index(i)
+                for i, n in enumerate(param_names)
+                if n.startswith("logsfr_ratio") and i in keep_idx
+            ]
+            if sfr_arsinh
+            else []
+        )
 
         cfg = dict(
-            arch=arch, width=width, depth=depth, blocks=blocks,
-            mass_norm=mass_norm, keep_mass_input=keep_mass_input,
-            sfr_arsinh=sfr_arsinh, fourier_k=fourier_k,
-            flux_floor=flux_floor, mu0_train=mu0_train,
-            i_mass=i_mass, i_z=i_z, keep_idx=keep_idx, sfr_cols=sfr_cols,
+            arch=arch,
+            width=width,
+            depth=depth,
+            blocks=blocks,
+            mass_norm=mass_norm,
+            keep_mass_input=keep_mass_input,
+            sfr_arsinh=sfr_arsinh,
+            fourier_k=fourier_k,
+            flux_floor=flux_floor,
+            mu0_train=mu0_train,
+            i_mass=i_mass,
+            i_z=i_z,
+            keep_idx=keep_idx,
+            sfr_cols=sfr_cols,
         )
 
         # features via a temporary instance (needs normalisation set first)
-        proto = cls(param_names, band_names, cfg,
-                    in_mean=np.zeros(len(keep_idx), np.float32),
-                    in_std=np.ones(len(keep_idx), np.float32),
-                    out_mean=np.zeros(len(band_names), np.float32),
-                    key=jax.random.PRNGKey(seed))
+        proto = cls(
+            param_names,
+            band_names,
+            cfg,
+            in_mean=np.zeros(len(keep_idx), np.float32),
+            in_std=np.ones(len(keep_idx), np.float32),
+            out_mean=np.zeros(len(band_names), np.float32),
+            key=jax.random.PRNGKey(seed),
+        )
         # proto n_in was wrong pre-fourier; recompute features in numpy instead
-        x_all = np.asarray(jax.device_get(
-            proto._features(jnp.asarray(params_raw, dtype=jnp.float64))))
+        x_all = np.asarray(
+            jax.device_get(proto._features(jnp.asarray(params_raw, dtype=jnp.float64)))
+        )
 
         rng = np.random.default_rng(seed)
         n = len(x_all)
@@ -362,8 +395,9 @@ class ParrotEmulatorV2(SPSEmulator):
         in_std = x_all[tr].std(axis=0) + 1e-8
         out_mean = y_all[tr].mean(axis=0)
 
-        model = cls(param_names, band_names, cfg, in_mean, in_std, out_mean,
-                    key=jax.random.PRNGKey(seed))
+        model = cls(
+            param_names, band_names, cfg, in_mean, in_std, out_mean, key=jax.random.PRNGKey(seed)
+        )
 
         xt = jnp.array((x_all[tr] - in_mean) / in_std, dtype=jnp.float32)
         yt = jnp.array(y_all[tr] - out_mean, dtype=jnp.float32)
@@ -374,10 +408,15 @@ class ParrotEmulatorV2(SPSEmulator):
         n_train = xt.shape[0]
         steps_per_epoch = n_train // batch_size
         sched = optax.warmup_cosine_decay_schedule(
-            0.0, learning_rate, warmup_epochs * steps_per_epoch,
-            n_epochs * steps_per_epoch, learning_rate * min_lr_frac)
-        optim = (optax.adamw(sched, weight_decay=weight_decay)
-                 if weight_decay > 0 else optax.adam(sched))
+            0.0,
+            learning_rate,
+            warmup_epochs * steps_per_epoch,
+            n_epochs * steps_per_epoch,
+            learning_rate * min_lr_frac,
+        )
+        optim = (
+            optax.adamw(sched, weight_decay=weight_decay) if weight_decay > 0 else optax.adam(sched)
+        )
 
         net_params, net_static = eqx.partition(model.net, eqx.is_array)
         opt_state = optim.init(net_params)
@@ -399,8 +438,7 @@ class ParrotEmulatorV2(SPSEmulator):
                 upd, s = optim.update(g, s, p)
                 return (optax.apply_updates(p, upd), s), loss
 
-            (net_params, opt_state), losses = jax.lax.scan(
-                step, (net_params, opt_state), (xs, ys))
+            (net_params, opt_state), losses = jax.lax.scan(step, (net_params, opt_state), (xs, ys))
             return net_params, opt_state, jnp.mean(losses)
 
         @jax.jit
@@ -412,7 +450,8 @@ class ParrotEmulatorV2(SPSEmulator):
             f"Training {arch} width={width} "
             f"{'depth=' + str(depth) if arch == 'mlp' else 'blocks=' + str(blocks)} "
             f"n_in={n_in} n_out={n_out}: {n_epochs} epochs x {steps_per_epoch} steps, "
-            f"batch={batch_size}, lr={learning_rate:.1e}, wd={weight_decay:.1e}")
+            f"batch={batch_size}, lr={learning_rate:.1e}, wd={weight_decay:.1e}"
+        )
 
         best_val, best_np = np.inf, net_params
         key_ep = jax.random.PRNGKey(seed + 1)
@@ -425,15 +464,15 @@ class ParrotEmulatorV2(SPSEmulator):
             if vl < best_val:
                 best_val, best_np = vl, net_params
                 if checkpoint_path is not None and ep % 50 == 0:
-                    obj = eqx.tree_at(lambda m: m.net, model,
-                                      eqx.combine(best_np, net_static))
+                    obj = eqx.tree_at(lambda m: m.net, model, eqx.combine(best_np, net_static))
                     obj.save(checkpoint_path)
             if ep % log_interval == 0 or ep == 1:
-                logger.info(f"  ep {ep:5d}/{n_epochs} train={float(tl):.6f} "
-                            f"val={vl:.6f} best={best_val:.6f} "
-                            f"({time.time() - t0:.0f}s)")
-        logger.info(f"Training complete in {time.time() - t0:.0f}s; "
-                    f"best val MSE {best_val:.6f}")
+                logger.info(
+                    f"  ep {ep:5d}/{n_epochs} train={float(tl):.6f} "
+                    f"val={vl:.6f} best={best_val:.6f} "
+                    f"({time.time() - t0:.0f}s)"
+                )
+        logger.info(f"Training complete in {time.time() - t0:.0f}s; best val MSE {best_val:.6f}")
         return eqx.tree_at(lambda m: m.net, model, eqx.combine(best_np, net_static))
 
 
@@ -444,4 +483,5 @@ def load_emulator(path: str | Path):
     if is_v2:
         return ParrotEmulatorV2.load(path)
     from arachne.emulator.parrot_emulator import ParrotEmulator
+
     return ParrotEmulator.load(path)

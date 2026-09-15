@@ -236,16 +236,17 @@ class NUTSSampler:
             blackjax.nuts,
             logpost,
             target_acceptance_rate=self.target_accept_rate,
+            max_num_doublings=self.max_num_doublings,
         )
         rng_key, warmup_key = jax.random.split(rng_key)
         (state, params), warmup_info = warmup.run(warmup_key, theta_init, self.n_warmup)
         logger.info(f"Warmup complete. Step size: {params.get('step_size', 'N/A'):.4g}")
 
-        # 2. Build NUTS kernel with adapted parameters
+        # 2. Build NUTS kernel with adapted parameters (window_adaptation forwards
+        #    max_num_doublings into ``params``; set it explicitly regardless)
         nuts_kernel = blackjax.nuts(
             logpost,
-            max_num_doublings=self.max_num_doublings,
-            **params,
+            **{**params, "max_num_doublings": self.max_num_doublings},
         )
 
         # 3. Sampling: jax.lax.scan loop for full GPU efficiency

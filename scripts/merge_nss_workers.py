@@ -44,7 +44,7 @@ def main() -> None:
     for i, path in enumerate(inputs):
         with h5py.File(path, "r") as f:
             attrs = dict(f.attrs)
-            data  = {k: f[k][:] for k in f.keys()}
+            data = {k: f[k][:] for k in f.keys()}
         parts.append(data)
         if i == 0:
             ref_attrs = attrs
@@ -81,13 +81,13 @@ def main() -> None:
     # Print summary stats.
     with h5py.File(out_path, "r") as f:
         rhat = f["nss_rhat"][:]
-        ess  = f["nss_ess"][:]
-        t    = f["nss_time"][:]
+        ess = f["nss_ess"][:]
+        t = f["nss_time"][:]
         rhat_max = np.nanmax(rhat, axis=1)
         print(f"  ESS:         median={np.median(ess):.0f}")
-        print(f"  R-hat<1.05:  {100*(rhat_max<1.05).mean():.1f}%")
-        print(f"  R-hat>1.1:   {100*(rhat_max>1.10).mean():.1f}%")
-        print(f"  Time/galaxy: median={np.median(t):.1f}s  total={t.sum()/3600:.2f}h")
+        print(f"  R-hat<1.05:  {100 * (rhat_max < 1.05).mean():.1f}%")
+        print(f"  R-hat>1.1:   {100 * (rhat_max > 1.10).mean():.1f}%")
+        print(f"  Time/galaxy: median={np.median(t):.1f}s  total={t.sum() / 3600:.2f}h")
 
 
 if __name__ == "__main__":

@@ -237,13 +237,13 @@ class MCLMCSampler:
         # 1. Initialise MCLMC state (samples initial momentum from key)
         state = mclmc_mod.init(theta_init, logpost, k_init)
 
-        # 2. Build kernel factory (callable: inverse_mass_matrix -> kernel)
-        def kernel_factory(imm):
-            return mclmc_mod.build_kernel(
-                logdensity_fn=logpost,
-                inverse_mass_matrix=imm,
-                integrator=integrators.isokinetic_mclachlan,
-            )
+        # 2. Build the MCLMC kernel.  In blackjax >= 1.6.2 the kernel signature is
+        #    kernel(rng_key, state, logdensity_fn, inverse_mass_matrix, L, step_size),
+        #    i.e. logdensity_fn and the tuned parameters are passed per call.
+        kernel = mclmc_mod.build_kernel(
+            integrator=integrators.isokinetic_mclachlan,
+            desired_energy_var=self.desired_energy_var,
+        )
 
         # 3. Set initial adaptation params (L, step_size, inverse_mass_matrix)
         init_imm = inverse_mass_matrix if inverse_mass_matrix is not None else jnp.ones(d)
@@ -255,10 +255,11 @@ class MCLMCSampler:
 
         # 4. Auto-tune L, step_size, and (optionally) inverse_mass_matrix
         state, params, _ = blackjax.mclmc_find_L_and_step_size(
-            mclmc_kernel=kernel_factory,
+            mclmc_kernel=kernel,
             num_steps=self.n_warmup,
             state=state,
             rng_key=k_tune,
+            logdensity_fn=logpost,  # required by blackjax >= 1.6.2
             diagonal_preconditioning=self.diagonal_preconditioning,
             desired_energy_var=self.desired_energy_var,
             params=init_params,
@@ -267,12 +268,17 @@ class MCLMCSampler:
             f"Warmup complete. L={float(params.L):.4g}, step_size={float(params.step_size):.4g}"
         )
 
-        # 5. Build final kernel with tuned parameters
-        kernel = kernel_factory(params.inverse_mass_matrix)
-
-        # 6. Sampling via jax.lax.scan (full GPU efficiency, no Python overhead)
+        # 5. + 6. Sampling with the tuned parameters via jax.lax.scan
+        #    (full GPU efficiency, no Python overhead)
         def one_step(carry: Any, rng_key: jnp.ndarray) -> tuple[Any, tuple[jnp.ndarray, Any]]:
-            state, info = kernel(rng_key, carry, params.step_size, params.L)
+            state, info = kernel(
+                rng_key=rng_key,
+                state=carry,
+                logdensity_fn=logpost,
+                inverse_mass_matrix=params.inverse_mass_matrix,
+                L=params.L,
+                step_size=params.step_size,
+            )
             return state, (state.position, info)
 
         sample_keys = jax.random.split(k_sample, self.n_samples)

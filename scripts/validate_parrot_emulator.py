@@ -51,8 +51,7 @@ def parse_args(argv=None):
         "--bands",
         nargs="+",
         default=None,
-        help="Band names to validate against. "
-        "Defaults to the names embedded in the checkpoint.",
+        help="Band names to validate against. Defaults to the names embedded in the checkpoint.",
     )
     p.add_argument(
         "--n-val",
@@ -146,15 +145,15 @@ def main(argv=None):  # noqa: C901
     # Use the emulator's own mu0 so the space matches training.
     # ------------------------------------------------------------------
     mu0 = emulator._asinh_mu0
-    true_mag = _flux_to_asinh_mag_np(phot_val, mu0=mu0)   # (N, B)
-    pred_mag = _flux_to_asinh_mag_np(pred_flux, mu0=mu0)   # (N, B)
-    residuals = pred_mag - true_mag               # (N, B); positive = over-predicted
+    true_mag = _flux_to_asinh_mag_np(phot_val, mu0=mu0)  # (N, B)
+    pred_mag = _flux_to_asinh_mag_np(pred_flux, mu0=mu0)  # (N, B)
+    residuals = pred_mag - true_mag  # (N, B); positive = over-predicted
 
     # ------------------------------------------------------------------
     # Per-band statistics
     # ------------------------------------------------------------------
-    bias = np.nanmean(residuals, axis=0)          # (B,)
-    scatter = np.nanstd(residuals, axis=0)        # (B,)
+    bias = np.nanmean(residuals, axis=0)  # (B,)
+    scatter = np.nanstd(residuals, axis=0)  # (B,)
     p95 = np.nanpercentile(np.abs(residuals), 95, axis=0)  # (B,)
 
     print("\n{:40s}  {:>8s}  {:>8s}  {:>10s}".format("Band", "bias", "sigma", "95th |err|"))
@@ -207,9 +206,7 @@ def main(argv=None):  # noqa: C901
     axes[1].set_title("Per-band emulator scatter")
     for ax in axes:
         ax.set_xticks(x)
-        ax.set_xticklabels(
-            [b.split("/")[-1] for b in bands], rotation=45, ha="right", fontsize=7
-        )
+        ax.set_xticklabels([b.split("/")[-1] for b in bands], rotation=45, ha="right", fontsize=7)
     fig.tight_layout()
     bias_path = output_dir / "bias_scatter.png"
     fig.savefig(bias_path, dpi=150)
@@ -218,14 +215,18 @@ def main(argv=None):  # noqa: C901
 
     # ---- Figure 2: predicted vs true scatter for a subset of bands ----
     highlight_bands = [
-        b for b in [
-            "JWST/NIRCam.F200W", "JWST/NIRCam.F277W", "JWST/NIRCam.F444W",
-            "HST/ACS_WFC.F814W", "CTIO/DECam.r",
+        b
+        for b in [
+            "JWST/NIRCam.F200W",
+            "JWST/NIRCam.F277W",
+            "JWST/NIRCam.F444W",
+            "HST/ACS_WFC.F814W",
+            "CTIO/DECam.r",
         ]
         if b in bands
     ][:5]
     if not highlight_bands:
-        highlight_bands = bands[:min(5, n_bands)]
+        highlight_bands = bands[: min(5, n_bands)]
 
     n_scatter = min(args.scatter_n, n)
     scatter_idx = rng.choice(n, size=n_scatter, replace=False)

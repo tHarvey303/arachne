@@ -5,9 +5,9 @@ Excludes the experiment framework's held-out test rows (SPLIT_SEED=123,
 first 50k of the permutation over finite-parameter rows) so the saved
 checkpoint can be validated cleanly on them afterwards.
 """
-import numpy as np
 
 import emulator_lab as lab
+
 from arachne.emulator.parrot_emulator_v2 import ParrotEmulatorV2
 
 OUT = "/cosma/apps/dp276/dc-harv3/arachne/scripts/outputs/emulators/parrot_emulator_v2.eqx"

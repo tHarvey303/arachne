@@ -27,18 +27,18 @@ import numpy as np
 
 # Nicer LaTeX labels and physical units for each SPS parameter.
 _LABELS = {
-    "redshift":            r"$z$",
-    "log_mass":            r"$\log M_\star / M_\odot$",
-    "slope":               r"$\delta$ (slope)",
-    "fesc_lya":            r"$f_\mathrm{esc,Ly\alpha}$",
+    "redshift": r"$z$",
+    "log_mass": r"$\log M_\star / M_\odot$",
+    "slope": r"$\delta$ (slope)",
+    "fesc_lya": r"$f_\mathrm{esc,Ly\alpha}$",
     "dust_bump_amplitude": r"$B_{2175}$",
-    "log10metallicity":    r"$\log Z / Z_\odot$",
-    "Av":                  r"$A_V$ (mag)",
-    "logsfr_ratio_0":      r"$\log \mathrm{SFR}_0 / \mathrm{SFR}_1$",
-    "logsfr_ratio_1":      r"$\log \mathrm{SFR}_1 / \mathrm{SFR}_2$",
-    "logsfr_ratio_2":      r"$\log \mathrm{SFR}_2 / \mathrm{SFR}_3$",
-    "logsfr_ratio_3":      r"$\log \mathrm{SFR}_3 / \mathrm{SFR}_4$",
-    "logsfr_ratio_4":      r"$\log \mathrm{SFR}_4 / \mathrm{SFR}_5$",
+    "log10metallicity": r"$\log Z / Z_\odot$",
+    "Av": r"$A_V$ (mag)",
+    "logsfr_ratio_0": r"$\log \mathrm{SFR}_0 / \mathrm{SFR}_1$",
+    "logsfr_ratio_1": r"$\log \mathrm{SFR}_1 / \mathrm{SFR}_2$",
+    "logsfr_ratio_2": r"$\log \mathrm{SFR}_2 / \mathrm{SFR}_3$",
+    "logsfr_ratio_3": r"$\log \mathrm{SFR}_3 / \mathrm{SFR}_4$",
+    "logsfr_ratio_4": r"$\log \mathrm{SFR}_4 / \mathrm{SFR}_5$",
 }
 
 
@@ -104,7 +104,8 @@ def plot_corner(
         f"logZ = {logz:.2f} ± {logz_err:.2f}   "
         f"ESS = {ess:.0f}   "
         r"$\hat{R}$" + f"_max = {rhat_str}",
-        fontsize=9, y=1.002,
+        fontsize=9,
+        y=1.002,
     )
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -118,18 +119,26 @@ def main() -> None:
         description="Corner plots from NSS HDF5 posterior samples.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("hdf5",       help="NSS results HDF5 file.")
+    parser.add_argument("hdf5", help="NSS results HDF5 file.")
     parser.add_argument(
-        "--out-dir", default=None,
+        "--out-dir",
+        default=None,
         help="Output directory.  Defaults to <hdf5_stem>/corners/ next to the file.",
     )
-    parser.add_argument("--n-galaxies", type=int, default=None,
-                        help="Plot only the first N galaxies.")
-    parser.add_argument("--galaxy-ids", type=int, nargs="+", default=None,
-                        help="Row indices (0-based) to plot.  Overrides --n-galaxies.")
+    parser.add_argument(
+        "--n-galaxies", type=int, default=None, help="Plot only the first N galaxies."
+    )
+    parser.add_argument(
+        "--galaxy-ids",
+        type=int,
+        nargs="+",
+        default=None,
+        help="Row indices (0-based) to plot.  Overrides --n-galaxies.",
+    )
     parser.add_argument("--dpi", type=int, default=120)
-    parser.add_argument("--suffix", default="",
-                        help="Optional suffix appended to each PNG filename.")
+    parser.add_argument(
+        "--suffix", default="", help="Optional suffix appended to each PNG filename."
+    )
     args = parser.parse_args()
 
     hdf5_path = Path(args.hdf5)
@@ -142,19 +151,16 @@ def main() -> None:
     with h5py.File(hdf5_path, "r") as f:
         if "nss_samples" not in f:
             raise ValueError(
-                f"{hdf5_path} does not contain 'nss_samples'. "
-                "Run with --sampler nss first."
+                f"{hdf5_path} does not contain 'nss_samples'. Run with --sampler nss first."
             )
 
-        param_names = [
-            (b.decode() if isinstance(b, bytes) else b) for b in f.attrs["param_names"]
-        ]
+        param_names = [(b.decode() if isinstance(b, bytes) else b) for b in f.attrs["param_names"]]
         galaxy_ids_all = f["galaxy_id"][:]
-        N              = len(galaxy_ids_all)
-        logz_all       = f["nss_logZ"][:]
-        logz_err_all   = f["nss_logZ_err"][:]
-        ess_all        = f["nss_ess"][:]
-        rhat_all       = f["nss_rhat"][:]    # (N, P)
+        N = len(galaxy_ids_all)
+        logz_all = f["nss_logZ"][:]
+        logz_err_all = f["nss_logZ_err"][:]
+        ess_all = f["nss_ess"][:]
+        rhat_all = f["nss_rhat"][:]  # (N, P)
 
         if args.galaxy_ids is not None:
             indices = [i for i in args.galaxy_ids if 0 <= i < N]
@@ -166,23 +172,31 @@ def main() -> None:
         print(f"Plotting {len(indices)} corner plots → {out_dir}")
 
         for rank, i in enumerate(indices):
-            gid     = galaxy_ids_all[i]
-            samples = f["nss_samples"][i]           # (S, P)
-            logz    = float(logz_all[i])
+            gid = galaxy_ids_all[i]
+            samples = f["nss_samples"][i]  # (S, P)
+            logz = float(logz_all[i])
             logz_err = float(logz_err_all[i])
-            ess     = float(ess_all[i])
+            ess = float(ess_all[i])
             rhat_max = float(np.nanmax(rhat_all[i]))
 
             suffix = f"_{args.suffix}" if args.suffix else ""
             out_path = out_dir / f"galaxy_{gid}{suffix}.png"
 
             plot_corner(
-                samples, param_names, gid,
-                logz, logz_err, ess, rhat_max,
-                out_path, dpi=args.dpi,
+                samples,
+                param_names,
+                gid,
+                logz,
+                logz_err,
+                ess,
+                rhat_max,
+                out_path,
+                dpi=args.dpi,
             )
-            print(f"  [{rank + 1}/{len(indices)}]  galaxy {gid}  "
-                  f"logZ={logz:.2f}  ESS={ess:.0f}  rhat_max={rhat_max:.3f}  → {out_path.name}")
+            print(
+                f"  [{rank + 1}/{len(indices)}]  galaxy {gid}  "
+                f"logZ={logz:.2f}  ESS={ess:.0f}  rhat_max={rhat_max:.3f}  → {out_path.name}"
+            )
 
     print(f"\nDone. {len(indices)} plots saved to {out_dir}")
 

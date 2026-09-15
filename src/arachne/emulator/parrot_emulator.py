@@ -17,10 +17,25 @@ full dynamic range of galaxy photometry — including undetected sources and
 high-redshift Lyman-break dropouts that produce formally zero flux — to a
 smooth, bounded space without the divergence of log magnitudes at zero flux::
 
-    a = 2.5 * log10(e)   # ≈ 1.086
-    b = exp(mu0 / a) / 2  # softening parameter; sets scale where linear→log
-    mu = -a * arcsinh(f * b) + mu0   # flux -> asinh mag
-    f  =  2 * exp(-mu0 / a) * sinh((mu0 - mu) / a)  # asinh mag -> flux
+    a = 2.5 * log10(
+        e
+    )  # ≈ 1.086
+    b = (
+        exp(mu0 / a) / 2
+    )  # softening parameter; sets scale where linear→log
+    mu = (
+        -a
+        * arcsinh(f * b)
+        + mu0
+    )  # flux -> asinh mag
+    f = (
+        2
+        * exp(-mu0 / a)
+        * sinh(
+            (mu0 - mu)
+            / a
+        )
+    )  # asinh mag -> flux
 
 For large flux (f >> 1/b, log regime): mu ≈ -a * ln(f)  (independent of mu0).
 For zero flux: mu = mu0 exactly.
@@ -488,7 +503,7 @@ class ParrotEmulator(SPSEmulator):
         cls,
         library_path: str | Path,
         band_names: list[str],
-        param_names: list[str] | str = 'all',
+        param_names: list[str] | str = "all",
         hidden_sizes: list[int] | None = None,
         n_epochs: int = 1000,
         batch_size: int = 1000,
@@ -586,7 +601,7 @@ class ParrotEmulator(SPSEmulator):
             lib_param_names = _read_param_names(f)
             lib_band_names = _read_band_names(f)
 
-        if param_names == 'all':
+        if param_names == "all":
             param_names = lib_param_names
 
         logger.info(
@@ -617,7 +632,7 @@ class ParrotEmulator(SPSEmulator):
             phot_np = np.where(phot_np < flux_floor, 0.0, phot_np)
             logger.info(
                 f"Flux floor {flux_floor:.2e} nJy: clipped {n_clipped:,} values "
-                f"({100*n_clipped/(phot_np.size):.1f}% of all band-fluxes) to zero"
+                f"({100 * n_clipped / (phot_np.size):.1f}% of all band-fluxes) to zero"
             )
 
         # Choose asinh_mu0 to match the clip boundary.

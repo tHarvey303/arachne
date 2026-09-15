@@ -181,9 +181,7 @@ class TestForwardModelNumericalCorrectness:
         mock_emulator: flux = |9.0| + 1.0 = 10.0 nJy  (all bands)
     """
 
-    def test_perfect_model_log_posterior_zero(
-        self, delta_psf, mock_emulator, pixel_map_model
-    ):
+    def test_perfect_model_log_posterior_zero(self, delta_psf, mock_emulator, pixel_map_model):
         """log_posterior = 0 when model exactly matches observation.
 
         obs.flux = 10.0, model = 10.0 (mock emulator at theta=0).

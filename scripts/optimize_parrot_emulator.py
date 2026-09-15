@@ -192,8 +192,7 @@ def parse_args(argv=None):
         type=float,
         default=[0.05, 0.5],
         metavar=("MIN", "MAX"),
-        help="Log-uniform range for the per-step LR decay factor "
-        "(applied at both decay epochs).",
+        help="Log-uniform range for the per-step LR decay factor (applied at both decay epochs).",
     )
 
     # ---- Training budget --------------------------------------------------
@@ -300,13 +299,13 @@ def _evaluate(emulator, params_val, phot_val):
     from arachne.emulator.parrot_emulator import _flux_to_asinh_mag_np
 
     pred_flux = np.asarray(emulator.predict(jnp.array(params_val)))  # (N, B)
-    true_mag = _flux_to_asinh_mag_np(phot_val)                       # (N, B)
-    pred_mag = _flux_to_asinh_mag_np(pred_flux)                      # (N, B)
-    residuals = pred_mag - true_mag                                  # positive = over-predicted
+    true_mag = _flux_to_asinh_mag_np(phot_val)  # (N, B)
+    pred_mag = _flux_to_asinh_mag_np(pred_flux)  # (N, B)
+    residuals = pred_mag - true_mag  # positive = over-predicted
 
-    bias = np.nanmean(residuals, axis=0)                    # (B,)
-    scatter = np.nanstd(residuals, axis=0)                  # (B,)
-    p95 = np.nanpercentile(np.abs(residuals), 95, axis=0)   # (B,)
+    bias = np.nanmean(residuals, axis=0)  # (B,)
+    scatter = np.nanstd(residuals, axis=0)  # (B,)
+    p95 = np.nanpercentile(np.abs(residuals), 95, axis=0)  # (B,)
     return bias, scatter, p95
 
 

@@ -9,6 +9,7 @@ Preprocessing (mass-norm, sfr-arsinh) is fixed ON — those are strict wins
 from the ablation series. Architecture family, size, Fourier-K and optimiser
 settings are searched.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -21,6 +22,7 @@ OUT = lab.OUT_DIR
 
 
 def parse_args(argv=None):
+    """Parse command-line arguments."""
     p = argparse.ArgumentParser()
     p.add_argument("--n-trials", type=int, default=30)
     p.add_argument("--epochs", type=int, default=400)
@@ -29,6 +31,7 @@ def parse_args(argv=None):
 
 
 def main(argv=None):
+    """Run the Optuna hyper-parameter search."""
     args = parse_args(argv)
     import optuna
 
@@ -50,10 +53,23 @@ def main(argv=None):
         keep_mass = trial.suggest_categorical("keep_mass_input", [False, True])
 
         name = f"hpo_t{trial.number:03d}"
-        argv = ["--name", name, "--arch", arch, "--width", str(width),
-                *size_args, "--lr", f"{lr:.6g}", "--batch", str(batch),
-                "--epochs", str(args.epochs),
-                "--mass-norm", "--sfr-arsinh"]
+        argv = [
+            "--name",
+            name,
+            "--arch",
+            arch,
+            "--width",
+            str(width),
+            *size_args,
+            "--lr",
+            f"{lr:.6g}",
+            "--batch",
+            str(batch),
+            "--epochs",
+            str(args.epochs),
+            "--mass-norm",
+            "--sfr-arsinh",
+        ]
         if fourier:
             argv += ["--fourier-k", str(fourier)]
         if wd:
@@ -68,17 +84,27 @@ def main(argv=None):
             raise optuna.TrialPruned() from e
         with open(OUT / f"{name}.json") as fh:
             res = json.load(fh)
-        for k in ["med_scatter", "det_scatter", "trans_rms", "bright_flux_err",
-                  "rmse", "leak_p95_nJy", "n_params"]:
+        for k in [
+            "med_scatter",
+            "det_scatter",
+            "trans_rms",
+            "bright_flux_err",
+            "rmse",
+            "leak_p95_nJy",
+            "n_params",
+        ]:
             trial.set_user_attr(k, res[k])
         # Fitting-relevant objective: scatter in the detectable regime plus a
         # 0.2-weighted penalty on the dropout-transition RMS.
         return res["det_scatter"] + 0.2 * res["trans_rms"]
 
     study = optuna.create_study(
-        study_name=args.study, storage=storage, direction="minimize",
+        study_name=args.study,
+        storage=storage,
+        direction="minimize",
         sampler=optuna.samplers.TPESampler(seed=1, multivariate=True),
-        load_if_exists=True)
+        load_if_exists=True,
+    )
     study.optimize(objective, n_trials=args.n_trials, gc_after_trial=True)
 
     print("\n==== HPO complete ====")

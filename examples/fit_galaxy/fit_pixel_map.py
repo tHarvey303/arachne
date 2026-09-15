@@ -32,8 +32,12 @@ def parse_args():
     parser.add_argument("--output", type=Path, default=Path("posterior_pixel_map.h5"))
     parser.add_argument("--n-warmup", type=int, default=500)
     parser.add_argument("--n-samples", type=int, default=500)
-    parser.add_argument("--smoothness", type=float, default=1.0,
-                        help="L2 gradient penalty strength (higher = smoother)")
+    parser.add_argument(
+        "--smoothness",
+        type=float,
+        default=1.0,
+        help="L2 gradient penalty strength (higher = smoother)",
+    )
     parser.add_argument("--seed", type=int, default=0)
     return parser.parse_args()
 
@@ -55,7 +59,9 @@ def main():
 
     print("Loading observations...")
     obs = ObservationCube.from_fits(
-        flux_paths=flux_paths, variance_paths=var_paths, band_names=band_names,
+        flux_paths=flux_paths,
+        variance_paths=var_paths,
+        band_names=band_names,
     )
 
     print("Loading PSF models...")

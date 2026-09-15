@@ -130,7 +130,8 @@ def _make_validation_plot(emulator: SPSMLPEmulator, args) -> None:
         ax.scatter(
             np.log10(phot_true_sub[:, i] + 1e-30),
             np.log10(phot_pred[:, i] + 1e-30),
-            s=2, alpha=0.3,
+            s=2,
+            alpha=0.3,
         )
         lo = min(np.log10(phot_true_sub[:, i]).min(), np.log10(phot_pred[:, i]).min())
         hi = max(np.log10(phot_true_sub[:, i]).max(), np.log10(phot_pred[:, i]).max())

@@ -162,6 +162,7 @@ def test_psf_centering_all_bands(delta_psf):
 def _write_psf_fits(path, kernel):
     """Write a 2-D numpy array as a FITS file."""
     from astropy.io import fits as afits
+
     hdu = afits.PrimaryHDU(kernel)
     afits.HDUList([hdu]).writeto(str(path), overwrite=True)
 
@@ -172,6 +173,7 @@ class TestPSFModelFromFits:
     def test_basic_load_shape(self, tmp_path):
         """from_fits returns correct shape and band ordering."""
         from arachne.data.psf import PSFModel
+
         bands = ["F115W", "F200W", "F277W"]
         psf_paths = {}
         for band in bands:
@@ -188,6 +190,7 @@ class TestPSFModelFromFits:
     def test_values_preserved(self, tmp_path):
         """Kernel values loaded from FITS match what was written."""
         from arachne.data.psf import PSFModel
+
         rng = np.random.default_rng(42)
         k = rng.uniform(0, 1, (7, 7)).astype(np.float32)
         k /= k.sum()
@@ -202,6 +205,7 @@ class TestPSFModelFromFits:
         from astropy.io import fits as afits
 
         from arachne.data.psf import PSFModel
+
         k3d = np.ones((1, 9, 9), dtype=np.float32) / 81.0
         fp = tmp_path / "psf_3d.fits"
         afits.HDUList([afits.PrimaryHDU(k3d)]).writeto(str(fp), overwrite=True)
@@ -212,6 +216,7 @@ class TestPSFModelFromFits:
     def test_pads_to_common_size(self, tmp_path):
         """PSFs of different sizes are padded to the largest common size."""
         from arachne.data.psf import PSFModel
+
         small = np.ones((5, 5), dtype=np.float32)
         small /= small.sum()
         large = np.ones((9, 9), dtype=np.float32)
@@ -228,6 +233,7 @@ class TestPSFModelFromFits:
     def test_n_bands_property(self, tmp_path):
         """n_bands property equals number of loaded PSFs."""
         from arachne.data.psf import PSFModel
+
         paths = {}
         for i in range(4):
             k = np.eye(5, dtype=np.float32)

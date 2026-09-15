@@ -2,6 +2,7 @@
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
 from arachne.data.observation import ObservationCube
@@ -113,9 +114,110 @@ class TestGaussianLikelihood:
 
     def test_gradient_direction(self):
         """Gradient points from model toward data (negative residual → positive gradient)."""
-        flux = jnp.array([[[3.0]]])   # data
+        flux = jnp.array([[[3.0]]])  # data
         model = jnp.array([[[1.0]]])  # model < data → residual negative
         obs = _obs(flux)
         grad = jax.grad(GaussianLikelihood(obs))(model)
         # d/d(model) of  −0.5*(data−model)²/var = (data−model)/var > 0
         assert float(grad[0, 0, 0]) > 0.0
+
+
+class TestModelErrorFloor:
+    """Tests for the ``model_error_frac`` fractional model-error floor."""
+
+    @staticmethod
+    def _numpy_reference(flux, variance, mask, model, frac):
+        flux, variance, mask, model = (
+            np.asarray(a, dtype=np.float64) for a in (flux, variance, mask, model)
+        )
+        var_eff = variance + (frac * model) ** 2
+        return -0.5 * np.sum(mask * ((flux - model) ** 2 / var_eff + np.log(var_eff)))
+
+    def test_default_frac_is_zero_and_identical_to_plain_chi2(self):
+        """frac=0 (the default) reproduces the exact plain chi-squared expression."""
+        rng = np.random.default_rng(0)
+        flux = rng.normal(10.0, 2.0, size=(3, 5, 5)).astype(np.float32)
+        variance = rng.uniform(0.5, 2.0, size=flux.shape).astype(np.float32)
+        model = rng.normal(10.0, 2.0, size=flux.shape).astype(np.float32)
+        obs = _obs(flux, variance=variance)
+        ll_default = float(GaussianLikelihood(obs)(jnp.asarray(model)))
+        ll_zero = float(GaussianLikelihood(obs, model_error_frac=0.0)(jnp.asarray(model)))
+        expected = -0.5 * np.sum((flux - model) ** 2 / variance)
+        assert GaussianLikelihood(obs).model_error_frac == 0.0
+        assert ll_default == ll_zero
+        assert ll_default == pytest.approx(expected, rel=1e-5)
+
+    def test_negative_frac_raises(self):
+        """A negative floor is rejected."""
+        with pytest.raises(ValueError):
+            GaussianLikelihood(_obs(jnp.ones((1, 2, 2))), model_error_frac=-0.1)
+
+    def test_frac_matches_numpy_reference(self):
+        """frac>0 equals the float64 numpy reference including the log-determinant."""
+        rng = np.random.default_rng(1)
+        flux = rng.normal(50.0, 5.0, size=(2, 6, 6)).astype(np.float32)
+        variance = rng.uniform(1.0, 4.0, size=flux.shape).astype(np.float32)
+        mask = (rng.uniform(size=flux.shape) > 0.2).astype(np.float32)
+        model = rng.normal(50.0, 5.0, size=flux.shape).astype(np.float32)
+        frac = 0.05
+        obs = _obs(flux, variance=variance, mask=mask)
+        ll = float(GaussianLikelihood(obs, model_error_frac=frac)(jnp.asarray(model)))
+        ref = self._numpy_reference(flux, variance, mask, model, frac)
+        assert np.isfinite(ll)
+        assert ll == pytest.approx(ref, rel=1e-5)
+
+    def test_frac_changes_value(self):
+        """The floor changes the log-likelihood (it is not silently ignored)."""
+        flux = jnp.full((1, 3, 3), 100.0)
+        model = jnp.full((1, 3, 3), 90.0)
+        obs = _obs(flux, variance=jnp.full((1, 3, 3), 4.0))
+        ll0 = float(GaussianLikelihood(obs)(model))
+        ll1 = float(GaussianLikelihood(obs, model_error_frac=0.1)(model))
+        assert ll0 != ll1
+
+    def test_log_det_term_present(self):
+        """For a perfect model, the floor gives -0.5*sum(log var_eff), not zero.
+
+        Without the normalisation term a perfect model would score 0 regardless
+        of the floor; the log-determinant is required because var_eff depends on
+        the model.
+        """
+        flux = jnp.full((1, 2, 2), 20.0)
+        variance = jnp.full((1, 2, 2), 1.0)
+        obs = _obs(flux, variance=variance)
+        frac = 0.1
+        ll = float(GaussianLikelihood(obs, model_error_frac=frac)(flux))
+        expected = -0.5 * 4 * np.log(1.0 + (frac * 20.0) ** 2)
+        assert ll == pytest.approx(expected, rel=1e-5)
+
+    def test_frac_differentiable(self):
+        """jax.grad passes through the floor branch and matches a finite difference."""
+        rng = np.random.default_rng(2)
+        flux = rng.normal(30.0, 3.0, size=(2, 4, 4)).astype(np.float32)
+        variance = rng.uniform(1.0, 2.0, size=flux.shape).astype(np.float32)
+        model = rng.normal(30.0, 3.0, size=flux.shape).astype(np.float32)
+        obs = _obs(flux, variance=variance)
+        like = GaussianLikelihood(obs, model_error_frac=0.05)
+        grad = jax.grad(like)(jnp.asarray(model))
+        assert grad.shape == model.shape
+        assert bool(jnp.all(jnp.isfinite(grad)))
+        # Finite-difference check on one element (float64 reference).
+        eps = 1e-3
+        mp = model.copy()
+        mm = model.copy()
+        mp[0, 1, 2] += eps
+        mm[0, 1, 2] -= eps
+        fd = (
+            self._numpy_reference(flux, variance, np.ones_like(flux), mp, 0.05)
+            - self._numpy_reference(flux, variance, np.ones_like(flux), mm, 0.05)
+        ) / (2 * eps)
+        assert float(grad[0, 1, 2]) == pytest.approx(fd, rel=2e-2, abs=1e-3)
+
+    def test_frac_jit_compatible(self):
+        """The floor branch is a Python-level constant, so jax.jit works."""
+        flux = jnp.full((1, 3, 3), 10.0)
+        obs = _obs(flux)
+        like = GaussianLikelihood(obs, model_error_frac=0.05)
+        ll_jit = float(jax.jit(like)(flux * 0.9))
+        ll_eager = float(like(flux * 0.9))
+        assert ll_jit == pytest.approx(ll_eager, rel=1e-6)
