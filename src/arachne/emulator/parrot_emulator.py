@@ -823,9 +823,16 @@ def _read_param_names(f) -> list[str]:
 
     Supports two formats:
 
+    * **legacy format**: root ``attrs['ParameterNames']``.
     * **v4 format**: ``Model.attrs['varying_param_names']`` +
       ``Model.attrs['stellar_params']`` (order: varying first, then stellar).
-    * **legacy format**: root ``attrs['ParameterNames']``.
+
+    The root ``ParameterNames`` attr is preferred because synference writes it
+    in the same order as the ``Grid/Parameters`` rows.  The ``Model.attrs``
+    names are a superset/subset of those rows in real libraries (stellar params
+    such as ``tau_v`` are not gridded, and gridded params such as ``log_mass``
+    are absent from ``varying_param_names``), so they are only used as a
+    fallback for libraries written without the root attr.
 
     Args:
         f: Open h5py File handle.
@@ -833,9 +840,21 @@ def _read_param_names(f) -> list[str]:
     Returns:
         Ordered list of parameter name strings.
     """
-    # Legacy root attrs
+    # Legacy root attrs (authoritative Grid/Parameters row order)
     if "ParameterNames" in f.attrs:
         return _decode_str_list(f.attrs["ParameterNames"])
+
+    # v4 format: varying params first, then stellar params
+    if "Model" in f:
+        model_attrs = f["Model"].attrs
+        names: list[str] = []
+        for attr_name in ("varying_param_names", "stellar_params"):
+            if attr_name in model_attrs:
+                for name in _decode_str_list(model_attrs[attr_name]):
+                    if name not in names:
+                        names.append(name)
+        if names:
+            return names
 
     return []
 

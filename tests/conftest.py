@@ -184,3 +184,147 @@ def pixel_map_model() -> FreeFormPixelMap:
         param_bounds=PARAM_BOUNDS,
         smoothness_strength=0.1,
     )
+
+
+# ---------------------------------------------------------------------------
+# Data-layer fixtures (units, multi-resolution, network clients)
+# ---------------------------------------------------------------------------
+
+
+def make_tan_header(
+    shape: tuple[int, int],
+    pixel_scale: float,
+    ra: float,
+    dec: float,
+    rotation_deg: float = 0.0,
+    bunit: str | None = None,
+    crpix: tuple[float, float] | None = None,
+):
+    """Build a TAN FITS header with an arbitrary pixel scale and rotation.
+
+    Args:
+        shape: Image shape (H, W).
+        pixel_scale: Pixel scale in arcsec/pixel.
+        ra: CRVAL1 in degrees.
+        dec: CRVAL2 in degrees.
+        rotation_deg: Rotation of the image about the reference pixel, degrees
+            east of north.
+        bunit: Optional BUNIT card.
+        crpix: Optional 1-based (CRPIX1, CRPIX2). Defaults to the image centre.
+
+    Returns:
+        astropy.io.fits.Header with a full CD matrix.
+    """
+    from astropy.io import fits as afits
+
+    h, w = shape
+    if crpix is None:
+        crpix = ((w + 1) / 2.0, (h + 1) / 2.0)
+    cdelt = pixel_scale / 3600.0
+    theta = np.deg2rad(rotation_deg)
+    cos_t, sin_t = np.cos(theta), np.sin(theta)
+    header = afits.Header()
+    header["WCSAXES"] = 2
+    header["CTYPE1"] = "RA---TAN"
+    header["CTYPE2"] = "DEC--TAN"
+    header["CRPIX1"] = crpix[0]
+    header["CRPIX2"] = crpix[1]
+    header["CRVAL1"] = ra
+    header["CRVAL2"] = dec
+    header["CUNIT1"] = "deg"
+    header["CUNIT2"] = "deg"
+    # RA increases to the left (negative CD1_1) before rotation.
+    header["CD1_1"] = -cdelt * cos_t
+    header["CD1_2"] = cdelt * sin_t
+    header["CD2_1"] = cdelt * sin_t
+    header["CD2_2"] = cdelt * cos_t
+    if bunit is not None:
+        header["BUNIT"] = bunit
+    return header
+
+
+def write_image_fits(path, data, header=None):
+    """Write a 2-D array to a single-HDU FITS file.
+
+    Args:
+        path: Output path.
+        data: 2-D array.
+        header: Optional header.
+
+    Returns:
+        The path written, as a Path.
+    """
+    from pathlib import Path as _Path
+
+    from astropy.io import fits as afits
+
+    afits.PrimaryHDU(np.asarray(data, dtype=np.float32), header=header).writeto(
+        str(path), overwrite=True
+    )
+    return _Path(path)
+
+
+@pytest.fixture
+def tan_header_factory():
+    """Factory fixture returning :func:`make_tan_header`."""
+    return make_tan_header
+
+
+@pytest.fixture
+def multires_fits_pair(tmp_path):
+    """Two synthetic bands on different pixel grids about the same sky position.
+
+    Band A: 64x64 at 0.02 arcsec/px, no rotation, BUNIT ``'10.0*nanoJansky'``.
+    Band B: 32x32 at 0.04 arcsec/px, rotated 30 degrees, BUNIT ``'uJy'``.
+    Both are centred on (53.1625, -27.7914) and carry inverse-variance weights.
+
+    Returns:
+        Dict with ``ref_ra``, ``ref_dec``, ``flux_paths``, ``weight_paths`` and
+        ``truth`` (per-band pixel scale and rotation).
+    """
+    ra, dec = 53.1625, -27.7914
+    spec = {
+        "BAND_A": dict(shape=(64, 64), scale=0.02, rot=0.0, bunit="10.0*nanoJansky"),
+        "BAND_B": dict(shape=(32, 32), scale=0.04, rot=30.0, bunit="uJy"),
+    }
+    flux_paths = {}
+    weight_paths = {}
+    for band, cfg in spec.items():
+        header = make_tan_header(
+            cfg["shape"], cfg["scale"], ra, dec, rotation_deg=cfg["rot"], bunit=cfg["bunit"]
+        )
+        rng = np.random.default_rng(abs(hash(band)) % (2**32))
+        data = rng.normal(0.0, 1.0, size=cfg["shape"])
+        flux_paths[band] = write_image_fits(tmp_path / f"{band}_sci.fits", data, header)
+        weight_paths[band] = write_image_fits(
+            tmp_path / f"{band}_wht.fits", np.full(cfg["shape"], 4.0), header
+        )
+    return {
+        "ref_ra": ra,
+        "ref_dec": dec,
+        "flux_paths": flux_paths,
+        "weight_paths": weight_paths,
+        "truth": spec,
+    }
+
+
+@pytest.fixture(scope="session")
+def arachne_cache_dir(tmp_path_factory):
+    """Cache directory for network downloads.
+
+    Uses ``$ARACHNE_TEST_CACHE`` when set so that repeated local runs reuse
+    downloads; otherwise a throwaway session temp directory, so CI never writes
+    outside its sandbox.
+
+    Returns:
+        Path to an existing directory.
+    """
+    import os
+    from pathlib import Path as _Path
+
+    env = os.environ.get("ARACHNE_TEST_CACHE")
+    if env:
+        path = _Path(env).expanduser()
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+    return tmp_path_factory.mktemp("arachne_cache")

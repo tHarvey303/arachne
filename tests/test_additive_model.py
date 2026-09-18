@@ -568,3 +568,294 @@ class TestForwardModelIntegration:
 
         assert arachne.AdditiveComponentModel is AdditiveComponentModel
         assert "AdditiveComponentModel" in arachne.__all__
+
+
+# ---------------------------------------------------------------------------
+# Pluggable profiles
+# ---------------------------------------------------------------------------
+
+
+class TestProfileOptions:
+    """Sersic / point-source components, coordinate units and normalisation."""
+
+    @pytest.fixture
+    def mixed_profiles(self) -> AdditiveComponentModel:
+        """K=2 model with a Sersic component and a point source."""
+        return AdditiveComponentModel(
+            n_components=2,
+            emulator_param_names=SPS_PARAM_NAMES,
+            param_bounds=PARAM_BOUNDS,
+            image_shape=(H, W),
+            mass_param=MASS,
+            profiles=["sersic", "point"],
+            normalisation="analytic",
+        )
+
+    @pytest.fixture
+    def arcsec_model(self) -> AdditiveComponentModel:
+        """K=1 analytic-normalisation model in arcsec coordinates."""
+        return AdditiveComponentModel(
+            n_components=1,
+            emulator_param_names=SPS_PARAM_NAMES,
+            param_bounds=PARAM_BOUNDS,
+            image_shape=(H, W),
+            mass_param=MASS,
+            pixel_scale=0.05,
+            normalisation="analytic",
+        )
+
+    @staticmethod
+    def _mixed_theta(model):
+        sersic = [8.0, 8.0, jnp.log(2.0), jnp.log(3.0), 0.2, jnp.log(4.0)]
+        point = [6.0, 9.0]
+        return jnp.array([*sersic, 0.0, 0.0, 0.0, *point, 0.0, 0.0, 0.0], dtype=jnp.float32)
+
+    def test_defaults_are_gaussian(self, additive_k2):
+        """Without ``profiles`` every component is a Gaussian on the pixel grid."""
+        assert [p.name for p in additive_k2.profile_objects] == ["gaussian", "gaussian"]
+        assert additive_k2.n_shape_params == (5, 5)
+        assert additive_k2.pixel_scale is None
+        assert additive_k2.pixel_area == 1.0
+        assert additive_k2.normalisation == "frame"
+        assert additive_k2.oversample == 1
+        yy, xx = additive_k2.coords
+        assert yy.shape == (H * W,) and xx.shape == (H * W,)
+        np.testing.assert_allclose(additive_k2.centre, [(H - 1) / 2, (W - 1) / 2])
+
+    def test_mixed_layout(self, mixed_profiles):
+        """Variable-length blocks: slices, n_params and the split/join contract."""
+        m = mixed_profiles
+        assert m.n_shape_params == (6, 2)
+        assert m.n_params == (6 + 3) + (2 + 3)
+        assert m.component_slices == [slice(0, 9), slice(9, 14)]
+        assert m.shared_slice == slice(14, 14)
+        with pytest.raises(ValueError):
+            _ = m.n_params_per_component
+        theta = jnp.arange(m.n_params, dtype=jnp.float32)
+        blocks, shared = m.split_theta(theta)
+        assert isinstance(blocks, list)
+        assert [b.shape for b in blocks] == [(9,), (5,)]
+        np.testing.assert_array_equal(m.join_theta(blocks, shared), theta)
+        np.testing.assert_array_equal(m.shape_raw(theta, 0), theta[0:6])
+        np.testing.assert_array_equal(m.sps_raw(theta, 1), theta[11:14])
+        updated = m.set_sps_raw(theta, 1, jnp.array([-1.0, -2.0, -3.0]))
+        np.testing.assert_array_equal(updated[11:14], [-1.0, -2.0, -3.0])
+        np.testing.assert_array_equal(updated[:11], theta[:11])
+
+    def test_bad_profile_spec(self):
+        """Wrong-length or unknown profile specifications raise."""
+        base = dict(
+            n_components=2,
+            emulator_param_names=SPS_PARAM_NAMES,
+            param_bounds=PARAM_BOUNDS,
+            image_shape=(H, W),
+            mass_param=MASS,
+        )
+        for kwargs in [
+            dict(profiles=["gaussian"]),
+            dict(profiles="moffat"),
+            dict(normalisation="none"),
+            dict(oversample=0),
+            dict(pixel_scale=-1.0),
+        ]:
+            with pytest.raises(ValueError):
+                AdditiveComponentModel(**base, **kwargs)
+
+    def test_mixed_component_params_and_shapes(self, mixed_profiles):
+        """component_params keeps its (mu, sigma, rho, sps) contract for any mix."""
+        m = mixed_profiles
+        theta = self._mixed_theta(m)
+        mu, sigma, rho, sps = m.component_params(theta)
+        assert mu.shape == (2, 2) and sigma.shape == (2, 2) and rho.shape == (2,)
+        assert sps.shape == (2, len(SPS_PARAM_NAMES))
+        np.testing.assert_allclose(mu[1], [6.0, 9.0])
+        np.testing.assert_allclose(sigma[0], [2.0, 3.0], rtol=1e-5)
+        np.testing.assert_allclose(sigma[1], [0.5, 0.5])  # point_sigma
+        np.testing.assert_allclose(float(rho[1]), 0.0)
+        shapes = m.component_shapes(theta)
+        np.testing.assert_allclose(float(shapes[0]["n"]), 4.0, rtol=1e-4)
+        assert "n" not in shapes[1]
+
+    def test_mixed_prior_and_sampling(self, mixed_profiles, linear_emulator):
+        """log_prior / sample_prior / model_image work across mixed block lengths."""
+        m = mixed_profiles
+        theta = self._mixed_theta(m)
+        assert jnp.isfinite(m.log_prior(theta))
+        g = jax.grad(m.log_prior)(theta)
+        assert g.shape == theta.shape and jnp.all(jnp.isfinite(g))
+        samples = m.sample_prior(jax.random.PRNGKey(0), 32)
+        assert samples.shape == (32, m.n_params)
+        assert jnp.all(jnp.isfinite(jax.vmap(m.log_prior)(samples)))
+        img = jax.jit(lambda t: m.model_image(t, linear_emulator, (H, W)))(theta)
+        assert img.shape == (N_BANDS, H, W) and jnp.all(jnp.isfinite(img))
+
+    def test_analytic_normalisation_loses_flux_off_frame(self, additive_k1):
+        """Analytic profiles sum to <= 1; frame profiles sum to exactly 1."""
+        analytic = AdditiveComponentModel(
+            1,
+            SPS_PARAM_NAMES,
+            PARAM_BOUNDS,
+            (H, W),
+            mass_param=MASS,
+            normalisation="analytic",
+        )
+        near_edge = _block(1.0, 1.0, jnp.log(3.0), jnp.log(3.0), 0.0, (0.0, 0.0, 0.0))
+        np.testing.assert_allclose(float(additive_k1.profiles(near_edge).sum()), 1.0, atol=1e-5)
+        assert 0.2 < float(analytic.profiles(near_edge).sum()) < 0.75
+        centred = _block(7.5, 7.5, jnp.log(1.0), jnp.log(1.0), 0.0, (0.0, 0.0, 0.0))
+        np.testing.assert_allclose(float(analytic.profiles(centred).sum()), 1.0, rtol=2e-3)
+
+    def test_model_image_on_finer_grid_conserves_flux(self, arcsec_model, linear_emulator):
+        """A 2x finer arcsec grid over the same area gives the same total flux."""
+        m = arcsec_model
+        theta = _block(0.0, 0.0, jnp.log(0.1), jnp.log(0.08), 0.2, (0.0, 0.0, 0.0))
+        coarse = m.model_image(theta, linear_emulator, (H, W))
+        fine_c = (np.arange(2 * H) - (2 * H - 1) / 2.0) * (m.pixel_scale / 2.0)
+        yy, xx = np.meshgrid(fine_c, fine_c, indexing="ij")
+        fine = m.model_image_on(
+            theta,
+            linear_emulator,
+            jnp.asarray(yy, dtype=jnp.float32),
+            jnp.asarray(xx, dtype=jnp.float32),
+            (m.pixel_scale / 2.0) ** 2,
+        )
+        assert fine.shape == (N_BANDS, 2 * H, 2 * W)
+        np.testing.assert_allclose(
+            np.asarray(fine.sum(axis=(1, 2))), np.asarray(coarse.sum(axis=(1, 2))), rtol=0.01
+        )
+        sed = m.component_seds(theta, linear_emulator)[0]
+        np.testing.assert_allclose(np.asarray(fine.sum(axis=(1, 2))), np.asarray(sed), rtol=0.01)
+
+    def test_model_image_on_accepts_any_coordinate_shape(self, arcsec_model, linear_emulator):
+        """Arbitrary-shaped (yy, xx) in arcsec: output is (N_bands, *yy.shape)."""
+        m = arcsec_model
+        theta = _block(0.0, 0.0, jnp.log(0.1), jnp.log(0.08), 0.2, (0.0, 0.0, 0.0))
+        # a scattered, unstructured list of sky positions (a multi-resolution
+        # band's pixel centres need not be a regular grid in this frame)
+        rng = np.random.default_rng(0)
+        yy = jnp.asarray(rng.uniform(-0.2, 0.2, size=(7,)), dtype=jnp.float32)
+        xx = jnp.asarray(rng.uniform(-0.2, 0.2, size=(7,)), dtype=jnp.float32)
+        flat = m.model_image_on(theta, linear_emulator, yy, xx, 0.01)
+        assert flat.shape == (N_BANDS, 7)
+        # the same points reshaped: values follow the requested layout exactly
+        block = m.model_image_on(
+            theta, linear_emulator, yy[:6].reshape(2, 3), xx[:6].reshape(2, 3), 0.01
+        )
+        assert block.shape == (N_BANDS, 2, 3)
+        np.testing.assert_allclose(
+            np.asarray(block).reshape(N_BANDS, 6), np.asarray(flat)[:, :6], rtol=1e-6
+        )
+        # linear in the target pixel area, and jit/grad safe
+        double = m.model_image_on(theta, linear_emulator, yy, xx, 0.02)
+        np.testing.assert_allclose(np.asarray(double), 2.0 * np.asarray(flat), rtol=1e-5)
+        g = jax.grad(lambda t: jnp.sum(m.model_image_on(t, linear_emulator, yy, xx, 0.01)))(theta)
+        assert jnp.all(jnp.isfinite(g))
+
+    def test_frame_normalisation_rejects_foreign_grid(self, additive_k1, linear_emulator):
+        """Frame normalisation is only defined on the model's own grid."""
+        theta = _block(8.0, 8.0, 0.0, 0.0, 0.0, (0.0, 0.0, 0.0))
+        yy, xx = additive_k1.coords
+        # the model's own arrays are accepted
+        assert additive_k1.model_image_on(theta, linear_emulator, yy, xx, 1.0).shape == (
+            N_BANDS,
+            H * W,
+        )
+        with pytest.raises(ValueError, match="own grid"):
+            additive_k1.model_image_on(theta, linear_emulator, yy * 1.0, xx * 1.0, 1.0)
+
+    def test_component_images_sum_to_model_image(self, additive_k2, linear_emulator):
+        """component_images summed over K equals model_image."""
+        theta = _theta_k2(additive_k2, sps0=(0.4, -0.2, 0.9), sps1=(-0.3, 0.8, 0.1))
+        comps = additive_k2.component_images(theta, linear_emulator)
+        assert comps.shape == (2, N_BANDS, H, W)
+        np.testing.assert_allclose(
+            comps.sum(axis=0),
+            additive_k2.model_image(theta, linear_emulator, (H, W)),
+            rtol=1e-5,
+            atol=1e-6,
+        )
+
+    def test_oversampling_changes_a_cuspy_render(self, linear_emulator):
+        """A Sersic n=4 component is rendered differently with oversample > 1."""
+        kwargs = dict(
+            n_components=1,
+            emulator_param_names=SPS_PARAM_NAMES,
+            param_bounds=PARAM_BOUNDS,
+            image_shape=(H, W),
+            mass_param=MASS,
+            profiles="sersic",
+            normalisation="analytic",
+        )
+        # mu sits exactly on a pixel centre, so a single sample per pixel lands
+        # on the cusp and grossly overestimates the central pixel.
+        theta = jnp.array(
+            [8.0, 8.0, jnp.log(2.0), jnp.log(2.0), 0.0, jnp.log(4.0), 0.0, 0.0, 0.0],
+            dtype=jnp.float32,
+        )
+        plain = AdditiveComponentModel(**kwargs).profiles(theta)
+        fine = AdditiveComponentModel(**kwargs, oversample=5).profiles(theta)
+        assert float(plain.max()) > 3.0 * float(fine.max())
+        assert float(fine.sum()) < float(plain.sum())
+        # The resolved outskirts are unaffected.  "Resolved" has to be measured
+        # in effective radii, not in brightness: an n=4 cusp with r_e = 2 px is
+        # still curving steeply across the pixels at r = 1-2 px, where a single
+        # central sample is off by ~7%.  Beyond 2 r_e the profile is smooth on a
+        # pixel scale and the two renders agree (oversample=5 is itself
+        # converged to 0.1% there, checked against oversample=11).
+        yy, xx = np.mgrid[0:H, 0:W]
+        outer = (yy - 8.0) ** 2 + (xx - 8.0) ** 2 > (2 * 2.0) ** 2
+        np.testing.assert_allclose(
+            np.asarray(plain)[0][outer], np.asarray(fine)[0][outer], rtol=0.03
+        )
+
+    def test_ordering_within_profile_groups(self):
+        """Components are sorted by size among those sharing a profile; others stay put."""
+        model = AdditiveComponentModel(
+            3,
+            SPS_PARAM_NAMES,
+            PARAM_BOUNDS,
+            (H, W),
+            mass_param=MASS,
+            profiles=["sersic", "point", "sersic"],
+        )
+        big = [4.0, 4.0, jnp.log(5.0), jnp.log(4.0), 0.0, jnp.log(4.0), 1.0, 2.0, 3.0]
+        point = [8.0, 8.0, 0.5, 0.5, 0.5]
+        small = [9.0, 9.0, jnp.log(1.0), jnp.log(1.2), 0.1, jnp.log(1.0), -1.0, -2.0, -3.0]
+        theta = jnp.array([*big, *point, *small], dtype=jnp.float32)
+        ordered = jax.jit(model.order_components_by_size)(theta)
+        np.testing.assert_allclose(ordered[model.component_slices[0]], jnp.array(small))
+        np.testing.assert_allclose(ordered[model.component_slices[1]], jnp.array(point))
+        np.testing.assert_allclose(ordered[model.component_slices[2]], jnp.array(big))
+
+    def test_profiles_exported(self):
+        """Profile classes are exported at the package top level."""
+        import arachne
+
+        for name in ["Profile", "GaussianProfile", "SersicProfile", "PointSourceProfile"]:
+            assert hasattr(arachne, name) and name in arachne.__all__
+
+
+def test_order_components_by_size_passes_nuisance_tail_through():
+    """A full forward-model theta (spatial + nuisance) keeps its nuisance tail."""
+    import jax.numpy as jnp
+    import numpy as np
+
+    from arachne.spatial.additive import AdditiveComponentModel
+
+    names = ["log_mass", "Av"]
+    bounds = {"log_mass": (6.0, 12.0), "Av": (0.0, 4.0)}
+    model = AdditiveComponentModel(2, names, bounds, (16, 16), mass_param="log_mass")
+    theta_s = jnp.asarray(np.random.default_rng(0).normal(size=model.n_params), dtype=jnp.float32)
+    # make component 0 the larger one so a swap happens
+    sl1 = model.component_slices[1]
+    theta_s = theta_s.at[2:4].set(2.0).at[sl1.start + 2 : sl1.start + 4].set(-1.0)
+    tail = jnp.asarray([7.0, -3.0, 0.5], dtype=jnp.float32)
+    full = jnp.concatenate([theta_s, tail])
+    out = model.order_components_by_size(full)
+    assert out.shape == full.shape
+    np.testing.assert_array_equal(np.asarray(out[model.n_params :]), np.asarray(tail))
+    np.testing.assert_allclose(
+        np.asarray(out[: model.n_params]), np.asarray(model.order_components_by_size(theta_s))
+    )
+    with pytest.raises(ValueError):
+        model.order_components_by_size(theta_s[:-1])

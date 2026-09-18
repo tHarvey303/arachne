@@ -2,8 +2,10 @@ Quickstart
 ==========
 
 This guide walks through a blind bulge + disk fit of a galaxy image with the
-2-component :class:`~arachne.AdditiveComponentModel`.  The README's
-"Image-Level Forward Modelling" section has the same workflow with more commentary.
+2-component :class:`~arachne.AdditiveComponentModel`, against your own FITS files and a
+trained emulator checkpoint.  The README's "Quick Start" is the same workflow made
+self-contained — a toy emulator and synthetic arrays — so it can be run end to end on a CPU
+without any data.
 
 Load observations
 -----------------
@@ -43,8 +45,10 @@ Set up the spatial model and forward model
 ------------------------------------------
 
 Light is additive: each component carries the emulator SED of its *own* SPS parameters
-(including its own total stellar mass) times a unit-sum Gaussian profile.  Redshift is
-fixed here (use ``shared_param_names=["redshift"]`` to fit one common value instead).
+(including its own total stellar mass) times a normalised surface-brightness profile
+(Gaussian by default; see :doc:`resolved_workflow` for Sérsic and point-source components).
+Redshift is fixed here (use ``shared_param_names=["redshift"]`` to fit one common value
+instead).
 
 .. code-block:: python
 
@@ -99,3 +103,17 @@ Blind initialisation and sampling
    mu, sigma, rho, sps_phys = jax.vmap(spatial_model.component_params)(samples)
    result.to_hdf5("posterior.h5")
    param_maps = result.get_parameter_map(image_shape=(H, W))  # summary maps, plotting only
+
+``theta`` is a flat vector of length ``sum_k (n_shape_k + N_free) + N_shared``: ``K`` component
+blocks ``[shape_k..., sps_raw_k...]`` followed by the shared raws, with every SPS value mapped
+to its bounds by a sigmoid.  Use ``split_theta`` / ``join_theta`` / ``component_params`` rather
+than slicing by hand.
+
+Next steps
+----------
+
+* :doc:`resolved_workflow` — Sérsic and point-source profiles, instrumental nuisances,
+  multi-resolution fitting, choosing a sampler, and the diagnostics that decide whether the
+  answer can be believed.
+* ``examples/demo_resolved_sed_fitting.py`` — the end-to-end blind bulge/disk recovery demo.
+* ``examples/fit_jades_dja.py`` — the same pipeline on real JADES + DJA data.

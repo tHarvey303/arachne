@@ -13,6 +13,7 @@ from arachne.emulator.base import SPSEmulator
 from arachne.forward_model.pipeline import ForwardModel
 from arachne.inference.initialisation import (
     MAPResult,
+    blind_initial_full_theta,
     blind_initial_theta,
     find_map,
     image_moments,
@@ -111,15 +112,14 @@ def theta_true(model_k2) -> jnp.ndarray:
     return jnp.array(b0 + b1, dtype=jnp.float32)
 
 
-@pytest.fixture
-def mock_fm(model_k2, emulator, gaussian_psf, theta_true):
-    """ForwardModel on a high-S/N mock generated from ``theta_true``."""
+def _mock_forward_model(model, emulator, psf, theta_true, seed=1, pixel_scale=0.031):
+    """ForwardModel on a high-S/N (peak S/N ~ 100) mock generated from ``theta_true``."""
     from arachne.psf.convolution import PSFConvolver
 
-    conv = PSFConvolver(gaussian_psf, image_shape=(H, W))
-    truth = np.asarray(conv(model_k2.model_image(theta_true, emulator, (H, W))))
-    sigma = truth.max(axis=(1, 2)) / 100.0  # per-band S/N ~ 100 at peak
-    rng = np.random.default_rng(1)
+    conv = PSFConvolver(psf, image_shape=(H, W))
+    truth = np.asarray(conv(model.model_image(theta_true, emulator, (H, W))))
+    sigma = truth.max(axis=(1, 2)) / 100.0
+    rng = np.random.default_rng(seed)
     flux = (truth + rng.normal(size=truth.shape) * sigma[:, None, None]).astype(np.float32)
     variance = np.broadcast_to(sigma[:, None, None] ** 2, truth.shape).astype(np.float32)
     obs = ObservationCube(
@@ -127,10 +127,16 @@ def mock_fm(model_k2, emulator, gaussian_psf, theta_true):
         variance=variance,
         mask=np.ones_like(flux),
         band_names=BAND_NAMES,
-        pixel_scale=0.031,
+        pixel_scale=pixel_scale,
         wcs=None,
     )
-    return ForwardModel.build(obs, gaussian_psf, model_k2, emulator)
+    return ForwardModel.build(obs, psf, model, emulator)
+
+
+@pytest.fixture
+def mock_fm(model_k2, emulator, gaussian_psf, theta_true):
+    """ForwardModel on a high-S/N mock generated from ``theta_true``."""
+    return _mock_forward_model(model_k2, emulator, gaussian_psf, theta_true)
 
 
 def _log_masses(model, theta):
@@ -371,12 +377,139 @@ class TestMultistartMAP:
             multistart_map(fm, jnp.zeros(gmm_model.n_params), [])
 
 
+# ---------------------------------------------------------------------------
+# Mixed profiles (Sersic / point source) and arcsec coordinates
+# ---------------------------------------------------------------------------
+
+
+MIXED_LOG_M = (9.4, 9.9)  # Sersic bulge, Gaussian disk
+
+
+@pytest.fixture
+def bulge_disk_model() -> AdditiveComponentModel:
+    """Sersic bulge + Gaussian disk, analytic normalisation, 3x oversampled."""
+    return AdditiveComponentModel(
+        n_components=2,
+        emulator_param_names=SPS_PARAM_NAMES,
+        param_bounds=PARAM_BOUNDS,
+        image_shape=(H, W),
+        mass_param=MASS,
+        profiles=["sersic", "gaussian"],
+        normalisation="analytic",
+        oversample=3,
+    )
+
+
+@pytest.fixture
+def bulge_disk_truth(bulge_disk_model) -> jnp.ndarray:
+    """Compact n=4 bulge + extended Gaussian disk."""
+    bulge = [
+        7.5,
+        7.5,
+        np.log(1.5),
+        np.log(1.5),
+        0.0,
+        np.log(4.0),
+        *_sps_raw(MIXED_LOG_M[0], 8.5, 0.5),
+    ]
+    disk = _block(8.0, 8.0, 4.0, 3.0, 0.2, _sps_raw(MIXED_LOG_M[1], 9.5, 2.5))
+    return jnp.array(bulge + disk, dtype=jnp.float32)
+
+
+@pytest.fixture
+def bulge_disk_fm(bulge_disk_model, emulator, gaussian_psf, bulge_disk_truth):
+    """ForwardModel on a mock rendered from ``bulge_disk_truth``."""
+    return _mock_forward_model(bulge_disk_model, emulator, gaussian_psf, bulge_disk_truth)
+
+
+class TestMixedProfileInitialisation:
+    """blind init / mass solve / MAP across variable-length component blocks."""
+
+    def test_blind_theta_fills_sersic_and_point_blocks(self, mock_fm):
+        """Each profile gets the shape entries it owns; n=4 for the compact Sersic."""
+        model = AdditiveComponentModel(
+            n_components=3,
+            emulator_param_names=SPS_PARAM_NAMES,
+            param_bounds=PARAM_BOUNDS,
+            image_shape=(H, W),
+            mass_param=MASS,
+            profiles=["sersic", "sersic", "point"],
+        )
+        theta = blind_initial_theta(model, mock_fm.observation, size_scales=[0.4, 1.5, 1.0])
+        assert theta.shape == (model.n_params,)
+        assert jnp.all(jnp.isfinite(theta))
+        shapes = model.component_shapes(theta)
+        # compact Sersic -> bulge n=4, extended Sersic -> disk n=1
+        np.testing.assert_allclose(float(shapes[0]["n"]), 4.0, rtol=1e-3)
+        np.testing.assert_allclose(float(shapes[1]["n"]), 1.0, rtol=1e-3)
+        # the point source carries only a centre, at the same moment centroid
+        assert model.n_shape_params == (6, 6, 2)
+        np.testing.assert_allclose(shapes[2]["mu"], shapes[0]["mu"], atol=1e-6)
+        np.testing.assert_allclose(shapes[2]["sigma"], [0.5, 0.5])
+        # an explicit override wins, and a non-Sersic index is rejected
+        theta = blind_initial_theta(model, mock_fm.observation, sersic_n={1: 2.5})
+        np.testing.assert_allclose(float(model.component_shapes(theta)[1]["n"]), 2.5, rtol=1e-3)
+        with pytest.raises(ValueError):
+            blind_initial_theta(model, mock_fm.observation, sersic_n={2: 3.0})
+
+    def test_blind_theta_in_arcsec_mode(self, mock_fm):
+        """Moment centroid and size are converted from pixels to arcsec."""
+        ps = 0.031
+        model = AdditiveComponentModel(
+            n_components=2,
+            emulator_param_names=SPS_PARAM_NAMES,
+            param_bounds=PARAM_BOUNDS,
+            image_shape=(H, W),
+            mass_param=MASS,
+            profiles=["gaussian", "point"],
+            pixel_scale=ps,
+            normalisation="analytic",
+        )
+        cy, cx, sigma_px = image_moments(
+            mock_fm.observation.flux, mock_fm.observation.variance, mock_fm.observation.mask
+        )
+        theta = blind_initial_theta(model, mock_fm.observation, size_scales=[0.8, 1.0])
+        mu, sigma, _, _ = model.component_params(theta)
+        np.testing.assert_allclose(
+            np.asarray(mu[0]),
+            [(cy - (H - 1) / 2) * ps, (cx - (W - 1) / 2) * ps],
+            rtol=1e-4,
+        )
+        np.testing.assert_allclose(np.asarray(mu[1]), np.asarray(mu[0]), atol=1e-7)
+        np.testing.assert_allclose(np.asarray(sigma[0]), 0.8 * sigma_px * ps, rtol=1e-4)
+        # a "point" component named in arcsec mode keeps its half-pixel width
+        np.testing.assert_allclose(np.asarray(sigma[1]), 0.5 * ps, rtol=1e-6)
+        assert jnp.isfinite(model.log_prior(theta))
+
+    def test_mass_solve_and_blind_map_recover_bulge_disk(
+        self, bulge_disk_fm, bulge_disk_model, bulge_disk_truth
+    ):
+        """Sersic bulge + Gaussian disk: blind MAP recovers both masses to 0.1 dex."""
+        model = bulge_disk_model
+        theta0 = blind_initial_theta(model, bulge_disk_fm.observation)
+        assert theta0.shape == (model.n_params,)
+        # the linear solve already works across the unequal-length blocks
+        solved = solve_component_masses(bulge_disk_fm, theta0)
+        assert solved.shape == theta0.shape
+        np.testing.assert_allclose(_log_masses(model, solved), MIXED_LOG_M, atol=0.3)
+
+        result = find_map(bulge_disk_fm, theta0, **FAST)
+        np.testing.assert_allclose(_log_masses(model, result.theta), MIXED_LOG_M, atol=0.1)
+        nlp_truth = -float(bulge_disk_fm.log_posterior(bulge_disk_truth))
+        assert result.neg_log_posterior <= nlp_truth + 5.0
+        shapes = model.component_shapes(result.theta)
+        assert 2.0 < float(shapes[0]["n"]) < 8.0  # the bulge stays cuspy
+        assert float(shapes[0]["sigma"].sum()) < float(shapes[1]["sigma"].sum())
+
+
 def test_package_exports():
     """Public names are exported from the top-level package."""
     import arachne
 
     for name in [
         "blind_initial_theta",
+        "blind_initial_full_theta",
+        "reference_band_index",
         "find_map",
         "multistart_map",
         "solve_component_masses",
@@ -384,3 +517,103 @@ def test_package_exports():
         "MAPResult",
     ]:
         assert hasattr(arachne, name) and name in arachne.__all__
+
+
+# ---------------------------------------------------------------------------
+# Nuisance-aware initialisation (full theta: spatial + nuisance)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def sky_fm(model_k2, emulator, gaussian_psf, theta_true):
+    """``(fm, sky_value)``: the K=2 mock with a constant pedestal in band 1.
+
+    A ``NuisanceModel`` with a per-band sky is attached, so ``theta`` is the
+    full spatial+nuisance vector and the true sky of band 1 is ``sky_value``
+    (15 sigma per pixel — large enough that ignoring it visibly biases the
+    linear mass solve).
+    """
+    from arachne.forward_model.nuisance import NuisanceModel
+    from arachne.psf.convolution import PSFConvolver
+
+    conv = PSFConvolver(gaussian_psf, image_shape=(H, W))
+    truth = np.asarray(conv(model_k2.model_image(theta_true, emulator, (H, W))))
+    sigma = truth.max(axis=(1, 2)) / 100.0
+    sky_value = float(truth.max(axis=(1, 2))[1] * 0.2)
+
+    rng = np.random.default_rng(3)
+    flux = truth + rng.normal(size=truth.shape) * sigma[:, None, None]
+    flux[1] += sky_value
+    variance = np.broadcast_to(sigma[:, None, None] ** 2, truth.shape).astype(np.float32)
+    obs = ObservationCube(
+        flux=flux.astype(np.float32),
+        variance=variance,
+        mask=np.ones_like(variance),
+        band_names=BAND_NAMES,
+        pixel_scale=0.031,
+        wcs=None,
+    )
+    nuisance = NuisanceModel(N_BANDS, fit_sky=True, sky_prior_sigma=1.0)
+    fm = ForwardModel.build(obs, gaussian_psf, model_k2, emulator, nuisance=nuisance)
+    return fm, sky_value
+
+
+class TestNuisanceAwareInitialisation:
+    """solve_component_masses / find_map on a full (spatial + nuisance) theta."""
+
+    def test_mass_solve_uses_the_fitted_sky(self, sky_fm, model_k2, theta_true):
+        """A pedestal left out of theta biases the mass; put in theta it does not."""
+        fm, sky_value = sky_fm
+        lo, hi = PARAM_BOUNDS[MASS]
+        blocks, shared = model_k2.split_theta(theta_true)
+        wrong = blocks.at[:, 5].set(jnp.array([_raw(8.0, lo, hi), _raw(10.8, lo, hi)]))
+        theta_spatial = model_k2.join_theta(wrong, shared)
+
+        no_sky = jnp.concatenate([theta_spatial, jnp.zeros(N_BANDS, dtype=jnp.float32)])
+        with_sky = jnp.concatenate(
+            [theta_spatial, jnp.array([0.0, sky_value, 0.0], dtype=jnp.float32)]
+        )
+
+        biased = _log_masses(model_k2, solve_component_masses(fm, no_sky))
+        unbiased = _log_masses(model_k2, solve_component_masses(fm, with_sky))
+        # the unmodelled pedestal is soaked up by the extended component
+        assert np.max(np.abs(biased - np.array(TRUE_LOG_M))) > 0.05
+        np.testing.assert_allclose(unbiased, TRUE_LOG_M, atol=0.02)
+        # only the mass raws change; the nuisance block is returned untouched
+        solved = solve_component_masses(fm, with_sky)
+        assert solved.shape == with_sky.shape
+        np.testing.assert_array_equal(
+            np.asarray(solved)[model_k2.n_params :], np.asarray(with_sky)[model_k2.n_params :]
+        )
+
+    def test_spatial_only_theta_still_accepted(self, sky_fm, theta_true):
+        """A spatial-only theta is treated as "no nuisance", as before."""
+        fm, _ = sky_fm
+        solved = solve_component_masses(fm, theta_true)
+        assert solved.shape == theta_true.shape
+
+    def test_blind_initial_full_theta(self, sky_fm, model_k2):
+        """The convenience wrapper appends the nuisance block at its prior mean."""
+        fm, _ = sky_fm
+        spatial = blind_initial_theta(model_k2, fm.observation)
+        full = blind_initial_full_theta(fm)
+        assert full.shape == (fm.n_params,)
+        assert full.dtype == jnp.float32
+        np.testing.assert_allclose(np.asarray(full[: model_k2.n_params]), np.asarray(spatial))
+        np.testing.assert_array_equal(np.asarray(full[model_k2.n_params :]), 0.0)
+        # an explicit observation and blind_initial_theta kwargs are forwarded
+        other = blind_initial_full_theta(fm, fm.observation, size_scales=[0.5, 2.0])
+        assert other.shape == (fm.n_params,)
+
+    def test_find_map_keeps_the_nuisance_block(self, sky_fm):
+        """find_map on a full theta returns a full theta and fits the sky."""
+        fm, sky_value = sky_fm
+        theta0 = blind_initial_full_theta(fm)
+        result = find_map(fm, theta0, n_rounds=2, steps_per_round=200, final_steps=200)
+        assert result.theta.shape == (fm.n_params,)
+        n_spatial = fm.spatial_model.n_params
+        fitted_sky = np.asarray(result.theta[n_spatial:])
+        assert abs(float(fitted_sky[1]) - sky_value) < 0.3 * sky_value
+        # ordering the components did not truncate the vector
+        _, sigma, _, _ = fm.spatial_model.component_params(result.theta)
+        assert float(sigma[0].sum()) < float(sigma[1].sum())

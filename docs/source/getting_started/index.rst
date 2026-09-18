@@ -6,3 +6,4 @@ Getting Started
 
    installation
    quickstart
+   resolved_workflow

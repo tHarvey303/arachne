@@ -12,6 +12,7 @@ from astropy.io import fits
 from astropy.nddata import Cutout2D
 from astropy.wcs import WCS
 
+from arachne.data import units as flux_units
 from arachne.utils.logging import setup_named_logger
 
 logger = setup_named_logger(__name__)
@@ -32,6 +33,9 @@ class ObservationCube:
         band_names: List of band identifiers, e.g. ["JWST/NIRCam.F115W", ...].
         pixel_scale: Pixel scale in arcsec/pixel.
         wcs: Astropy WCS object from the first band's FITS header.
+        flux_unit: Informational label for the units the arrays were loaded
+            from.  The stored arrays are always nJy (and nJy^2 for variance)
+            after construction; this records what they were converted *from*.
     """
 
     flux: np.ndarray | jnp.ndarray
@@ -40,6 +44,7 @@ class ObservationCube:
     band_names: list[str]
     pixel_scale: float
     wcs: Optional[WCS] = field(default=None, compare=False)
+    flux_unit: str = "nJy"
 
     def __post_init__(self) -> None:
         """Validate array shapes are consistent."""
@@ -65,6 +70,8 @@ class ObservationCube:
         cutout_center: Optional[tuple[float, float]] = None,
         cutout_size: Optional[int | tuple[int, int]] = None,
         pixel_scale: float = 0.031,
+        flux_unit: str = "auto",
+        zeropoints: Optional[dict[str, float] | list[float]] = None,
     ) -> "ObservationCube":
         """Load an ObservationCube from FITS files.
 
@@ -78,12 +85,21 @@ class ObservationCube:
             cutout_size: Optional cutout size in pixels. An integer gives a square
                 cutout; a tuple (H, W) gives a rectangular one.
             pixel_scale: Pixel scale in arcsec/pixel. Defaults to 0.031 (JWST NIRCam).
+            flux_unit: Unit handling. ``"auto"`` reads each band's ``BUNIT``
+                keyword (falling back to an AB ``ZP``/``MAGZERO`` card, and
+                finally to "already nJy") and converts flux to nJy and variance
+                to nJy^2. Any other string, e.g. ``"uJy"`` or ``"MJy/sr"``, is
+                used as the BUNIT for every band. ``"nJy"`` is a no-op.
+            zeropoints: Optional AB zeropoints overriding the header, either a
+                dict keyed by band name or a list in band order. A zeropoint
+                takes precedence over BUNIT for that band.
 
         Returns:
-            Populated ObservationCube with float32 numpy arrays.
+            Populated ObservationCube with float32 numpy arrays in nJy.
 
         Raises:
-            ValueError: If the number of paths does not match band_names length.
+            ValueError: If the number of paths does not match band_names length,
+                or if an explicit ``flux_unit`` cannot be parsed.
         """
         if len(flux_paths) != len(band_names):
             raise ValueError("flux_paths and band_names must have the same length.")
@@ -98,10 +114,11 @@ class ObservationCube:
         wcs_ref = None
         _wcs_cutout_slices: Optional[tuple] = None  # pixel slices from band-0 WCS cutout
 
+        scales: list[float] = []
         for i, (fp, vp) in enumerate(zip(flux_paths, variance_paths)):
             with fits.open(fp) as hdul:
                 flux_data = hdul[0].data.astype(np.float32)
-                header = hdul[0].header
+                header = hdul[0].header.copy()
                 if i == 0:
                     try:
                         candidate = WCS(header)
@@ -145,6 +162,14 @@ class ObservationCube:
                         var_data = var_data[cy - hs : cy + hs, cx - hs : cx + hs]
                         mask_data = mask_data[cy - hs : cy + hs, cx - hs : cx + hs]
 
+            scale = cls._unit_scale(
+                band_names[i], header, flux_unit, zeropoints, i, pixel_scale, wcs_ref
+            )
+            scales.append(scale)
+            if scale != 1.0:
+                flux_data = (flux_data * scale).astype(np.float32)
+                var_data = (var_data * scale**2).astype(np.float32)
+
             flux_list.append(flux_data)
             var_list.append(var_data)
             mask_list.append(mask_data)
@@ -154,7 +179,8 @@ class ObservationCube:
         mask = np.stack(mask_list, axis=0)
 
         logger.info(
-            f"Loaded ObservationCube: {len(band_names)} bands, image shape {flux.shape[1:]}"
+            f"Loaded ObservationCube: {len(band_names)} bands, image shape {flux.shape[1:]}, "
+            f"unit scales to nJy {[float(f'{s:.6g}') for s in scales]}"
         )
         return cls(
             flux=flux,
@@ -163,7 +189,69 @@ class ObservationCube:
             band_names=band_names,
             pixel_scale=pixel_scale,
             wcs=wcs_ref,
+            flux_unit="nJy",
         )
+
+    @staticmethod
+    def _unit_scale(
+        band_name: str,
+        header,
+        flux_unit: str,
+        zeropoints: Optional[dict[str, float] | list[float]],
+        index: int,
+        pixel_scale: float,
+        wcs_ref: Optional[WCS],
+    ) -> float:
+        """Resolve the nJy-per-pixel-value factor for one band of ``from_fits``.
+
+        Args:
+            band_name: Band name, used to look up ``zeropoints`` and for messages.
+            header: The band's FITS header.
+            flux_unit: ``"auto"`` or an explicit BUNIT string.
+            zeropoints: Optional dict or list of AB zeropoints.
+            index: Band index, used when ``zeropoints`` is a list.
+            pixel_scale: Fallback pixel scale in arcsec/pixel.
+            wcs_ref: WCS of the first band, used to refine the pixel area.
+
+        Returns:
+            Conversion factor in nJy per pixel value.
+
+        Raises:
+            ValueError: If an explicit ``flux_unit`` cannot be parsed.
+        """
+        zp: Optional[float] = None
+        if isinstance(zeropoints, dict):
+            zp = zeropoints.get(band_name)
+        elif zeropoints is not None:
+            zp = zeropoints[index]
+        if zp is not None:
+            return flux_units.zeropoint_scale_to_nJy(float(zp))
+
+        area = float(pixel_scale) ** 2
+        if wcs_ref is not None:
+            try:
+                area = float(abs(np.linalg.det(wcs_ref.pixel_scale_matrix))) * 3600.0**2
+            except Exception:  # pragma: no cover - degenerate WCS
+                pass
+
+        bunit = header.get("BUNIT") if flux_unit == "auto" else flux_unit
+        scale = flux_units.bunit_scale_to_nJy(bunit, pixel_area_arcsec2=area)
+        if scale is not None:
+            return scale
+
+        if flux_unit != "auto":
+            raise ValueError(f"{band_name}: flux_unit={flux_unit!r} is not a recognised flux unit.")
+
+        for key in ("ZP", "MAGZERO", "MAGZPT", "ZPAB"):
+            if key in header:
+                logger.warning(
+                    f"{band_name}: no usable BUNIT; falling back to the {key} AB zeropoint "
+                    f"({header[key]})."
+                )
+                return flux_units.zeropoint_scale_to_nJy(float(header[key]))
+
+        logger.debug(f"{band_name}: no BUNIT or zeropoint found; assuming data are already nJy.")
+        return 1.0
 
     def to_jax(self) -> "ObservationCube":
         """Convert all arrays to JAX arrays (float32).
@@ -181,6 +269,7 @@ class ObservationCube:
             band_names=self.band_names,
             pixel_scale=self.pixel_scale,
             wcs=self.wcs,
+            flux_unit=self.flux_unit,
         )
 
     @property

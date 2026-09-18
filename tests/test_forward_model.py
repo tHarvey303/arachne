@@ -7,9 +7,11 @@ The critical tests are:
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
 from arachne.data.observation import ObservationCube
+from arachne.forward_model.nuisance import NuisanceModel
 from arachne.forward_model.pipeline import ForwardModel
 from arachne.likelihood.gaussian import GaussianLikelihood
 from arachne.psf.convolution import PSFConvolver
@@ -217,3 +219,156 @@ class TestForwardModelNumericalCorrectness:
         theta = jnp.zeros(pixel_map_model.n_params)
         lp = float(fm.log_posterior(theta))
         assert lp == pytest.approx(-384.0, rel=1e-4)
+
+
+# ---------------------------------------------------------------------------
+# PSF padding default and nuisance plumbing
+# ---------------------------------------------------------------------------
+
+
+class TestPadPSFDefault:
+    """``build(pad_psf=...)`` controls the PSF convolver's padding."""
+
+    def test_pad_psf_defaults_to_true(
+        self, tiny_observation, gaussian_psf, mock_emulator, gmm_model
+    ):
+        """The linear (zero-padded) convolution is the default."""
+        fm = ForwardModel.build(
+            obs=tiny_observation,
+            psf_model=gaussian_psf,
+            spatial_model=gmm_model,
+            emulator=mock_emulator,
+        )
+        assert fm.convolver.pad is True
+        assert fm.convolver.padded_shape != fm.convolver.image_shape
+
+    def test_pad_psf_false_uses_circular(
+        self, tiny_observation, gaussian_psf, mock_emulator, gmm_model
+    ):
+        """pad_psf=False restores the circular convolution on the image grid."""
+        fm = ForwardModel.build(
+            obs=tiny_observation,
+            psf_model=gaussian_psf,
+            spatial_model=gmm_model,
+            emulator=mock_emulator,
+            pad_psf=False,
+        )
+        assert fm.convolver.pad is False
+        assert fm.convolver.padded_shape == (16, 16)
+
+    def test_padding_changes_edge_pixels(
+        self, tiny_observation, gaussian_psf, mock_emulator, gmm_model
+    ):
+        """Padding changes the model near the frame edge but not far inside it.
+
+        This documents the numerical change for existing users: a flat model
+        loses flux to the frame edge under the linear convolution instead of
+        receiving it back by wrap-around.
+        """
+        theta = jnp.zeros(gmm_model.n_params)
+        kwargs = dict(
+            obs=tiny_observation,
+            psf_model=gaussian_psf,
+            spatial_model=gmm_model,
+            emulator=mock_emulator,
+        )
+        padded = ForwardModel.build(**kwargs, pad_psf=True)._model_image(theta)
+        circular = ForwardModel.build(**kwargs, pad_psf=False)._model_image(theta)
+        assert float(jnp.max(jnp.abs(padded[:, 0, :] - circular[:, 0, :]))) > 1e-3
+        assert float(jnp.max(jnp.abs(padded[:, 8, 8] - circular[:, 8, 8]))) < 1e-3
+
+    def test_delta_psf_unaffected_by_padding(
+        self, tiny_observation, delta_psf, mock_emulator, gmm_model
+    ):
+        """With a delta PSF the padded and circular results are identical."""
+        theta = jnp.zeros(gmm_model.n_params)
+        kwargs = dict(
+            obs=tiny_observation,
+            psf_model=delta_psf,
+            spatial_model=gmm_model,
+            emulator=mock_emulator,
+        )
+        padded = ForwardModel.build(**kwargs, pad_psf=True)._model_image(theta)
+        circular = ForwardModel.build(**kwargs, pad_psf=False)._model_image(theta)
+        assert float(jnp.max(jnp.abs(padded - circular))) < 1e-4
+
+
+class TestForwardModelParameterVector:
+    """``n_params`` / ``split_theta`` with and without a NuisanceModel."""
+
+    def test_n_params_without_nuisance(self, forward_model_gmm, gmm_model):
+        """Without nuisance, n_params is the spatial model's count."""
+        assert forward_model_gmm.nuisance is None
+        assert forward_model_gmm.n_params == gmm_model.n_params
+
+    def test_split_theta_without_nuisance(self, forward_model_gmm, gmm_model):
+        """The nuisance slice is empty when no NuisanceModel is attached."""
+        theta = jnp.arange(gmm_model.n_params, dtype=jnp.float32)
+        theta_s, theta_n = forward_model_gmm.split_theta(theta)
+        assert theta_n.shape == (0,)
+        assert jnp.allclose(theta_s, theta)
+
+    def test_n_params_with_nuisance(self, tiny_observation, gaussian_psf, mock_emulator, gmm_model):
+        """n_params adds the nuisance block."""
+        nuisance = NuisanceModel(3, fit_sky=True, fit_noise_scale=True)
+        fm = ForwardModel.build(
+            obs=tiny_observation,
+            psf_model=gaussian_psf,
+            spatial_model=gmm_model,
+            emulator=mock_emulator,
+            nuisance=nuisance,
+        )
+        assert fm.n_params == gmm_model.n_params + 6
+        theta = jnp.arange(fm.n_params, dtype=jnp.float32)
+        theta_s, theta_n = fm.split_theta(theta)
+        assert theta_s.shape == (gmm_model.n_params,)
+        assert theta_n.shape == (6,)
+
+    def test_log_posterior_equals_sum_with_nuisance(
+        self, tiny_observation, gaussian_psf, mock_emulator, pixel_map_model
+    ):
+        """log_posterior == log_likelihood + log_prior with nuisance attached.
+
+        Uses FreeFormPixelMap so the decode-sharing fast path is exercised.
+        """
+        nuisance = NuisanceModel(3, fit_sky=True, fit_shifts=True, fit_noise_scale=True)
+        fm = ForwardModel.build(
+            obs=tiny_observation,
+            psf_model=gaussian_psf,
+            spatial_model=pixel_map_model,
+            emulator=mock_emulator,
+            nuisance=nuisance,
+        )
+        rng = np.random.default_rng(4)
+        theta = jnp.asarray(rng.normal(0.0, 0.1, fm.n_params).astype(np.float32))
+        lp = float(fm.log_posterior(theta))
+        expected = float(fm.log_likelihood(theta)) + float(fm.log_prior(theta))
+        assert lp == pytest.approx(expected, rel=1e-5)
+
+    def test_log_posterior_equals_sum_without_nuisance(self, forward_model_gmm, gmm_model):
+        """The identity also holds in the nuisance-free case."""
+        rng = np.random.default_rng(5)
+        theta = jnp.asarray(rng.normal(0.0, 0.1, gmm_model.n_params).astype(np.float32))
+        lp = float(forward_model_gmm.log_posterior(theta))
+        expected = float(forward_model_gmm.log_likelihood(theta)) + float(
+            forward_model_gmm.log_prior(theta)
+        )
+        assert lp == pytest.approx(expected, rel=1e-5)
+
+    def test_grad_with_nuisance_is_finite(
+        self, tiny_observation, gaussian_psf, mock_emulator, pixel_map_model
+    ):
+        """jax.grad through the fused fast path reaches the nuisance block."""
+        nuisance = NuisanceModel(3, fit_sky=True, fit_shifts=True)
+        fm = ForwardModel.build(
+            obs=tiny_observation,
+            psf_model=gaussian_psf,
+            spatial_model=pixel_map_model,
+            emulator=mock_emulator,
+            nuisance=nuisance,
+        )
+        theta = jnp.zeros(fm.n_params).at[-9:].set(0.05)
+        grad = jax.grad(fm.log_posterior)(theta)
+        assert grad.shape == theta.shape
+        assert bool(jnp.all(jnp.isfinite(grad)))
+        assert bool(jnp.any(grad[-9:] != 0.0))

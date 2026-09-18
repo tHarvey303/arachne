@@ -250,3 +250,136 @@ class TestFromFits:
                 atol=1e-5,
                 err_msg=f"Band {i} has wrong values after WCS cutout.",
             )
+
+
+# ---------------------------------------------------------------------------
+# Unit handling
+# ---------------------------------------------------------------------------
+
+
+class TestFluxUnits:
+    """from_fits converts every band to nJy."""
+
+    def _write_band(self, tmp_path, name, data, bunit=None, wcs=None, extra=None):
+        """Write a flux FITS with an optional BUNIT and WCS.
+
+        Args:
+            tmp_path: Temp directory.
+            name: File stem.
+            data: 2-D array.
+            bunit: Optional BUNIT string.
+            wcs: Optional astropy WCS.
+            extra: Optional dict of extra header cards.
+
+        Returns:
+            Path to the written file.
+        """
+        from astropy.io import fits as afits
+
+        header = afits.Header() if wcs is None else wcs.to_header()
+        if bunit is not None:
+            header["BUNIT"] = bunit
+        for key, value in (extra or {}).items():
+            header[key] = value
+        path = tmp_path / f"{name}.fits"
+        _write_fits(path, np.asarray(data, dtype=np.float32), header=header)
+        return path
+
+    def test_default_flux_unit_field(self, tiny_observation_numpy):
+        """A directly constructed cube reports nJy."""
+        assert tiny_observation_numpy.flux_unit == "nJy"
+        assert tiny_observation_numpy.to_jax().flux_unit == "nJy"
+
+    def test_no_bunit_leaves_data_untouched(self, tmp_path):
+        """Headers with no unit information are assumed to be nJy already."""
+        fp = self._write_band(tmp_path, "flux", np.full((8, 8), 3.0))
+        vp = self._write_band(tmp_path, "var", np.full((8, 8), 4.0))
+        obs = ObservationCube.from_fits([fp], [vp], ["F115W"])
+        np.testing.assert_allclose(np.asarray(obs.flux), 3.0)
+        np.testing.assert_allclose(np.asarray(obs.variance), 4.0)
+        assert obs.flux_unit == "nJy"
+
+    def test_microjansky_fits(self, tmp_path):
+        """A synthetic image in uJy is scaled by 1e3 and its variance by 1e6."""
+        fp = self._write_band(tmp_path, "flux", np.full((8, 8), 2.0), bunit="uJy")
+        vp = self._write_band(tmp_path, "var", np.full((8, 8), 5.0))
+        obs = ObservationCube.from_fits([fp], [vp], ["F115W"])
+        np.testing.assert_allclose(np.asarray(obs.flux), 2.0e3, rtol=1e-6)
+        np.testing.assert_allclose(np.asarray(obs.variance), 5.0e6, rtol=1e-6)
+
+    def test_mjy_per_sr_fits(self, tmp_path):
+        """A synthetic image in MJy/sr is converted using the WCS pixel area."""
+        pixel_scale = 0.03
+        wcs = _make_tan_wcs(pixel_scale_deg=pixel_scale / 3600)
+        fp = self._write_band(tmp_path, "flux", np.ones((8, 8)), bunit="MJy/sr", wcs=wcs)
+        vp = self._write_band(tmp_path, "var", np.ones((8, 8)))
+        obs = ObservationCube.from_fits([fp], [vp], ["F115W"], pixel_scale=pixel_scale)
+        arcsec2_sr = (np.pi / (180 * 3600)) ** 2
+        expected = 1e15 * pixel_scale**2 * arcsec2_sr
+        np.testing.assert_allclose(np.asarray(obs.flux), expected, rtol=1e-4)
+        np.testing.assert_allclose(np.asarray(obs.variance), expected**2, rtol=1e-4)
+
+    def test_mjy_per_sr_without_wcs_uses_pixel_scale_argument(self, tmp_path):
+        """With no WCS the pixel_scale argument supplies the pixel area."""
+        fp = self._write_band(tmp_path, "flux", np.ones((8, 8)), bunit="MJy/sr")
+        vp = self._write_band(tmp_path, "var", np.ones((8, 8)))
+        obs = ObservationCube.from_fits([fp], [vp], ["F115W"], pixel_scale=0.06)
+        arcsec2_sr = (np.pi / (180 * 3600)) ** 2
+        np.testing.assert_allclose(np.asarray(obs.flux), 1e15 * 0.06**2 * arcsec2_sr, rtol=1e-6)
+
+    def test_dja_bunit(self, tmp_path):
+        """The DJA '10.0*nanoJansky' convention scales by 10."""
+        fp = self._write_band(
+            tmp_path, "flux", np.ones((8, 8)), bunit="10.0*nanoJansky", extra={"ZP": 28.0025}
+        )
+        vp = self._write_band(tmp_path, "var", np.ones((8, 8)))
+        obs = ObservationCube.from_fits([fp], [vp], ["F115W"])
+        # BUNIT must win over the (inconsistent) DJA ZP card.
+        np.testing.assert_allclose(np.asarray(obs.flux), 10.0, rtol=1e-6)
+
+    def test_zp_fallback_when_no_bunit(self, tmp_path):
+        """With no BUNIT the header ZP is used as an AB zeropoint."""
+        fp = self._write_band(tmp_path, "flux", np.ones((8, 8)), extra={"ZP": 31.4})
+        vp = self._write_band(tmp_path, "var", np.ones((8, 8)))
+        obs = ObservationCube.from_fits([fp], [vp], ["F115W"])
+        np.testing.assert_allclose(np.asarray(obs.flux), 1.0, rtol=1e-4)
+
+    def test_explicit_flux_unit_overrides_header(self, tmp_path):
+        """An explicit flux_unit string is used instead of BUNIT."""
+        fp = self._write_band(tmp_path, "flux", np.ones((8, 8)), bunit="nJy")
+        vp = self._write_band(tmp_path, "var", np.ones((8, 8)))
+        obs = ObservationCube.from_fits([fp], [vp], ["F115W"], flux_unit="uJy")
+        np.testing.assert_allclose(np.asarray(obs.flux), 1e3, rtol=1e-6)
+
+    def test_bad_explicit_flux_unit_raises(self, tmp_path):
+        """An unparseable explicit flux_unit is an error."""
+        fp = self._write_band(tmp_path, "flux", np.ones((4, 4)))
+        vp = self._write_band(tmp_path, "var", np.ones((4, 4)))
+        with pytest.raises(ValueError, match="not a recognised flux unit"):
+            ObservationCube.from_fits([fp], [vp], ["F115W"], flux_unit="electron/s")
+
+    def test_zeropoints_dict_overrides_bunit(self, tmp_path):
+        """A per-band zeropoint takes precedence over BUNIT."""
+        fp = self._write_band(tmp_path, "flux", np.ones((4, 4)), bunit="Jy")
+        vp = self._write_band(tmp_path, "var", np.ones((4, 4)))
+        obs = ObservationCube.from_fits([fp], [vp], ["F115W"], zeropoints={"F115W": 31.4 - 2.5})
+        np.testing.assert_allclose(np.asarray(obs.flux), 10.0, rtol=1e-4)
+
+    def test_zeropoints_list(self, tmp_path):
+        """Zeropoints may also be given as a list in band order."""
+        paths = []
+        for i in range(2):
+            paths.append(
+                (
+                    self._write_band(tmp_path, f"f{i}", np.ones((4, 4))),
+                    self._write_band(tmp_path, f"v{i}", np.ones((4, 4))),
+                )
+            )
+        obs = ObservationCube.from_fits(
+            [p[0] for p in paths],
+            [p[1] for p in paths],
+            ["A", "B"],
+            zeropoints=[31.4, 31.4 - 5.0],
+        )
+        np.testing.assert_allclose(np.asarray(obs.flux[0]), 1.0, rtol=1e-4)
+        np.testing.assert_allclose(np.asarray(obs.flux[1]), 100.0, rtol=1e-4)

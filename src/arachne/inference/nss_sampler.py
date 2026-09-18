@@ -25,9 +25,12 @@ terminating when the live-point evidence contribution
 
 from __future__ import annotations
 
+import os
+import pickle
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import h5py
 import jax
@@ -141,6 +144,147 @@ def _ess_from_weights(logw: jnp.ndarray) -> float:
     return float(jnp.exp(2.0 * ls - ls2))
 
 
+# ---------------------------------------------------------------------------
+# Checkpointing helpers
+# ---------------------------------------------------------------------------
+
+
+def _checkpoint_file(path: str | Path) -> Path:
+    """Resolve ``checkpoint_path`` to the ``.npz`` file that holds the checkpoint.
+
+    Args:
+        path: Either a ``.npz`` file path or a directory (in which case
+            ``nss_checkpoint.npz`` inside it is used).
+
+    Returns:
+        Path of the checkpoint file.
+    """
+    p = Path(path)
+    return p if p.suffix == ".npz" else p / "nss_checkpoint.npz"
+
+
+def _key_to_array(key: jax.Array) -> tuple[np.ndarray, bool]:
+    """Serialise a PRNG key to a uint32 array plus a "was it a typed key" flag."""
+    if jnp.issubdtype(key.dtype, jax.dtypes.prng_key):
+        return np.asarray(jax.random.key_data(key)), True
+    return np.asarray(key), False
+
+
+def _key_from_array(arr: np.ndarray, typed: bool) -> jax.Array:
+    """Inverse of :func:`_key_to_array`."""
+    if typed:
+        return jax.random.wrap_key_data(jnp.asarray(arr))
+    return jnp.asarray(arr)
+
+
+def _stack_dead(dead: list[Any]) -> Any:
+    """Stack a list of per-step ``NSInfo`` pytrees along a new leading axis."""
+    return jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *dead)
+
+
+def _unstack_dead(stacked: Any, n: int) -> list[Any]:
+    """Inverse of :func:`_stack_dead`: split the leading axis back into a list."""
+    return [jax.tree_util.tree_map(lambda x, i=i: x[i], stacked) for i in range(n)]
+
+
+def _save_checkpoint(
+    path: str | Path,
+    state: Any,
+    dead: list[Any],
+    n_steps: int,
+    rng_key: jax.Array,
+    num_live: int,
+    num_delete: int,
+) -> None:
+    """Atomically write the NSS run state to ``path``.
+
+    Everything needed to resume bit-exactly is stored: the ``blackjax`` state
+    pytree (leaves as arrays plus a pickled ``PyTreeDef``), the stacked list of
+    dead-particle ``NSInfo`` pytrees, the step counter and the PRNG key *as it
+    will be consumed by the next step*.  The file is written to a temporary
+    name in the same directory and then ``os.replace``d, so a crash mid-write
+    leaves the previous checkpoint intact.
+
+    Args:
+        path: ``.npz`` file or directory (see :func:`_checkpoint_file`).
+        state: Current ``blackjax`` nested-sampling state.
+        dead: List of dead-particle info pytrees accumulated so far.
+        n_steps: Number of completed outer steps.
+        rng_key: PRNG key for the next step.
+        num_live: Number of live points.
+        num_delete: Points replaced per step.
+    """
+    file = _checkpoint_file(path)
+    file.parent.mkdir(parents=True, exist_ok=True)
+
+    state_leaves, state_treedef = jax.tree_util.tree_flatten(state)
+    arrays: dict[str, np.ndarray] = {
+        f"state_{i}": np.asarray(leaf) for i, leaf in enumerate(state_leaves)
+    }
+    arrays["state_treedef"] = np.frombuffer(pickle.dumps(state_treedef), dtype=np.uint8)
+    arrays["n_state_leaves"] = np.asarray(len(state_leaves))
+
+    if dead:
+        dead_leaves, dead_treedef = jax.tree_util.tree_flatten(_stack_dead(dead))
+        for i, leaf in enumerate(dead_leaves):
+            arrays[f"dead_{i}"] = np.asarray(leaf)
+        arrays["dead_treedef"] = np.frombuffer(pickle.dumps(dead_treedef), dtype=np.uint8)
+        arrays["n_dead_leaves"] = np.asarray(len(dead_leaves))
+    else:
+        arrays["n_dead_leaves"] = np.asarray(0)
+
+    key_arr, key_typed = _key_to_array(rng_key)
+    arrays["rng_key"] = key_arr
+    arrays["rng_key_typed"] = np.asarray(int(key_typed))
+    arrays["n_steps"] = np.asarray(int(n_steps))
+    arrays["n_dead_steps"] = np.asarray(len(dead))
+    arrays["num_live"] = np.asarray(int(num_live))
+    arrays["num_delete"] = np.asarray(int(num_delete))
+
+    tmp = file.with_name(file.name + f".tmp{os.getpid()}")
+    with open(tmp, "wb") as fh:
+        np.savez(fh, **arrays)
+    os.replace(tmp, file)
+
+
+def _load_checkpoint(path: str | Path) -> dict | None:
+    """Read a checkpoint written by :func:`_save_checkpoint`.
+
+    Args:
+        path: ``.npz`` file or directory (see :func:`_checkpoint_file`).
+
+    Returns:
+        Dict with keys ``state``, ``dead``, ``n_steps``, ``rng_key``,
+        ``num_live`` and ``num_delete``, or ``None`` if no checkpoint exists.
+    """
+    file = _checkpoint_file(path)
+    if not file.exists():
+        return None
+    with np.load(file) as npz:
+        state_treedef = pickle.loads(npz["state_treedef"].tobytes())
+        n_state = int(npz["n_state_leaves"])
+        state = jax.tree_util.tree_unflatten(
+            state_treedef, [jnp.asarray(npz[f"state_{i}"]) for i in range(n_state)]
+        )
+        n_dead_steps = int(npz["n_dead_steps"])
+        dead: list[Any] = []
+        if int(npz["n_dead_leaves"]) > 0:
+            dead_treedef = pickle.loads(npz["dead_treedef"].tobytes())
+            n_leaves = int(npz["n_dead_leaves"])
+            stacked = jax.tree_util.tree_unflatten(
+                dead_treedef, [jnp.asarray(npz[f"dead_{i}"]) for i in range(n_leaves)]
+            )
+            dead = _unstack_dead(stacked, n_dead_steps)
+        return {
+            "state": state,
+            "dead": dead,
+            "n_steps": int(npz["n_steps"]),
+            "rng_key": _key_from_array(npz["rng_key"], bool(int(npz["rng_key_typed"]))),
+            "num_live": int(npz["num_live"]),
+            "num_delete": int(npz["num_delete"]),
+        }
+
+
 class NSSSampler:
     """Nested Slice Sampling driver around ``blackjax.nss``.
 
@@ -181,7 +325,7 @@ class NSSSampler:
             max_steps: Maximum outer NS iterations.
         """
         self.forward_model = forward_model
-        n_params = int(forward_model.spatial_model.n_params)
+        n_params = int(getattr(forward_model, "n_params", forward_model.spatial_model.n_params))
         self.num_live = int(num_live)
         self.num_inner_steps = int(num_inner_steps) if num_inner_steps is not None else 3 * n_params
         self.num_delete = int(num_delete) if num_delete is not None else max(1, self.num_live // 10)
@@ -195,10 +339,15 @@ class NSSSampler:
             )
 
     def _initial_live_points(self, key: jax.Array, initial_theta) -> jnp.ndarray:
-        n_params = int(self.forward_model.spatial_model.n_params)
+        """Draw or validate the initial live points (full theta, incl. nuisance)."""
+        fm = self.forward_model
+        n_params = int(getattr(fm, "n_params", fm.spatial_model.n_params))
         if initial_theta is None:
+            # ForwardModel.sample_prior covers the nuisance block too; fall back
+            # to the spatial model alone on older pipelines.
+            sampler = getattr(fm, "sample_prior", None) or fm.spatial_model.sample_prior
             try:
-                live = self.forward_model.spatial_model.sample_prior(key, self.num_live)
+                live = sampler(key, self.num_live)
             except NotImplementedError as e:
                 raise NotImplementedError(
                     "NSSSampler needs prior-distributed initial live points but "
@@ -222,15 +371,43 @@ class NSSSampler:
                 self.num_delete = max(1, self.num_live // 10)
         return live
 
-    def run(self, rng_key: jax.Array, initial_theta: jnp.ndarray | None = None) -> NSSResult:
+    def run(
+        self,
+        rng_key: jax.Array,
+        initial_theta: jnp.ndarray | None = None,
+        checkpoint_path: str | Path | None = None,
+        checkpoint_every: int = 50,
+        resume: bool = False,
+    ) -> NSSResult:
         """Run nested sampling to termination and return posterior samples + evidence.
 
+        Checkpointing
+        -------------
+        With ``checkpoint_path`` set, the sampler writes the full run state
+        (blackjax state pytree, the accumulated dead particles, the step
+        counter and the PRNG key for the *next* step) every
+        ``checkpoint_every`` outer steps and once more when the loop exits.
+        The write is atomic (temp file + ``os.replace``).  Calling ``run``
+        again with ``resume=True`` and the same path restores that state and
+        continues, producing bit-identical results to an uninterrupted run
+        with the same ``rng_key`` — the key is checkpointed alongside the
+        state, so the sequence of step keys is unchanged.
+
         Args:
-            rng_key: ``jax.random`` PRNG key.
+            rng_key: ``jax.random`` PRNG key.  Ignored (beyond the final
+                resampling draws, which also come from the checkpointed key)
+                when resuming from an existing checkpoint.
             initial_theta: Optional initial live points of shape
                 ``(num_live, n_params)``.  These **must** be prior draws for the
                 evidence to be valid; by default they are taken from
-                ``spatial_model.sample_prior``.
+                ``ForwardModel.sample_prior`` (which includes the nuisance
+                block) or ``spatial_model.sample_prior``.
+            checkpoint_path: Directory or ``.npz`` file for checkpoints.
+                ``None`` disables checkpointing.
+            checkpoint_every: Write a checkpoint every this many outer steps.
+            resume: Restore from ``checkpoint_path`` if a checkpoint is there.
+                With no checkpoint present this is a no-op and the run starts
+                from the prior as usual.
 
         Returns:
             :class:`NSSResult` with equal-weight ``samples`` of shape
@@ -240,6 +417,7 @@ class NSSSampler:
             ImportError: If ``blackjax`` is not installed.
             NotImplementedError: If the spatial model cannot sample its prior and
                 no ``initial_theta`` is given.
+            ValueError: If ``checkpoint_every`` is not positive.
         """
         try:
             import blackjax
@@ -250,33 +428,58 @@ class NSSSampler:
                 "Install with: pip install blackjax"
             ) from e
 
+        if checkpoint_every < 1:
+            raise ValueError(f"checkpoint_every must be >= 1; got {checkpoint_every}")
+
         fm = self.forward_model
-        rng_key, init_key = jax.random.split(rng_key)
-        live = self._initial_live_points(init_key, initial_theta)
-        n_params = live.shape[1]
+        ckpt = _load_checkpoint(checkpoint_path) if (checkpoint_path and resume) else None
 
-        logger.info(
-            f"Starting NSS: num_live={self.num_live}, num_delete={self.num_delete}, "
-            f"num_inner_steps={self.num_inner_steps}, termination={self.termination:g}, "
-            f"n_params={n_params}"
-        )
+        if ckpt is not None:
+            self.num_live = ckpt["num_live"]
+            self.num_delete = ckpt["num_delete"]
+            state = ckpt["state"]
+            dead = list(ckpt["dead"])
+            n_steps = ckpt["n_steps"]
+            rng_key = ckpt["rng_key"]
+            n_params = int(state.particles.position.shape[1])
+            logger.info(
+                f"Resuming NSS from {_checkpoint_file(checkpoint_path)}: {n_steps} steps done, "
+                f"n_params={n_params}, logZ={float(state.integrator.logZ):.3f}"
+            )
+            algo = blackjax.nss(
+                logprior_fn=fm.log_prior,
+                loglikelihood_fn=fm.log_likelihood,
+                num_delete=self.num_delete,
+                num_inner_steps=self.num_inner_steps,
+            )
+            step_fn = jax.jit(algo.step)
+        else:
+            rng_key, init_key = jax.random.split(rng_key)
+            live = self._initial_live_points(init_key, initial_theta)
+            n_params = live.shape[1]
 
-        algo = blackjax.nss(
-            logprior_fn=fm.log_prior,
-            loglikelihood_fn=fm.log_likelihood,
-            num_delete=self.num_delete,
-            num_inner_steps=self.num_inner_steps,
-        )
-        init_fn = jax.jit(algo.init)
-        step_fn = jax.jit(algo.step)
+            logger.info(
+                f"Starting NSS: num_live={self.num_live}, num_delete={self.num_delete}, "
+                f"num_inner_steps={self.num_inner_steps}, termination={self.termination:g}, "
+                f"n_params={n_params}"
+            )
 
-        t0 = time.perf_counter()
-        state = init_fn(live)
-        jax.block_until_ready(state)
-        logger.info(f"NSS init compiled + evaluated in {time.perf_counter() - t0:.1f}s")
+            algo = blackjax.nss(
+                logprior_fn=fm.log_prior,
+                loglikelihood_fn=fm.log_likelihood,
+                num_delete=self.num_delete,
+                num_inner_steps=self.num_inner_steps,
+            )
+            init_fn = jax.jit(algo.init)
+            step_fn = jax.jit(algo.step)
 
-        dead = []
-        n_steps = 0
+            t0 = time.perf_counter()
+            state = init_fn(live)
+            jax.block_until_ready(state)
+            logger.info(f"NSS init compiled + evaluated in {time.perf_counter() - t0:.1f}s")
+            dead = []
+            n_steps = 0
+
         t0 = time.perf_counter()
         while True:
             remaining = float(state.integrator.logZ_live) - float(state.integrator.logZ)
@@ -291,6 +494,10 @@ class NSSSampler:
             state, dead_info = step_fn(step_key, state)
             dead.append(dead_info)
             n_steps += 1
+            if checkpoint_path is not None and n_steps % checkpoint_every == 0:
+                _save_checkpoint(
+                    checkpoint_path, state, dead, n_steps, rng_key, self.num_live, self.num_delete
+                )
             if n_steps % 50 == 0:
                 logger.info(
                     f"NSS step {n_steps}: logZ={float(state.integrator.logZ):.3f}, "
@@ -300,6 +507,10 @@ class NSSSampler:
                 )
         jax.block_until_ready(state)
         elapsed = time.perf_counter() - t0
+        if checkpoint_path is not None and n_steps % checkpoint_every != 0:
+            _save_checkpoint(
+                checkpoint_path, state, dead, n_steps, rng_key, self.num_live, self.num_delete
+            )
 
         final_info = finalise(state, dead, update_info=False)
         rng_key, w_key, s_key = jax.random.split(rng_key, 3)
