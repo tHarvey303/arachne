@@ -130,9 +130,9 @@ The blind pipeline
      condition number to ~350, and the dense metric adapted during warmup
      absorbs what is left.
 
-   Even all three together are not quite enough, because the ridge is
-   *curved*: no fixed metric describes a banana.  So the NUTS path is run in
-   **two stages** (``--stage1 N``, ``--stage1 0`` disables it): stage 1 is a
+   A two-stage variant is available but **off by default** (``--stage1 N``,
+   default 0), because it was measured to make this posterior worse (max
+   R-hat 1.48 against 1.14 with the same settings): stage 1 is a
    short exploratory run in the Laplace whitening, and its draws are then fed
    to ``arachne.inference.laplace.posterior_whitening``, which re-centres the
    coordinates on the posterior mean and rescales them with the covariance
@@ -140,7 +140,12 @@ The blind pipeline
    ``d / (d + n_draws)``).  Stage 2 samples in those coordinates.  This is the
    metric the sampler could never adapt on its own: a dense metric estimated
    inside a 500-draw warmup window is fitted to ~1 effective sample per
-   direction, whereas stage 1 provides ``n_chains x N`` draws.
+   direction, whereas stage 1 provides ``n_chains x N`` draws.  The reason it
+   still loses is that the stage-1 covariance is itself estimated from a few
+   effective samples per direction (the stage-1 chains had ESS ~ 10), and its
+   condition number came out at 1.6e8; the iterated MAP polish plus a higher
+   dual-averaging target fixed the same problem for free (see *Measured
+   results*).
 
    ``chain_jitter`` (default 0.3) is in units of a whitened posterior sigma.
    Split-R-hat and bulk ESS are recomputed in the *physical* theta
@@ -196,16 +201,20 @@ CLI (all optional)
 ``--oversample``, ``--no-nuisance``, ``--all-band-shifts``, ``--noise-scale``,
 ``--model-err-frac``, ``--sampler {auto,nss,nuts}``, ``--num-live``,
 ``--num-inner-steps``, ``--termination``, ``--no-resume``, ``--n-chains``,
-``--n-warmup``, ``--n-samples``, ``--max-doublings``, ``--chain-jitter``,
-``--n-newton``, ``--stage1``, ``--diagonal-metric``, ``--no-whiten``,
-``--float32``, ``--compare-k``, ``--compare-ks``.
+``--n-warmup``, ``--n-samples``, ``--max-doublings``, ``--target-accept``,
+``--chain-jitter``, ``--n-newton``, ``--map-rounds``, ``--stage1``, ``--diagonal-metric``,
+``--no-whiten``, ``--float32``, ``--compare-k``, ``--compare-ks``.
 
-Expected runtimes (A100, mad06, GPU shared with another job)
-------------------------------------------------------------
-* blind MAP (multistart over 4 archetypes + polish):      ~5 min
-* ``--quick`` (NUTS, 4 chains x (150 + 200)):             ~20 min
-* default (NUTS, 4 chains x (500 + 1000)):                ~1-3 h
-* ``--no-nuisance --sampler nss --quick``:                ~30 min
+Expected runtimes (unshared H100, gn004, float64; a shared V100 is ~5x slower)
+-----------------------------------------------------------------------------
+* blind MAP (multistart + 3 polish rounds, ``--quick`` stages):  ~4 min
+* ``--quick`` NUTS, 4 chains x (500 warmup + 300 draws) at
+  ``--max-doublings 10``:                                        ~32 min
+* ``--quick --n-samples 500`` (the converged default settings,
+  ``--max-doublings 11``):                                       ~1 h
+* ``--no-nuisance --sampler nss --num-live 500`` (34 params,
+  ``num_inner_steps = 51``):                                     ~3.7 h
+* ``--compare-k --quick --no-nuisance`` (K = 1 and 2):           ~1.4 h
 
 NSS cost model: each NS step replaces ``num_live // 10`` points, so the
 *number* of steps is nearly independent of ``num_live``, while the per-step
@@ -217,6 +226,108 @@ recommended ``3 * n_params`` (which doubles the cost; fewer inner steps bias
 ``logZ`` upward).  NUTS cost is ``n_chains`` (vmapped) x draws x the tree
 length, which is capped by ``--max-doublings``.  A second job sharing the GPU
 slows any of this several-fold.
+
+Measured results (2026-09-18/19; H100 ``gn004`` unless stated, float64)
+----------------------------------------------------------------------
+Everything below is the default Sersic mock, ``--seed 0``.  Absolute
+``-log_post`` values are only comparable *within* one code version (the noise
+definition changed during development), differences within a run are not.
+
+**NUTS, 62 parameters (whitened, dense metric adapted in z).**  The
+controlled series, 4 chains, ``--stage1 0``:
+
+=========================================  ========  =======  =====  =====  ======
+run (500 warmup + N draws)                 max R-hat min ESS  div.   leaps  wall
+=========================================  ========  =======  =====  =====  ======
+``--diagonal-metric``, N=300 (control)         1.48        5     28   1010  6.4 h*
+target 0.8, doublings 10, N=300                1.14       37     88    580  4.3 h*
+target 0.95, doublings 10, N=300               1.27       17     18    879  32 min
+**3 MAP rounds, target 0.95, doublings 11,
+N=500**                                        1.045     116      0    766  55 min
+=========================================  ========  =======  =====  =====  ======
+
+(* on a *shared* V100, gn001; the H100 is ~2.7x faster per gradient and was
+not shared.  ``leaps`` is the mean trajectory length in leapfrog steps; the
+caps are 1023 and 2047 doublings respectively.)  The last row is the
+**converged** configuration; ``--target-accept 0.95``, ``--max-doublings 11``,
+``--map-rounds 3`` and ``--stage1 0`` are now the defaults, so it is
+
+    python examples/demo_resolved_sed_fitting.py --quick --n-samples 500
+
+Three changes got there from the 88-divergence run, in order of importance:
+iterating the MAP polish until it stops gaining (``--map-rounds 3``; the
+whitening is then built 25 nats lower down, at a point the chains do not have
+to walk away from), raising the dual-averaging target to 0.95, and lifting the
+tree cap to 11 so that trajectories can finish their U-turns -- with the
+better centre they average 766 leapfrog steps against a cap of 2047, i.e. the
+sampler is no longer cap-limited at all, where every earlier run saturated.
+Raising the dual-averaging target from 0.8 to 0.95 alone costs 1.5x
+the leapfrog steps and removes 80% of the divergences (88 -> 18); it does not
+by itself buy mixing, because the step size falls with it (0.011-0.018 ->
+0.0067-0.0088 in whitened units).  The divergences are **not** a boundary
+effect: at the MAP no SPS parameter sits within 1% of its sigmoid bound, and
+the divergent draws cluster (mean displacement 0.5-0.8 sigma) in the *bulge's*
+``logsfr_ratio_0..3`` and ``Av`` -- the Student-t(df=2) SFH prior of the faint
+component, along the mass/dust/SFH exchange ridge, where the Hessian has a
+handful of genuinely negative eigenvalues.
+
+**Recovery (the converged 4 x 500 run):** SPS 16/22 inside 68% (expect 15),
+22/22 inside 95%; shapes 7/12 and 11/12; sky + shift nuisances 27/28 and
+28/28; ``chi2_red = 1.0021`` (255938 dof), 0.29% of pixels with |chi| > 3;
+blind MAP 12.2 nats *below* the injected truth.
+
+**Calibration of the 62-parameter posterior.**  The truth is inside the 68%
+interval for 50 of the 62 raw coordinates (expect 42) and inside 95% for
+62/62; the joint Mahalanobis distance of the truth from the posterior is
+chi2 = 30 on 62 dof (expect 62 +/- 11; the earlier, unconverged 4 x 300 run
+gave 35), and the draws of that run sat 23.1 +/- 6.2 nats above the best point
+where a calibrated 62-dimensional posterior would sit 31.0 +/- 5.6.  This
+posterior is therefore *conservative*, mostly in the nuisance block, which is
+the right side to err on.
+
+**NSS, 34 parameters (`--no-nuisance`).**  ``--num-live 500``,
+``num_inner_steps = 51 = 1.5 d``: ``logZ = -2863.01 +/- 0.51``, ESS 345, 1007
+outer steps, 3.7 h.  Model comparison (``--compare-k --quick``, num_live 100):
+``logZ(K=2) = -2870.79 +/- 1.10`` against ``logZ(K=1) = -7072.71 +/- 0.74``,
+i.e. ln K = 4202 in favour of two components (the K=1 recovery table grades
+0/12 shape parameters, which is the expected answer for the wrong K).
+
+*The NSS posterior is over-confident, and more slice steps do not fix it.*
+Its truth coverage is 13/34 at 68% and 28/34 at 95%, the joint Mahalanobis
+chi2 of the truth is 112 on 34 dof, and its draws sit only 7.2 +/- 3.7 nats
+above the best of them where a calibrated 34-dimensional posterior would sit
+17.0 +/- 4.1 -- an effective width factor of 0.65.  Tripling the slice steps
+(``--num-live 100 --num-inner-steps 102 = 3 d``, 938 steps, 1.7 h) gives
+``logZ = -2855.59 +/- 1.00``, ESS 115, and marginals that are *narrower*
+still (bulge ``log_sigma_y`` sd 0.015 against 0.021, coverage 14/34 at 68%),
+with the same displacements.  Two separate things are going on.  (i) The
+*bulge* is recovered slightly too large, too round and too cuspy in **every**
+run, NSS and NUTS alike -- in the converged 62-parameter NUTS posterior the
+bulge ``r_eff`` is +1.8 sigma, ``b/a`` +2.2 sigma and ``n`` +1.2 sigma from
+the truth, against much better behaved disk parameters.  That is a property of
+this mock (a 4-pixel n = 4 core under a 0.03" PSF, fitted with a 5% model-error
+floor), not of the sampler.  (ii) On top of it the NSS intervals are ~0.65x
+too narrow, which turns that common displacement into a coverage failure.  The
+outstanding suspect for (ii) is that the NSS path is forced to float32
+(``nss_sampler.py:360, 522``), putting ~0.1-nat noise on a hard ``L > L*``
+constraint; the decisive test (not yet run) is the same 34-parameter model
+under float64 NSS, or under NUTS.  With
+``num_inner_steps = 34 = 1.0 d`` the failure is total rather than partial: the
+live set collapses, ``logZ_live - logZ`` falls from 3.6e3 to below the
+termination threshold in 18 steps, the run stops at step 218 with
+``logZ = -19244`` (16000 nats wrong) and **every one of the 300 output draws
+is the same point** (marginal sd 1e-6).  Use at least ``2 * n_params`` inner
+steps and check ``logZ_live - logZ`` in the log before believing an NSS
+evidence or posterior.
+
+**The blind MAP is the weak link, not the sampler.**  See
+:func:`run_blind_map` for the 62-parameter numbers.  On the 34-parameter
+``--no-nuisance`` model the blind MAP is stuck in a *different basin*: it
+reaches ``-log_post = 2954.2`` where the injected truth scores 2918.4 and the
+best NSS draw 2911.2, and annealing from that draw reaches 2904.4 -- 50 nats
+below the blind MAP, 3.9 away from it in raw theta.  NSS does not use the MAP
+(it starts from the prior) so its answer is unaffected, but the printed
+"MAP - truth" check is negative there for a real reason.
 
 Outputs (under ``--outdir``, default ``outputs/demo/resolved_sed_fitting/``)
 ----------------------------------------------------------------------------
@@ -403,6 +514,7 @@ POLISH_STAGES_QUICK = [(0.01, 600), (0.003, 1600), (0.001, 1200), (0.0003, 1200)
 POLISH_STAGES_FULL = [(0.01, 1000), (0.003, 3000), (0.001, 2500), (0.0003, 2500)]
 POLISH_STALL_NATS = 0.2  # stop annealing when two stages in a row buy less than this
 MAX_LAPLACE_VAR = 9.0  # cap on a Laplace metric variance (raw units; ~the prior width)
+MAP_ROUND_TOL = 1.0  # stop repeating the MAP polish when a round gains fewer nats than this
 
 
 # ---------------------------------------------------------------------------
@@ -841,12 +953,42 @@ def newton_polish(fwd: ForwardModel, res: MAPResult, n_iter: int, hessian_at) ->
     return dataclasses.replace(res, theta=theta, neg_log_posterior=best)
 
 
-def run_blind_map(fwd: ForwardModel, quick: bool, n_newton: int) -> tuple[MAPResult, Callable]:
+def run_blind_map(
+    fwd: ForwardModel, quick: bool, n_newton: int, map_rounds: int = 3
+) -> tuple[MAPResult, Callable]:
     """Blind MAP: data -> image moments -> neutral start -> multistart Adam.
 
     This function receives ONLY the forward model (which holds the noisy
     observation).  The injected truth is not an argument and is not used
     anywhere in the initialisation or optimisation.
+
+    The anneal + modified-Newton polish is **repeated** (up to ``map_rounds``
+    times, stopping as soon as a round gains less than ``MAP_ROUND_TOL``
+    nats), because one pass is not enough and the sampler pays for what is
+    left: NUTS is started at this point and the Laplace whitening is built
+    from the Hessian *here*, so a point tens of nats up the hill gives a
+    metric for the wrong place and a warmup that is still travelling.
+    Measured on the 62-parameter mock (2026-09-18, H100, ``--quick``):
+
+    ========================  ==========  ============================
+    MAP polish                -log_post   Hessian at the point
+    ========================  ==========  ============================
+    1 round (the old code)      3085.6    2 negative eigenvalues, min -7.2e2
+    2 rounds                    3064.3    3 negative
+    3 rounds (134 -> 266 s)     3060.3    4 negative, min -1.8e3
+    anneal from the truth       3057.8    1 negative, min -8.9
+    (injected truth)            3075.3
+    ========================  ==========  ============================
+
+    So one pass stopped ~25 nats above what the same blind code reaches in
+    three, and 2.5 nats above an anneal that starts from the injected truth --
+    the extra two rounds cost ~2 min of GPU against ~1 h of sampling.  Note
+    that a *lower* ``-log_post`` does not buy a nicer Hessian: the mode region
+    is genuinely non-convex (the mass / dust / SFH exchange ridge between the
+    two components is curved, and different points on it have different
+    numbers of negative curvature directions).  That is why the Laplace
+    covariance floors by ``|lambda|`` and why a dense metric is adapted on top
+    of it (see ``arachne.inference.laplace``).
     """
     print("\n--- Blind initialisation + MAP ---")
     t0 = time.perf_counter()
@@ -859,7 +1001,19 @@ def run_blind_map(fwd: ForwardModel, quick: bool, n_newton: int) -> tuple[MAPRes
     n0 = [float(s.get("n", np.nan)) for s in shapes]
     print(f'  moments start: centres {mu0} ", sizes {sig0} ", n = {np.round(n0, 2).tolist()}')
     print(f"  -log_post(blind start, masses unsolved) = {-float(fwd.log_posterior(theta0)):.1f}")
-    kwargs = dict(n_rounds=2, steps_per_round=150, final_steps=200) if quick else {}
+    # n_rounds counts the *mass re-solves* inside ``find_map``: each round ends
+    # with a weighted linear solve for the K masses, which finds the basin from
+    # a blind start but maximises the FLOOR-FREE likelihood, so extra rounds
+    # near the mode push the fit uphill (see ``polish_map``).  Measured on the
+    # 62-parameter mock (2026-09-18): the library default (n_rounds=4) gave a
+    # multistart best of -log_post = 3140.7 and a polished MAP of 3132.5,
+    # while n_rounds=2 polished to 3060.3 from the same data -- 70 nats better
+    # for less work.  So both paths use 2 rounds; ``quick`` only shortens them.
+    kwargs = (
+        dict(n_rounds=2, steps_per_round=150, final_steps=200)
+        if quick
+        else dict(n_rounds=2, steps_per_round=300, final_steps=400)
+    )
     # order_by_size=False: keep the ordering in one place (order_full_theta),
     # which is explicit about the nuisance tail.
     print(f"  multistart_map over {len(ARCHETYPES)} archetypes {ARCHETYPES} ...")
@@ -869,14 +1023,25 @@ def run_blind_map(fwd: ForwardModel, quick: bool, n_newton: int) -> tuple[MAPRes
         f"[{time.perf_counter() - t0:.0f}s]"
     )
 
-    polished = polish_map(fwd, res, quick)
-    if polished.neg_log_posterior < res.neg_log_posterior:
-        res = polished
     # One jitted Hessian closure for the whole run: the modified-Newton polish
     # and the Laplace whitening of the sampler share it, which saves a ~40 s
     # re-trace of ``jax.hessian``.
     hessian_at = make_hessian_fn(fwd)
-    res = newton_polish(fwd, res, n_newton, hessian_at)
+    for round_i in range(max(1, map_rounds)):
+        before = res.neg_log_posterior
+        polished = polish_map(fwd, res, quick)
+        if polished.neg_log_posterior < res.neg_log_posterior:
+            res = polished
+        stepped = newton_polish(fwd, res, n_newton, hessian_at)
+        if stepped.neg_log_posterior < res.neg_log_posterior:
+            res = stepped
+        gain = before - res.neg_log_posterior
+        print(
+            f"  polish round {round_i + 1}/{map_rounds}: -log_post = "
+            f"{res.neg_log_posterior:.1f} (gained {gain:.1f} nats)"
+        )
+        if gain < MAP_ROUND_TOL:
+            break
     res = dataclasses.replace(res, theta=order_full_theta(fwd, res.theta))
     print(
         f"  blind MAP: -log_post = {res.neg_log_posterior:.1f} "
@@ -971,7 +1136,7 @@ def run_sampler(fwd: ForwardModel, theta_map: jnp.ndarray, args, outdir: Path, h
             f"\n--- NUTS from the blind MAP: {args.n_chains} chains x "
             f"({args.n_warmup} warmup + {args.n_samples} samples), "
             f"chain_jitter={args.chain_jitter}, max_num_doublings={args.max_doublings}, "
-            f"{metric} metric ---"
+            f"target_accept={args.target_accept}, {metric} metric ---"
         )
         if args.no_whiten:
             print("  sampling RAW theta with an identity start metric (documented failure mode)")
@@ -981,6 +1146,7 @@ def run_sampler(fwd: ForwardModel, theta_map: jnp.ndarray, args, outdir: Path, h
                 n_samples=args.n_samples,
                 max_num_doublings=args.max_doublings,
                 dense_mass_matrix=args.dense_metric,
+                target_accept_rate=args.target_accept,
             )
             result = sampler.run(
                 theta_map,
@@ -1013,6 +1179,7 @@ def run_sampler(fwd: ForwardModel, theta_map: jnp.ndarray, args, outdir: Path, h
                     chain_jitter=args.chain_jitter,
                     max_num_doublings=args.max_doublings,
                     dense_mass_matrix=args.dense_metric,
+                    target_accept_rate=args.target_accept,
                     whitened=whitened,
                 )
                 print("  stage 1: " + stage1.summary(max_num_doublings=args.max_doublings))
@@ -1039,6 +1206,7 @@ def run_sampler(fwd: ForwardModel, theta_map: jnp.ndarray, args, outdir: Path, h
                 chain_jitter=args.chain_jitter,
                 max_num_doublings=args.max_doublings,
                 dense_mass_matrix=args.dense_metric,
+                target_accept_rate=args.target_accept,
                 whitened=whitened,
             )
         summary = result.summary(max_num_doublings=args.max_doublings)
@@ -1651,7 +1819,25 @@ def parse_args():
     )
     parser.add_argument("--n-chains", type=int, default=4, help="NUTS chains")
     parser.add_argument("--n-warmup", type=int, default=None, help="NUTS warmup (default 500)")
-    parser.add_argument("--max-doublings", type=int, default=10, help="NUTS max tree doublings")
+    parser.add_argument(
+        "--max-doublings",
+        type=int,
+        default=11,
+        help=(
+            "NUTS max tree doublings. At 10 every trajectory saturated the cap; at 11, "
+            "from a properly polished MAP, they average 766 of the 2047 allowed steps"
+        ),
+    )
+    parser.add_argument(
+        "--target-accept",
+        type=float,
+        default=0.95,
+        help=(
+            "NUTS dual-averaging target acceptance rate. 0.8 (blackjax's default) left "
+            "88 divergences on this ridge, 0.95 leaves 18 at 1.5x the leapfrog steps "
+            "(and none once the MAP polish is iterated)"
+        ),
+    )
     parser.add_argument(
         "--chain-jitter",
         type=float,
@@ -1679,6 +1865,16 @@ def parse_args():
         "--no-whiten",
         action="store_true",
         help="sample raw theta with an identity metric instead of whitening (fails here)",
+    )
+    parser.add_argument(
+        "--map-rounds",
+        type=int,
+        default=3,
+        help=(
+            "repeat the (annealed Adam + modified Newton) MAP polish up to this many times, "
+            "stopping when a round gains < 1 nat; one pass stops ~25 nats above the mode, "
+            "which the sampler then has to walk away from"
+        ),
     )
     parser.add_argument(
         "--n-newton",
@@ -1751,7 +1947,13 @@ def resolve_run_settings(args, n_params: int) -> None:
         else:
             args.n_samples = 300 if args.quick else 1000
     if args.stage1 is None:
-        args.stage1 = 300 if args.quick else 500
+        # Off by default: re-whitening on stage-1 draws was measured to make
+        # this posterior WORSE (max R-hat 1.48 against 1.14 for the same
+        # settings without it), because the stage-1 covariance is itself
+        # estimated from a few effective samples per direction.  The flag is
+        # kept because it is the right idea for a genuinely curved ridge and
+        # may help once the stage-1 chains are long enough.
+        args.stage1 = 0
     if args.n_warmup is None:
         # A DENSE metric has to estimate d(d+1)/2 numbers, so the last (and
         # only useful) adaptation window must hold many more than d draws:
@@ -1890,7 +2092,7 @@ def main():
         print("  precision: float32 -- expect the sampler to fail (see promote_to_float64)")
 
     # ---- blind fit: no truth information from here until the report ----
-    map_res, hessian_at = run_blind_map(fwd, args.quick, args.n_newton)
+    map_res, hessian_at = run_blind_map(fwd, args.quick, args.n_newton, args.map_rounds)
     theta_map = map_res.theta
     report_bounds(model, fwd, theta_map)
     # Truth-based grading of the MAP (reporting only; the fit is already done).

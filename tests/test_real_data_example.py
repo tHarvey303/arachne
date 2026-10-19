@@ -392,3 +392,70 @@ class TestClippedStats:
         median, sd = rdu._clipped_stats(values)
         assert median == pytest.approx(5.0, abs=0.1)
         assert sd == pytest.approx(1.0, abs=0.15)
+
+
+class TestChi2SurfaceDensity:
+    """chi^2 per arcsec^2 is the grid-independent residual statistic."""
+
+    def test_total_and_density(self):
+        """Total chi^2 and its surface density."""
+        chi = [np.full((10, 10), 2.0), np.full((5, 5), 1.0)]
+        mask = [np.ones((10, 10)), np.ones((5, 5))]
+        out = rdu.chi2_surface_density(chi, mask, [0.05, 0.10])
+        assert out["chi2_total"] == pytest.approx(100 * 4.0 + 25 * 1.0)
+        assert out["area_arcsec2"] == pytest.approx(100 * 0.0025 + 25 * 0.01)
+        assert out["chi2_per_arcsec2"] == pytest.approx(425.0 / 0.5)
+        assert out["chi2_per_arcsec2_per_band"][0] == pytest.approx(400.0 / 0.25)
+
+    def test_masked_pixels_do_not_count_towards_the_area(self):
+        """Masked pixels do not count towards the area."""
+        chi = [np.zeros((10, 10))]
+        mask = [np.zeros((10, 10))]
+        mask[0][:5] = 1.0
+        out = rdu.chi2_surface_density(chi, mask, [0.1])
+        assert out["area_arcsec2"] == pytest.approx(50 * 0.01)
+
+    def test_finer_grid_keeps_the_total_but_not_chi2_red(self):
+        """A systematic residual keeps chi^2 per arcsec^2 when the grid is refined."""
+        # Same 1 arcsec^2 of sky, same surface-brightness mismatch, uncorrelated
+        # noise: chi per pixel scales as sqrt(pixel area), so chi^2 per pixel
+        # scales as the area and the surface density is invariant.
+        coarse = [np.full((10, 10), 2.0)]  # 0.1"/px
+        fine = [np.full((20, 20), 1.0)]  # 0.05"/px, chi smaller by sqrt(4)
+        a = rdu.chi2_surface_density(coarse, [np.ones((10, 10))], [0.1])
+        b = rdu.chi2_surface_density(fine, [np.ones((20, 20))], [0.05])
+        assert a["chi2_per_arcsec2"] == pytest.approx(b["chi2_per_arcsec2"])
+        assert a["chi2_total"] == pytest.approx(b["chi2_total"])
+
+
+class TestSkyNoiseRatio:
+    """Empirical sky rms against the quoted sigma."""
+
+    def test_consistent_noise_gives_ratio_one(self):
+        """Consistent noise gives ratio one."""
+        rng = np.random.default_rng(7)
+        flux = rng.normal(0.0, 0.5, (80, 80))
+        variance = np.full((80, 80), 0.25)
+        out = rdu.sky_noise_ratio(flux, variance, (39.5, 39.5))
+        assert out["ratio"] == pytest.approx(1.0, abs=0.06)
+        assert out["quoted_sigma_nJy"] == pytest.approx(0.5)
+
+    def test_overestimated_variance_gives_ratio_below_one(self):
+        """Weight maps that ignore drizzle correlation give a ratio below one."""
+        rng = np.random.default_rng(8)
+        flux = rng.normal(0.0, 0.35, (80, 80))
+        variance = np.full((80, 80), 0.25)  # quoted sigma 0.5, true 0.35
+        out = rdu.sky_noise_ratio(flux, variance, (39.5, 39.5))
+        assert out["ratio"] == pytest.approx(0.7, abs=0.06)
+
+    def test_the_source_is_excluded_by_the_annulus(self):
+        """The source is excluded by the annulus."""
+        rng = np.random.default_rng(9)
+        flux = rng.normal(0.0, 0.5, (80, 80)) + _gaussian((80, 80), 40, 40, 5.0, 500.0)
+        variance = np.full((80, 80), 0.25)
+        out = rdu.sky_noise_ratio(flux, variance, (40.0, 40.0))
+        assert out["ratio"] == pytest.approx(1.0, abs=0.08)
+
+    def test_too_few_pixels_returns_none(self):
+        """Too few pixels returns None."""
+        assert rdu.sky_noise_ratio(np.zeros((6, 6)), np.ones((6, 6)), (2.5, 2.5)) is None

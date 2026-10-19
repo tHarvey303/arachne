@@ -79,15 +79,39 @@ indices are clamped to ``--n-bounds`` (0.5 to 8 by default, tighter than the
 library's 0.3-10).  Together these stop the failure seen in the first K=2 run,
 where one "component" became a 14"-wide n=8 pedestal holding 30% of the light.
 
+Results on the vetted GOODS-S sample (NSS, num_live 150, inner factor 1.5)
+--------------------------------------------------------------------------
+Posterior medians on the recommended defaults; ``ratio`` is the model total
+over the JADES DR3 catalogue total (never fitted to) and ``R50`` is that
+catalogue's ``FLUX_RADIUS_F200W``, which is *PSF-convolved* and so should
+exceed the fitted intrinsic ``r_e``:
+
+======  ==  ===========  ====  =====  =====  ====  =====  =====  =====
+target  K   logZ         ESS   chi2r  log M  r_e"  n      ratio  R50"
+======  ==  ===========  ====  =====  =====  ====  =====  =====  =====
+12281   1   340031.6     213   1.13   11.49  0.21  2.33   0.94   0.258
+44832   1   165983.1      79   0.92   11.16  0.27  0.91   1.06   0.326
+44832   2   171686.3      77   0.86   11.28  0.24  0.81   1.07   0.326
+47870   1   336279.2     267   1.13   10.81  0.19  1.26   1.12   0.262
+47870   2   351029.8      62   0.97   10.66  0.14  2.48   1.00   0.262
+57578   1   371430.9      58   0.89   10.96  0.23  3.61   1.06   0.251
+======  ==  ===========  ====  =====  =====  ====  =====  =====  =====
+
+``ln K`` (K=2 over K=1) is +5703 for 44832 and +14751 for 47870: with 1.3e5
+pixels a second component is always "decisively" preferred, and the honest
+reading is that ``logZ`` measures how much structure the data resolve, not a
+physical component count.  47870's K=2 solution *is* a bulge + disk (a compact
+n=2.5, Av=0.68 component plus an extended n=0.9, Av=0.01 one).
+
+Two caveats that the numbers do not show: the credible intervals are far too
+tight (log M to +/-0.02 dex) because the likelihood has 1.3e5 pixels and no
+term for the model's own systematics beyond the flat 10% floor; and the fitted
+``log10metallicity`` sits at -3.3 to -3.9 for four of the five galaxies, i.e.
+against the emulator's -4.0 floor, which is not credible for log M* ~ 11 at
+z ~ 2 and means metallicity is absorbing dust/SFH errors.
+
 Blind
 -----
-The fit never sees the catalogue photometry.  The starting point comes from
-image moments (``blind_initial_theta``), masses from a linear least-squares
-solve, then multistart Adam over four SPS archetypes, and the posterior from
-nested slice sampling whose live points are drawn from the prior.
-
-Blind, continued
-----------------
 Nothing in the initialisation, the optimisation or the sampling sees the
 catalogue: image moments give the centre, the curve of growth gives the size,
 a linear least-squares solve gives the masses, multistart Adam over four SPS
@@ -95,9 +119,70 @@ archetypes gives the MAP (then an annealed Adam + damped-Newton polish), and
 nested slice sampling draws its live points from the prior.  The JADES DR3
 total photometry is compared with the answer, never fitted to.
 
+Reading ``--multires`` numbers (2026-09-18)
+-------------------------------------------
+Three things about the native-grid fits confused the first attempt and are
+worth stating before anyone compares the two modes again:
+
+1. The native mosaics and the 0.05" thumbnail carry the *same* flux.  Summed in
+   matched apertures on 12281: F200W 13792 vs 13950 nJy (r < 1"), F444W 24564
+   vs 24714, i.e. agreement to ~1% (the rest is the square 8" frame clipping
+   the wings differently).  There is no units or pixel-area bug in the
+   multi-resolution path.
+2. The native *weight* maps ignore the pixel-to-pixel correlation that
+   drizzling introduces, so the blank-sky rms is 0.70 (F200W) and 0.72 (F444W)
+   of the quoted sigma, against 0.90-1.14 on the thumbnail grid, whose pixels
+   each average ~6 native ones.  Every per-pixel chi on the native grid is
+   therefore divided by ~1.4 times too large a sigma, which deflates
+   ``chi2_red`` by ~2.  ``sky_noise_check`` reports the ratio per band and it
+   is written to ``summary.json`` (``sky_noise_check``).
+3. ``chi2_red`` is per *pixel* and is not comparable between grids at all (see
+   ``real_data_utils.chi2_surface_density``).  Quote chi^2 per arcsec^2
+   alongside it; both are now printed and stored.
+
+The 0.686 "model total / catalogue" ratio seen in the first two-band
+``--multires`` run was **not** a photometry bug either: that run sampled with
+*un-whitened* NUTS, which collapsed (step size 3.6e-8, max R-hat 2413), so the
+"posterior median" was a frozen chain sitting 0.16 dex below the mode.  At the
+MAP the same model gives 0.965 (multires, K=1) against 0.943 (single grid,
+K=1).  Sample the multi-resolution model with NSS or with ``--whiten``.
+
+Two converged K=1 NSS fits of 12281 in F200W + F444W, one on the native grids
+(400x400 at 0.020" and 200x200 at 0.040") and one on the 0.05" thumbnail, with
+identical priors and the same sky mask (2026-09-18):
+
+=========================  ==================  ==================
+quantity                   single grid 0.05"   native multires
+=========================  ==================  ==================
+log Z                      77063.8 +/- 0.60    390494.0 +/- 0.62
+ESS / NSS steps            309 / 563           295 / 612
+sampling wall time         925 s               1706 s
+chi2_red (10% floor)       1.07                0.54
+chi2 per arcsec^2          427                 838
+  F200W / F444W            490 / 365           1346 / 329
+sky rms / quoted sigma     1.00 / 0.90         0.62 / 0.65
+log M_star                 11.15 [11.05,11.26] 11.24 [11.15,11.28]
+r_e                        0.197" (1.70 kpc)   0.192" (1.66 kpc)
+Sersic n / Av              2.54 / 0.61         2.98 / 1.04
+model/catalogue flux       0.960               0.946
+sky pedestal (nJy/px)      +0.016 .. +0.030    -0.006 .. +0.002
+=========================  ==================  ==================
+
+Sizes agree to 3% and masses to 0.09 dex; the native grid prefers a slightly
+cuspier, dustier solution because it resolves the core, and its F200W residual
+is 2.7x larger *per arcsec^2* — the 0.02" pixels see clumps and arms that a
+smooth Sersic cannot reproduce, which the 0.05" grid averages away.  The two
+``logZ`` values are evidences for **different data** and must never be
+subtracted; only quantities per unit sky area are comparable.  Multi-resolution
+cost here was 1.8x the single grid for the same number of NSS steps.
+
 Usage
 -----
 ::
+
+    # the recommended production command (everything else is a default):
+    python examples/fit_jades_dja.py --target goods-s-mediumhst_12281 --k 1 2 \
+        --num-live 150 --inner-steps-factor 1.5 --outdir outputs/real_data_v2
 
     python examples/fit_jades_dja.py --list-targets
     python examples/fit_jades_dja.py --target goods-s-mediumhst_12281 --quick
@@ -840,7 +925,55 @@ def reference_band(fm) -> int:
 # ---------------------------------------------------------------------------
 
 
+def patch_nss_checkpoint_stacking() -> bool:
+    """Make NSS checkpointing O(1) instead of O(n_steps) per write.
+
+    LIBRARY WORKAROUND (2026-09-18).  ``nss_sampler._save_checkpoint`` stacks
+    the whole accumulated dead-point list with
+    ``jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *dead)`` and then pulls
+    the result back to the host.  ``jnp.stack`` over *n* arrays is one XLA op
+    with *n* operands, so every checkpoint compiles a **new** program (the
+    operand count grows by ``checkpoint_every`` each time) and the compile
+    dominates: measured on a V100, the 43-parameter K=2 fits spent ~40 s
+    stepping and ~60-90 s stacking per 25 steps once ~1000 outer steps had
+    accumulated, and the per-25-step wall time grew linearly with the step
+    count (40 s at step 200, 100 s at step 1000, 145 s at step 1650).
+    Stacking on the host with ``numpy`` is exact, allocation-bound and takes
+    milliseconds; the leaves are converted to numpy by ``np.savez`` anyway.
+    Fix belongs in ``src/arachne/inference/nss_sampler.py:180``.
+    """
+    from arachne.inference import nss_sampler  # noqa: PLC0415
+
+    cache: dict[str, object] = {"n": 0, "stacked": None}
+
+    def _numpy_stack_dead(dead: list) -> object:
+        # Move only the entries added since the previous checkpoint to the host
+        # (no device op at all, hence no compile) and append them to the cached
+        # numpy arrays, so a checkpoint costs O(checkpoint_every), not O(steps).
+        n_done = int(cache["n"])
+        fresh = dead[n_done:] if 0 < n_done <= len(dead) else dead
+        if fresh is dead:
+            cache["stacked"] = None
+        block = jax.tree_util.tree_map(lambda *xs: np.stack([np.asarray(x) for x in xs]), *fresh)
+        merged = (
+            block
+            if cache["stacked"] is None
+            else jax.tree_util.tree_map(
+                lambda a, b: np.concatenate([a, b]), cache["stacked"], block
+            )
+        )
+        cache["stacked"], cache["n"] = merged, len(dead)
+        return merged
+
+    if getattr(nss_sampler._stack_dead, "__name__", "") != "_numpy_stack_dead":
+        nss_sampler._stack_dead = _numpy_stack_dead
+        return True
+    return False
+
+
 def run_nss(fm: ForwardModel, args, outdir: Path, key) -> NSSResult:
+    if patch_nss_checkpoint_stacking():
+        print("  (patched nss_sampler._stack_dead to stack checkpoints on the host)")
     num_live = 60 if args.quick else args.num_live
     n_out = 200 if args.quick else args.n_samples
     inner = args.num_inner_steps or (
@@ -1060,6 +1193,36 @@ def chi_stats(chi: list, mask: list, n_params: int) -> dict:
     }
 
 
+def band_pixel_scales(fm) -> list[float]:
+    """Pixel scale in arcsec of every fitted band, for either model class."""
+    if is_multiresolution(fm):
+        return [float(b.pixel_scale) for b in fm.observation.bands]
+    return [float(fm.observation.pixel_scale)] * int(np.asarray(fm.observation.flux).shape[0])
+
+
+def sky_noise_check(fm, r_frac: float = 0.35) -> dict:
+    """``real_data_utils.sky_noise_ratio`` for every band of either model class.
+
+    Returns ``{band_index: {sky_rms_nJy, quoted_sigma_nJy, ratio}}``; see that
+    function for what the ratio means and why it differs between the 0.05"
+    thumbnails and the native mosaics.
+    """
+    flux, variance, _ = observed_bands(fm)
+    multi = is_multiresolution(fm)
+    out = {}
+    for b, (f, v) in enumerate(zip(flux, variance)):
+        h, w = np.asarray(f).shape
+        centre = (
+            tuple(float(c) for c in fm.observation.bands[b].ref_pixel)
+            if multi
+            else ((h - 1) / 2.0, (w - 1) / 2.0)
+        )
+        row = rdu.sky_noise_ratio(np.asarray(f), np.asarray(v), centre, r_frac=r_frac)
+        if row is not None:
+            out[b] = row
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Products
 # ---------------------------------------------------------------------------
@@ -1115,6 +1278,8 @@ def map_report(fm, data: Dataset, args, emulator, map_res: MAPResult, outdir: Pa
     ]
     stats_eff = chi_stats(chi_eff, mask, fm.n_params)
     stats_phot = chi_stats(chi_phot, mask, fm.n_params)
+    density = rdu.chi2_surface_density(chi_eff, mask, band_pixel_scales(fm))
+    noise = sky_noise_check(fm)
     floors = {}
     for trial in (0.05, 0.10, 0.15):
         floors[f"{trial:.2f}"] = chi_stats(
@@ -1150,6 +1315,14 @@ def map_report(fm, data: Dataset, args, emulator, map_res: MAPResult, outdir: Pa
             b: float(v) for b, v in zip(data.bands, stats_eff["chi2_red_per_band"])
         },
         "frac_chi_gt_3": stats_eff["frac_chi_gt_3"],
+        "chi2_total_with_model_floor": density["chi2_total"],
+        "chi2_per_arcsec2_with_model_floor": density["chi2_per_arcsec2"],
+        "chi2_per_arcsec2_per_band": {
+            b: float(v) for b, v in zip(data.bands, density["chi2_per_arcsec2_per_band"])
+        },
+        "sky_noise_check": {
+            data.bands[b]: {k: float(v) for k, v in row.items()} for b, row in noise.items()
+        },
         "masked_pixel_fraction": float(data.mask_fraction),
         "mask_info": {k: float(v) for k, v in data.mask_info.items()},
         "r_half_guess_arcsec": float(data.r_half_arcsec),
@@ -1193,6 +1366,14 @@ def map_report(fm, data: Dataset, args, emulator, map_res: MAPResult, outdir: Pa
           f"photon = {out['chi2_red_photon']:.1f}  "
           f"frac|chi|>3 = {out['frac_chi_gt_3']:.4f}  "
           f"phot ratio median = {out['photometry_ratio_median']}")  # fmt: skip
+    print(f"   chi2 total = {out['chi2_total_with_model_floor']:.4g} over "
+          f"{density['area_arcsec2']:.1f} arcsec^2 -> "
+          f"{out['chi2_per_arcsec2_with_model_floor']:.1f} per arcsec^2 "
+          f"(grid-independent; chi2_red is per pixel)")  # fmt: skip
+    if noise:
+        print("   sky rms / quoted sigma: " + "  ".join(
+            f"{rdu.short_band(data.bands[b])} {row['ratio']:.2f}" for b, row in noise.items()
+        ))  # fmt: skip
     print("   chi2_red vs floor: " + "  ".join(f"{k} -> {v:.3f}" for k, v in floors.items()))
     per_band = out["chi2_red_with_floor_per_band"]
     print("   per band: " + "  ".join(f"{rdu.short_band(b)} {v:.2f}" for b, v in per_band.items()))
@@ -1266,9 +1447,17 @@ def make_products(
     print(f"  chi2_red (photon noise only) = {resid['chi2_red']:.2f}   "
           f"with the {args.model_err_frac:.0%} floor = {chi2_eff:.2f}   "
           f"frac |chi|>3 = {stats_eff['frac_chi_gt_3']:.4f}")  # fmt: skip
+    density = rdu.chi2_surface_density(chi_eff, obs_mask, band_pixel_scales(fm))
+    noise = sky_noise_check(fm)
+    print(f"  chi2 total = {density['chi2_total']:.4g} over {density['area_arcsec2']:.1f} "
+          f"arcsec^2 -> {density['chi2_per_arcsec2']:.1f} per arcsec^2 "
+          f"(grid-independent; chi2_red is per pixel)")  # fmt: skip
     for b, band in enumerate(bands):
+        ratio = noise.get(b, {}).get("ratio", float("nan"))
         print(f"    {rdu.short_band(band):6s} chi2_red photon {resid['chi2_red_per_band'][b]:9.2f}"
-              f"   with floor {chi2_eff_band[b]:7.3f}")  # fmt: skip
+              f"   with floor {chi2_eff_band[b]:7.3f}"
+              f"   chi2/arcsec^2 {density['chi2_per_arcsec2_per_band'][b]:8.1f}"
+              f"   sky rms/sigma {ratio:5.2f}")  # fmt: skip
 
     dec = decode_samples(fm, samples, emulator)
     kpc = kpc_per_arcsec(data.target.z)
@@ -1395,6 +1584,14 @@ def make_products(
             b: float(v) for b, v in zip(bands, resid["chi2_red_per_band"])
         },
         "chi2_red_with_floor_per_band": {b: float(v) for b, v in zip(bands, chi2_eff_band)},
+        "chi2_total_with_model_floor": density["chi2_total"],
+        "chi2_per_arcsec2_with_model_floor": density["chi2_per_arcsec2"],
+        "chi2_per_arcsec2_per_band": {
+            b: float(v) for b, v in zip(bands, density["chi2_per_arcsec2_per_band"])
+        },
+        "sky_noise_check": {
+            bands[b]: {k: float(v) for k, v in row.items()} for b, row in noise.items()
+        },
         "frac_chi_gt_3": float(stats_eff["frac_chi_gt_3"]),
         "frac_chi_gt_3_photon": float(resid["frac_chi_gt_3"]),
         "masked_pixel_fraction": float(data.mask_fraction),

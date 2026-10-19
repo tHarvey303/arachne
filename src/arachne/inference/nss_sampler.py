@@ -177,14 +177,47 @@ def _key_from_array(arr: np.ndarray, typed: bool) -> jax.Array:
     return jnp.asarray(arr)
 
 
+def _to_host(tree: Any) -> Any:
+    """Move a pytree of device arrays to host numpy arrays.
+
+    Dead-particle records are only ever consumed on the host (checkpoints,
+    the final evidence and resampling), so they are kept there: leaving them
+    on the device made GPU memory grow by ~10 GB per 1000 steps on a 43-param
+    9-band fit until cuFFT ran out of workspace.
+    """
+    return jax.tree_util.tree_map(np.asarray, jax.device_get(tree))
+
+
 def _stack_dead(dead: list[Any]) -> Any:
-    """Stack a list of per-step ``NSInfo`` pytrees along a new leading axis."""
-    return jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *dead)
+    """Stack a list of per-step ``NSInfo`` pytrees along a new leading axis (host)."""
+    return jax.tree_util.tree_map(lambda *xs: np.stack([np.asarray(x) for x in xs]), *dead)
 
 
 def _unstack_dead(stacked: Any, n: int) -> list[Any]:
-    """Inverse of :func:`_stack_dead`: split the leading axis back into a list."""
-    return [jax.tree_util.tree_map(lambda x, i=i: x[i], stacked) for i in range(n)]
+    """Inverse of :func:`_stack_dead`: split the leading axis back into a list (host)."""
+    return [jax.tree_util.tree_map(lambda x, i=i: np.asarray(x)[i], stacked) for i in range(n)]
+
+
+def _merge_dead(dead: list[Any]) -> list[Any]:
+    """Concatenate all dead-particle records into ONE ``NSInfo`` on the host.
+
+    ``blackjax.ns.utils.finalise`` concatenates the list with a single
+    ``jnp.concatenate`` whose operand count equals the number of steps, which
+    compiles a fresh (and, for thousands of steps, very slow) XLA program.
+    Doing the concatenation in numpy first makes that call trivial.  The
+    per-step ``update_info`` is dropped (``finalise`` is always called with
+    ``update_info=False`` here).
+    """
+    if len(dead) <= 1:
+        return list(dead)
+    particles = jax.tree_util.tree_map(
+        lambda *xs: np.concatenate([np.asarray(x) for x in xs], axis=0),
+        *[d.particles for d in dead],
+    )
+    first = dead[0]
+    if hasattr(first, "_replace"):
+        return [first._replace(particles=particles, update_info=None)]
+    return [type(first)(particles, None)]
 
 
 def _save_checkpoint(
@@ -328,6 +361,13 @@ class NSSSampler:
         n_params = int(getattr(forward_model, "n_params", forward_model.spatial_model.n_params))
         self.num_live = int(num_live)
         self.num_inner_steps = int(num_inner_steps) if num_inner_steps is not None else 3 * n_params
+        if self.num_inner_steps < 2 * n_params:
+            logger.warning(
+                f"NSS num_inner_steps={self.num_inner_steps} < 2 * n_params = {2 * n_params}: the "
+                "slice sampler may not decorrelate replacements and the live set can collapse "
+                "(all output samples identical, logZ off by thousands of nats). "
+                "Use >= 2-3 x n_params."
+            )
         self.num_delete = int(num_delete) if num_delete is not None else max(1, self.num_live // 10)
         self.termination = float(termination)
         self.n_samples_out = int(n_samples_out)
@@ -484,6 +524,13 @@ class NSSSampler:
         while True:
             remaining = float(state.integrator.logZ_live) - float(state.integrator.logZ)
             if not (remaining > self.termination):  # also stops on NaN
+                if not np.isfinite(remaining) or remaining < 0.0:
+                    logger.warning(
+                        f"NSS terminating with logZ_live - logZ = {remaining!r} after {n_steps} "
+                        "steps: a negative or NaN live-evidence gap is the signature of a "
+                        "COLLAPSED live set (identical live points), not of convergence. Check "
+                        "the sample spread and raise num_inner_steps / num_live."
+                    )
                 break
             if n_steps >= self.max_steps:
                 logger.warning(
@@ -492,7 +539,7 @@ class NSSSampler:
                 break
             rng_key, step_key = jax.random.split(rng_key)
             state, dead_info = step_fn(step_key, state)
-            dead.append(dead_info)
+            dead.append(_to_host(dead_info))
             n_steps += 1
             if checkpoint_path is not None and n_steps % checkpoint_every == 0:
                 _save_checkpoint(
@@ -512,7 +559,7 @@ class NSSSampler:
                 checkpoint_path, state, dead, n_steps, rng_key, self.num_live, self.num_delete
             )
 
-        final_info = finalise(state, dead, update_info=False)
+        final_info = finalise(state, _merge_dead(dead), update_info=False)
         rng_key, w_key, s_key = jax.random.split(rng_key, 3)
         logw = log_weights(w_key, final_info, shape=_N_LOGZ_DRAWS)  # (N_total, 100)
         logz, logz_err = _logz_from_weights(logw)

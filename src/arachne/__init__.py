@@ -1,6 +1,6 @@
 """arachne: image-level forward modelling of galaxy populations."""
 
-from arachne.data.dja import fetch_dja_cutout, load_dja_cutout
+from arachne.data.dja import fetch_dja_cutout, fetch_dja_native_cutout, load_dja_cutout
 from arachne.data.jades import load_jades_dr4_specz, select_targets
 from arachne.data.multires import BandImage, MultiResolutionObservation
 from arachne.data.observation import ObservationCube
@@ -34,6 +34,15 @@ from arachne.inference.initialisation import (
     multistart_map,
     reference_band_index,
     solve_component_masses,
+)
+from arachne.inference.laplace import (
+    WhitenedLogDensity,
+    hessian_neg_log_post,
+    laplace_covariance,
+    laplace_whitening,
+    make_hessian_fn,
+    posterior_whitening,
+    run_whitened_nuts,
 )
 from arachne.inference.mclmc_sampler import MCLMCSampler, run_pathfinder
 from arachne.inference.model_comparison import (
@@ -74,6 +83,7 @@ __all__ = [
     "MultiResolutionObservation",
     "BandImage",
     "fetch_dja_cutout",
+    "fetch_dja_native_cutout",
     "load_dja_cutout",
     "load_jades_dr4_specz",
     "select_targets",
@@ -89,6 +99,13 @@ __all__ = [
     "MultiResolutionForwardModel",
     "NuisanceModel",
     "NUTSSampler",
+    "WhitenedLogDensity",
+    "hessian_neg_log_post",
+    "laplace_covariance",
+    "laplace_whitening",
+    "make_hessian_fn",
+    "posterior_whitening",
+    "run_whitened_nuts",
     "MCLMCSampler",
     "run_pathfinder",
     "NUTSResult",

@@ -497,6 +497,26 @@ class TestFromDJAFits:
         np.testing.assert_allclose(np.asarray(obs[0].flux), 10.0, rtol=1e-5)
         np.testing.assert_allclose(np.asarray(obs[1].flux), 20.0, rtol=1e-5)
 
+    def test_partial_cutout_keeps_flux_and_variance_aligned(self, tmp_path):
+        """A size_arcsec that overhangs the image pads flux AND variance alike.
+
+        ``Cutout2D(mode="partial")`` pads the SCI plane; the WHT plane used to
+        be indexed with ``slices_original`` and came out one pixel smaller
+        (the DJA thumbs hit this: flux (120, 120) vs variance (119, 119)).
+        """
+        npix = 40
+        path = _write_synthetic_dja(tmp_path / "dja.fits", ["F200W-CLEAR"], [0.05], npix=npix)
+        # Ask for a cutout wider than the image so that it overhangs on all sides.
+        obs = MultiResolutionObservation.from_dja_fits(path, REF_RA, REF_DEC, size_arcsec=3.0)
+        band = obs[0]
+        flux, var, mask = np.asarray(band.flux), np.asarray(band.variance), np.asarray(band.mask)
+        assert flux.shape == var.shape == mask.shape
+        assert flux.shape[0] > npix  # genuinely padded
+        # Padding is masked, the interior is not, and the interior variance is finite.
+        assert mask.sum() == pytest.approx(npix * npix)
+        assert np.all(np.isfinite(var[mask > 0]))
+        assert np.all(flux[mask == 0] == 0.0)
+
     def test_per_band_pixel_scales(self, tmp_path):
         """Extensions at different pixel scales stay at those scales."""
         path = _write_synthetic_dja(

@@ -368,7 +368,7 @@ class MultiResolutionObservation:
                 raise ValueError(f"{band_name}: FITS header has no celestial WCS.")
 
             cutout = _cutout(data, wcs, ref_ra, ref_dec, size_arcsec)
-            flux_cut, wcs_cut, slices = cutout.data, cutout.wcs, cutout.slices_original
+            flux_cut, wcs_cut = cutout.data, cutout.wcs
 
             affine, ref_pixel = tangent_plane_affine(wcs_cut, ref_ra, ref_dec)
             pixel_scale = pixel_scale_from_affine(affine)
@@ -381,8 +381,7 @@ class MultiResolutionObservation:
                 band_name,
                 variance_paths,
                 weight_paths,
-                slices,
-                flux_cut.shape,
+                cutout,
                 scale,
             )
 
@@ -476,7 +475,11 @@ class MultiResolutionObservation:
                     cut = _cutout(data, wcs, ref_ra, ref_dec, size_arcsec)
                     data, wcs_cut = cut.data, cut.wcs
                     if wht_data is not None:
-                        wht_data = wht_data[cut.slices_original]
+                        # ``mode="partial"`` pads the SCI cutout with zeros where it
+                        # overhangs the image; indexing WHT with ``slices_original``
+                        # would give the un-padded (smaller) array, so cut it the same
+                        # way with weight 0 (-> masked) in the padding.
+                        wht_data = _cut_like(wht_data, cut, fill_value=0.0)
                 else:
                     wcs_cut = wcs
 
@@ -690,41 +693,62 @@ def _resolve_scale(
     return 1.0
 
 
+def _cut_like(array: np.ndarray, cutout: Cutout2D, fill_value: float) -> np.ndarray:
+    """Cut ``array`` exactly like an existing ``Cutout2D`` of a same-shaped image.
+
+    ``Cutout2D(mode="partial")`` pads the cutout where it overhangs the image,
+    so ``array[cutout.slices_original]`` can be smaller than ``cutout.data``.
+    This places the overlapping region into an array of ``cutout.shape``
+    filled with ``fill_value`` elsewhere.
+
+    Args:
+        array: Image with the same shape as the one ``cutout`` was made from.
+        cutout: The reference cutout.
+        fill_value: Value for pixels outside the original image.
+
+    Returns:
+        Array of shape ``cutout.shape``.
+    """
+    out = np.full(cutout.shape, fill_value, dtype=np.float64)
+    out[cutout.slices_cutout] = np.asarray(array, dtype=np.float64)[cutout.slices_original]
+    return out
+
+
 def _variance_and_mask(
     band_name: str,
     variance_paths: Optional[dict[str, FitsSource]],
     weight_paths: Optional[dict[str, FitsSource]],
-    slices: tuple,
-    shape: tuple[int, int],
+    cutout: Cutout2D,
     scale: float,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Build the variance (nJy^2) and validity mask for one band.
 
     Args:
-        band_name: Band name.
+        band_name: Band being processed.
         variance_paths: Optional mapping band -> variance FITS source.
         weight_paths: Optional mapping band -> inverse-variance FITS source.
-        slices: Pixel slices of the cutout in the full image.
-        shape: Cutout shape.
-        scale: nJy per pixel value for the flux image.
+        cutout: The flux cutout; the variance/weight image is cut identically
+            (padding, if any, is masked).
+        scale: Multiplicative factor from image units to nJy.
 
     Returns:
-        Tuple ``(variance, mask)`` as float32 arrays.
+        Tuple ``(variance, mask)`` as float32 arrays of ``cutout.shape``.
     """
     if variance_paths is not None and band_name in variance_paths:
         var, _ = _read_fits(variance_paths[band_name])
-        var = var[slices]
-        variance = (var * scale**2).astype(np.float32)
+        var = _cut_like(var, cutout, fill_value=np.inf)
+        variance = var.astype(np.float64) * scale**2
         mask = (np.isfinite(variance) & (variance > 0)).astype(np.float32)
         variance = np.where(mask > 0, variance, np.inf).astype(np.float32)
         return variance, mask
 
     if weight_paths is not None and band_name in weight_paths:
         wht, _ = _read_fits(weight_paths[band_name])
-        variance, mask = flux_units.weight_to_variance(wht[slices])
+        variance, mask = flux_units.weight_to_variance(_cut_like(wht, cutout, fill_value=0.0))
         variance = (variance.astype(np.float64) * scale**2).astype(np.float32)
         return variance, mask
 
+    shape = cutout.shape
     return np.ones(shape, dtype=np.float32), np.ones(shape, dtype=np.float32)
 
 

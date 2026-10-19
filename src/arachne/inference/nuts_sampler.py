@@ -56,8 +56,9 @@ class NUTSResult:
     def to_hdf5(self, path: str | Path) -> None:
         """Serialise the NUTS result to an HDF5 file.
 
-        Saves the raw sample array, the per-chain array (when present) and key
-        scalar diagnostics.  The spatial model metadata (param names, bounds)
+        Saves the raw sample array, the per-chain array (when present), the
+        per-draw ``acceptance_rate``/``num_integration_steps``/``is_divergent``
+        arrays and key scalar diagnostics.  The spatial model metadata (param names, bounds)
         is saved as HDF5 attributes.
 
         Args:
@@ -83,6 +84,15 @@ class NUTSResult:
                 infos_group.create_dataset(
                     "num_integration_steps",
                     data=np.asarray(self.infos.num_integration_steps),
+                )
+            if hasattr(self.infos, "is_divergent"):
+                # Per-draw divergence flags, same shape as the chains' leading
+                # axes: needed to find WHERE in parameter space the divergences
+                # happen (compare the parameter values of divergent draws with
+                # the rest), not just how many there were.
+                infos_group.create_dataset(
+                    "is_divergent",
+                    data=np.asarray(self.infos.is_divergent),
                 )
             for key, value in self.diagnostics.items():
                 arr = np.asarray(value)

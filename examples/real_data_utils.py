@@ -951,6 +951,100 @@ def import_laplace():
 
 
 # ---------------------------------------------------------------------------
+# Grid-independent residual statistics
+# ---------------------------------------------------------------------------
+
+
+def chi2_surface_density(chi: list, mask: list, scales: list[float]) -> dict:
+    """chi-squared per square arcsec, per band and in total.
+
+    ``chi2_red`` is per *pixel* and is therefore **not** comparable between
+    grids.  These residuals are model-dominated rather than noise-dominated:
+    the mismatch is a surface brightness, so with (uncorrelated) noise the chi
+    of a pixel grows like ``pixel_area / sqrt(pixel_area)`` and its chi^2 like
+    the pixel area, while the number of pixels falls like ``1 / area``.
+    Splitting the same sky into 6.25x smaller pixels (0.05" -> 0.02", the
+    ``--multires`` case) therefore divides ``chi2_red`` by ~6 and leaves the
+    *total* chi^2 alone, so chi^2 per arcsec^2 is the statistic to quote in a
+    ``--multires`` vs single-grid comparison.
+
+    The invariance is exact only where the *photon* term dominates the pixel
+    sigma.  Where the fractional model-error floor dominates (the bright
+    pixels) sigma itself scales with the pixel area, chi per pixel is then
+    grid-independent and it is ``chi2_red`` that is invariant instead.  Real
+    fits mix the two regimes, so quote both and expect the truth in between.
+
+    Args:
+        chi: Per-band chi images (already zeroed where masked).
+        mask: Per-band mask images; > 0 means "used in the fit".
+        scales: Per-band pixel scale in arcsec.
+
+    Returns:
+        ``{chi2_total, chi2_per_arcsec2, chi2_per_arcsec2_per_band,
+        area_arcsec2}``.
+    """
+    valid = [np.asarray(m) > 0 for m in mask]
+    chi2_band = np.array([float((np.asarray(c) ** 2).sum()) for c in chi])
+    area = np.array([float(v.sum()) * float(s) ** 2 for v, s in zip(valid, scales)])
+    return {
+        "chi2_total": float(chi2_band.sum()),
+        "chi2_per_arcsec2": float(chi2_band.sum() / max(area.sum(), 1e-12)),
+        "chi2_per_arcsec2_per_band": chi2_band / np.maximum(area, 1e-12),
+        "area_arcsec2": float(area.sum()),
+    }
+
+
+def sky_noise_ratio(
+    flux: np.ndarray,
+    variance: np.ndarray,
+    centre: tuple[float, float],
+    r_frac: float = 0.35,
+    min_pixels: int = 100,
+) -> dict | None:
+    """Empirical blank-sky rms divided by the quoted sigma, for one band.
+
+    DJA *weight* maps are propagated from the exposure-level variances and know
+    nothing about the pixel-to-pixel correlation that drizzling introduces, so
+    on the native mosaics (0.020"/0.040" per pixel) the measured rms of blank
+    sky is ~0.70 of the quoted sigma, while the 0.05" thumbnails — each of
+    whose pixels averages ~6 native ones — come out at ~1.0.  A ratio below 1
+    means every per-pixel chi is divided by too large a sigma and ``chi2_red``
+    is deflated by the square of the ratio; it does *not* mean the aperture
+    photometry errors are wrong (there the correlation works the other way).
+
+    The statistic is a 3-sigma-clipped rms over pixels further than ``r_frac``
+    times the frame's short side from ``centre``, ignoring the fit mask.
+
+    Args:
+        flux: (H, W) image in nJy.
+        variance: (H, W) variance in nJy^2.
+        centre: (row, column) of the target in this band's grid.
+        r_frac: Sky annulus starts at this fraction of ``min(H, W)``.
+        min_pixels: Return ``None`` if fewer usable sky pixels than this.
+
+    Returns:
+        ``{sky_rms_nJy, quoted_sigma_nJy, ratio}``, or ``None``.
+    """
+    flux = np.asarray(flux, dtype=np.float64)
+    variance = np.asarray(variance, dtype=np.float64)
+    h, w = flux.shape
+    yy, xx = np.mgrid[0:h, 0:w]
+    outer = np.hypot(yy - centre[0], xx - centre[1]) > r_frac * min(h, w)
+    values, sigma = flux[outer], np.sqrt(np.abs(variance[outer]))
+    good = np.isfinite(values) & np.isfinite(sigma) & (sigma > 0)
+    values, sigma = values[good], sigma[good]
+    if values.size < min_pixels:
+        return None
+    rms = float(_clipped_stats(values)[1])
+    quoted = float(np.median(sigma))
+    return {
+        "sky_rms_nJy": rms,
+        "quoted_sigma_nJy": quoted,
+        "ratio": float(rms / quoted) if quoted > 0 else float("nan"),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Size guess (sets the log-size prior and the blind starting size)
 # ---------------------------------------------------------------------------
 

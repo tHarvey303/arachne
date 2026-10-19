@@ -804,21 +804,42 @@ def find_map(
     solve_masses = jax.jit(lambda t: solve_component_masses(forward_model, t))
 
     history: list[np.ndarray] = []
+
+    def resolve_if_better(t: jnp.ndarray, stage: str) -> jnp.ndarray:
+        """Re-solve the masses linearly, but keep the result only if -log_post drops.
+
+        The weighted linear solve maximises the floor-free likelihood, not the
+        posterior, so near the mode (or with a fractional model-error floor)
+        it can throw the fit uphill by thousands of nats; accepting it only when
+        it helps makes ``find_map`` monotone across rounds.
+        """
+        before = float(loss_jit(t))
+        candidate = solve_masses(t)
+        after = float(loss_jit(candidate))
+        if np.isfinite(after) and after <= before:
+            return candidate
+        logger.debug(f"find_map: mass re-solve rejected at {stage} ({before:.2f} -> {after:.2f})")
+        return t
+
     if do_masses:
-        theta = solve_masses(theta)
+        theta = resolve_if_better(theta, "start")
     logger.info(
         f"find_map: start -log_post = {float(loss_jit(theta)):.2f} "
         f"({n_rounds} x {steps_per_round} steps @ lr={lr}, then {final_steps} @ {final_lr})"
     )
+    best_theta, best_loss = theta, float(loss_jit(theta))
     for rnd in range(int(n_rounds)):
         if steps_per_round > 0:
             theta, losses = run_adam(theta, jnp.float32(lr), int(steps_per_round))
             history.append(np.asarray(losses, dtype=np.float32))
         if do_masses:
-            theta = solve_masses(theta)
-        logger.info(
-            f"find_map: round {rnd + 1}/{n_rounds} -log_post = {float(loss_jit(theta)):.2f}"
-        )
+            theta = resolve_if_better(theta, f"round {rnd + 1}")
+        round_loss = float(loss_jit(theta))
+        if np.isfinite(round_loss) and round_loss < best_loss:
+            best_theta, best_loss = theta, round_loss
+        logger.info(f"find_map: round {rnd + 1}/{n_rounds} -log_post = {round_loss:.2f}")
+    # Polish from the best round, not the last one: Adam rounds are not monotone.
+    theta = best_theta
 
     if final_steps > 0:
         theta, losses = run_adam(theta, jnp.float32(final_lr), int(final_steps))
