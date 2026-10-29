@@ -70,19 +70,33 @@ from arachne import (  # noqa: E402
 
 PIXEL_SCALE = 0.03
 REDSHIFT = 2.0
-BANDS = [
-    "JWST/NIRCam.F090W",
-    "JWST/NIRCam.F115W",
-    "JWST/NIRCam.F150W",
-    "JWST/NIRCam.F200W",
-    "JWST/NIRCam.F277W",
-    "JWST/NIRCam.F356W",
-    "JWST/NIRCam.F410M",
-    "JWST/NIRCam.F444W",
-]
-PIVOT_UM = np.array([0.90, 1.15, 1.50, 2.00, 2.77, 3.56, 4.10, 4.44])
-FWHM_ARCSEC = np.array([0.030, 0.037, 0.049, 0.064, 0.088, 0.114, 0.133, 0.140])  # approx.
+# NIRCam pivot wavelengths (micron) for every band with both an emulator output and a JADES
+# DR3 PSF.  Gaussian-PSF FWHMs (toy runs only) follow ~0.032"/micron, floored at 0.030".
+NIRCAM_PIVOT_UM = {
+    "F070W": 0.704, "F090W": 0.902, "F115W": 1.154, "F150W": 1.501, "F162M": 1.627,
+    "F182M": 1.845, "F200W": 1.988, "F210M": 2.096, "F250M": 2.503, "F277W": 2.776,
+    "F300M": 2.996, "F335M": 3.365, "F356W": 3.564, "F410M": 4.092, "F430M": 4.280,
+    "F444W": 4.402, "F460M": 4.630, "F480M": 4.817,
+}  # fmt: skip
+BAND_SETS = {
+    # the original 8: seven wide bands + F410M
+    "wide8": ["F090W", "F115W", "F150W", "F200W", "F277W", "F356W", "F410M", "F444W"],
+    # wide8 plus every other medium band with a PSF (F140M/F360M have none): 17 bands
+    "medium": ["F090W", "F115W", "F150W", "F162M", "F182M", "F200W", "F210M", "F250M", "F277W",
+               "F300M", "F335M", "F356W", "F410M", "F430M", "F444W", "F460M", "F480M"],
+}  # fmt: skip
 
+
+def set_bands(name):
+    """Select the band set (module globals used by the emulators, PSFs and plots)."""
+    global BANDS, PIVOT_UM, FWHM_ARCSEC
+    filters = sorted(BAND_SETS[name], key=NIRCAM_PIVOT_UM.get)
+    BANDS = [f"JWST/NIRCam.{f}" for f in filters]
+    PIVOT_UM = np.array([NIRCAM_PIVOT_UM[f] for f in filters])
+    FWHM_ARCSEC = np.maximum(0.030, 0.032 * PIVOT_UM)
+
+
+set_bands("wide8")
 SPS_PARAM_NAMES = [
     "redshift", "log_mass", "slope", "fesc_lya", "dust_bump_amplitude", "log10metallicity",
     "Av", "logsfr_ratio_0", "logsfr_ratio_1", "logsfr_ratio_2", "logsfr_ratio_3",
@@ -345,8 +359,9 @@ def plot_maps(truth, start, fit, weight, path):
     plt.close(fig)
 
 
-def plot_images(obs, model_img, sigma, path, bands=(0, 3, 7)):
+def plot_images(obs, model_img, sigma, path, show=("F090W", "F200W", "F444W")):
     """Rows: bands.  Columns: data, PSF-convolved MAP model, residual / sigma."""
+    bands = [BANDS.index(f"JWST/NIRCam.{f}") for f in show]
     fig, axes = plt.subplots(len(bands), 3, figsize=(7.5, 2.4 * len(bands)))
     for r, b in enumerate(bands):
         data = np.asarray(obs.flux[b])
@@ -571,6 +586,12 @@ def main():
     ap.add_argument("--snr", type=float, default=30.0, help="per-pixel S/N at each band's peak")
     ap.add_argument("--emulator", default=None, help="production emulator checkpoint")
     ap.add_argument("--psf-dir", default=None, help="directory of {FILTER}_psf_norm.fits")
+    ap.add_argument(
+        "--bands",
+        choices=sorted(BAND_SETS),
+        default="wide8",
+        help="wide8: 7 wide + F410M; medium: + all other medium bands (17)",
+    )
     ap.add_argument("--rounds", type=int, default=4)
     ap.add_argument("--steps", type=int, default=500, help="Adam steps per round")
     ap.add_argument("--quick", action="store_true", help="2 rounds x 300 steps")
@@ -599,11 +620,12 @@ def main():
     ap.add_argument("--nuts-chains", type=int, default=4)
     ap.add_argument("--hess-chunk", type=int, default=32, help="HVP rows per Hessian batch")
     args = ap.parse_args()
+    set_bands(args.bands)
     if args.float64:
         jax.config.update("jax_enable_x64", True)
     if args.quick:
         args.rounds, args.steps = 2, 300
-    outdir = Path(args.outdir) / args.truth
+    outdir = Path(args.outdir) / f"{args.truth}_{args.bands}"
     (outdir / "figures").mkdir(parents=True, exist_ok=True)
     rng = np.random.default_rng(args.seed)
     n = args.size
@@ -653,6 +675,7 @@ def main():
         "truth": args.truth,
         "emulator": args.emulator or "toy",
         "mass_start": args.mass_start,
+        "bands": BANDS,
         "corr_scale": args.corr_scale,
         "nu": args.nu,
         "psf": args.psf_dir or "gaussian",
