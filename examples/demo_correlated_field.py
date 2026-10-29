@@ -451,6 +451,7 @@ def laplace_posterior(fm, model, theta_map, n_samples, chunk, key, max_newton=30
     return {
         "theta": theta,
         "maps": maps,
+        "chol": chol,
         "newton_s": t_newton,
         "hessian_s": t_hess,
         "newton_history": history,
@@ -459,6 +460,41 @@ def laplace_posterior(fm, model, theta_map, n_samples, chunk, key, max_newton=30
         "eig_max": float(info["eigenvalues"].max()),
         "n_negative": int(info["n_negative"]),
         "n_floored": int(info["n_floored"]),
+    }
+
+
+def nuts_posterior(fm, model, theta, chol, key, n_warmup, n_samples, n_chains, max_maps=1000):
+    """Whitened NUTS (theta = mode + L z, L from the Laplace Hessian), diagonal metric in z.
+
+    A dense metric cannot be adapted at d ~ 4e3, so the Laplace whitening does the
+    conditioning and the warmup only adapts a diagonal.  Returns map samples
+    (thinned to ``max_maps``) and convergence diagnostics in theta coordinates.
+    """
+    from arachne.inference.laplace import WhitenedLogDensity, run_whitened_nuts
+
+    dtype = jnp.zeros(()).dtype
+    whitened = WhitenedLogDensity(fm, jnp.asarray(theta, dtype), jnp.asarray(chol, dtype))
+    t0 = time.time()
+    result, _ = run_whitened_nuts(
+        fm, theta, key, whitened=whitened, n_warmup=n_warmup, n_samples=n_samples,
+        n_chains=n_chains, dense_mass_matrix=False,
+    )  # fmt: skip
+    runtime = time.time() - t0
+    samples = np.asarray(result.samples)
+    step = max(1, samples.shape[0] // max_maps)
+    maps = np.asarray(jax.lax.map(model.field_maps, jnp.asarray(samples[::step]), batch_size=32))
+    d = result.diagnostics
+    rhat = np.asarray(d.get("rhat", np.nan), float)
+    ess_ = np.asarray(d.get("ess", np.nan), float)
+    print(result.summary())
+    return {
+        "maps": maps,
+        "runtime_s": runtime,
+        "max_rhat": float(np.nanmax(rhat)),
+        "frac_rhat_gt_1.01": float(np.mean(rhat > 1.01)),
+        "min_ess": float(np.nanmin(ess_)),
+        "median_ess": float(np.nanmedian(ess_)),
+        "summary": result.summary(),
     }
 
 
@@ -557,6 +593,10 @@ def main():
     ap.add_argument("--nu", type=float, default=1.5, help="Matern nu of the fit model")
     ap.add_argument("--laplace", action="store_true", help="Laplace posterior at the MAP")
     ap.add_argument("--n-laplace", type=int, default=400, help="Laplace samples")
+    ap.add_argument("--nuts", action="store_true", help="whitened NUTS after the Laplace step")
+    ap.add_argument("--nuts-warmup", type=int, default=1000)
+    ap.add_argument("--nuts-samples", type=int, default=500)
+    ap.add_argument("--nuts-chains", type=int, default=4)
     ap.add_argument("--hess-chunk", type=int, default=32, help="HVP rows per Hessian batch")
     args = ap.parse_args()
     if args.float64:
@@ -643,7 +683,7 @@ def main():
                                  jax.random.PRNGKey(args.seed + 100))  # fmt: skip
         pstd = prior_map_std(model, 400, jax.random.PRNGKey(args.seed + 200))
         pm, med, std, info = posterior_metrics(truth_maps, post["maps"], pstd, weight)
-        metrics["laplace"] = {k: v for k, v in post.items() if k not in ("theta", "maps")}
+        metrics["laplace"] = {k: v for k, v in post.items() if k not in ("theta", "maps", "chol")}
         metrics["laplace"]["per_field"] = pm
         mass_tot = np.log10(np.sum(10.0 ** post["maps"][:, 0], axis=(1, 2)))
         metrics["laplace"]["total_log_mass_16_50_84"] = [
@@ -652,6 +692,19 @@ def main():
         plot_laplace(truth_maps, med, std, info, weight, outdir / "figures" / "laplace.png")
         np.savez(outdir / "laplace.npz", median=med, std=std, information=info,
                  theta=np.asarray(post["theta"]))  # fmt: skip
+        if args.nuts:
+            nuts = nuts_posterior(fm, model, post["theta"], post["chol"],
+                                  jax.random.PRNGKey(args.seed + 300), args.nuts_warmup,
+                                  args.nuts_samples, args.nuts_chains)  # fmt: skip
+            npm, nmed, nstd, ninfo = posterior_metrics(truth_maps, nuts["maps"], pstd, weight)
+            metrics["nuts"] = {k: v for k, v in nuts.items() if k != "maps"}
+            metrics["nuts"]["per_field"] = npm
+            nmass = np.log10(np.sum(10.0 ** nuts["maps"][:, 0], axis=(1, 2)))
+            metrics["nuts"]["total_log_mass_16_50_84"] = [
+                float(x) for x in np.percentile(nmass, [16, 50, 84])
+            ]
+            plot_laplace(truth_maps, nmed, nstd, ninfo, weight, outdir / "figures" / "nuts.png")
+            np.savez(outdir / "nuts.npz", median=nmed, std=nstd, information=ninfo)
     (outdir / "metrics.json").write_text(json.dumps(metrics, indent=2))
     np.savez(outdir / "maps.npz", truth=truth_maps, start=start_maps, map=fit_maps,
              model_image=model_img, data=np.asarray(obs.flux), sigma=sigma,
@@ -685,6 +738,17 @@ def main():
         m16, m50, m84 = lp["total_log_mass_16_50_84"]
         print(f"  total log M* {m50:.3f} +{m84 - m50:.3f} -{m50 - m16:.3f} "
               f"(truth {metrics['total_log_mass_truth']:.3f})")  # fmt: skip
+    if "nuts" in metrics:
+        nm = metrics["nuts"]
+        print(f"NUTS: {nm['runtime_s']:.0f} s; max R-hat {nm['max_rhat']:.3f} "
+              f"({100 * nm['frac_rhat_gt_1.01']:.1f}% > 1.01); ESS min {nm['min_ess']:.0f}, "
+              f"median {nm['median_ess']:.0f}")  # fmt: skip
+        for name in FIELDS:
+            q = nm["per_field"][name]
+            print(f"  {name:18s} cov68 {q['coverage68']:.2f}  cov95 {q['coverage95']:.2f}  "
+                  f"z_rms {q['z_rms']:.2f}  post std {q['median_post_std']:.3f}")  # fmt: skip
+        m16, m50, m84 = nm["total_log_mass_16_50_84"]
+        print(f"  total log M* {m50:.3f} +{m84 - m50:.3f} -{m50 - m16:.3f}")
     print(f"outputs in {outdir}")
 
 
