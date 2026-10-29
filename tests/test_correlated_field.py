@@ -112,7 +112,7 @@ class TestLayout:
         """Split join roundtrip."""
         m = make_model()
         theta = m.sample_prior(jax.random.PRNGKey(0), 1)[0]
-        np.testing.assert_allclose(m.join_theta(*m.split_theta(theta)), theta)
+        np.testing.assert_allclose(m.join_theta(m.split_theta(theta)), theta)
 
 
 class TestPrior:
@@ -123,7 +123,7 @@ class TestPrior:
         m = make_model(H=32, W=32)
         thetas = m.sample_prior(jax.random.PRNGKey(1), 200)
         for k, f in enumerate(m.fields):
-            g = jax.vmap(lambda t, k=k, f=f: m.unit_field(m.split_theta(t)[2][f.slice], k))(thetas)
+            g = jax.vmap(lambda t, k=k, f=f: m.unit_field(m.split_theta(t).z[f.slice], k))(thetas)
             var = float(jnp.mean(g**2))
             assert var == pytest.approx(f.variance_kept, rel=0.15), f.name
 
@@ -136,7 +136,7 @@ class TestPrior:
             """Lag1 corr."""
             th = model.sample_prior(jax.random.PRNGKey(2), 100)
             g = jax.vmap(
-                lambda t: model.unit_field(model.split_theta(t)[2][model.fields[0].slice], 0)
+                lambda t: model.unit_field(model.split_theta(t).z[model.fields[0].slice], 0)
             )(th)
             g = np.asarray(g)
             return np.mean(g[:, :, 1:] * g[:, :, :-1]) / np.mean(g**2)
@@ -147,7 +147,7 @@ class TestPrior:
         """All modes kept gives unit variance."""
         m = make_model(H=16, W=16, variance_fraction=1.0, corr_lengths=1.0, pad=4)
         th = m.sample_prior(jax.random.PRNGKey(3), 400)
-        g = jax.vmap(lambda t: m.unit_field(m.split_theta(t)[2][m.fields[0].slice], 0))(th)
+        g = jax.vmap(lambda t: m.unit_field(m.split_theta(t).z[m.fields[0].slice], 0))(th)
         assert m.fields[0].variance_kept > 0.97
         assert float(jnp.mean(g**2)) == pytest.approx(1.0, rel=0.1)
 
@@ -155,7 +155,8 @@ class TestPrior:
         """Log prior is normalised gaussian."""
         m = make_model()
         theta = m.sample_prior(jax.random.PRNGKey(4), 1)[0]
-        levels, raw, z = m.split_theta(theta)
+        b = m.split_theta(theta)
+        levels, raw, z = b.levels, b.global_raw, b.z
         sig = np.array([f.level_sigma for f in m.fields])
         expect = (
             -0.5 * np.sum(np.asarray(z) ** 2)
@@ -183,7 +184,7 @@ class TestPrior:
 
     def test_coupling_propagates_mass_deviation(self):
         """Coupling propagates mass deviation."""
-        m = make_model(couplings={"Av": 0.5}, mean_maps={"log_mass": 7.0})
+        m = make_model(couplings={"Av": {"log_mass": 0.5}}, mean_maps={"log_mass": 7.0})
         t0 = m.initial_theta()
         t1 = t0.at[0].set(0.2)  # raise the mass level by 0.2 dex
         av0 = np.asarray(m.field_maps(t0))[2]
@@ -198,8 +199,8 @@ class TestPrior:
             assert theta.dtype == jnp.float64
             maps = m.field_maps(theta)
             assert maps.dtype == jnp.float64
-            g = m.unit_field(m.split_theta(theta)[2][m.fields[0].slice], 0)
-            g32 = m.unit_field(m.split_theta(theta)[2][m.fields[0].slice].astype(jnp.float32), 0)
+            g = m.unit_field(m.split_theta(theta).z[m.fields[0].slice], 0)
+            g32 = m.unit_field(m.split_theta(theta).z[m.fields[0].slice].astype(jnp.float32), 0)
             assert g.dtype == jnp.float64
             assert float(jnp.max(jnp.abs(g - g32))) > 0  # genuinely higher precision
 
@@ -350,3 +351,154 @@ class TestForwardModel:
         r_mass = np.corrcoef(true_maps[0].ravel(), fit_maps[0].ravel())[0, 1]
         assert r_mass > 0.9
         assert np.median(np.abs(fit_maps[0] - true_maps[0])) < 0.15
+
+
+NAMES6 = ["redshift", "log_mass", "log10metallicity", "Av", "fesc", "logsfr_ratio_0"]
+BOUNDS6 = {**BOUNDS, "logsfr_ratio_0": (-10.0, 10.0)}
+
+
+def make_model6(**kw):
+    """Model with an SFH-ratio field, fitted hyperparameters and couplings available."""
+    defaults = dict(
+        image_shape=(24, 24),
+        emulator_param_names=NAMES6,
+        param_bounds=BOUNDS6,
+        field_params=["log_mass", "logsfr_ratio_0", "Av"],
+        fixed_params={"redshift": 2.0, "log10metallicity": -0.85},
+        corr_lengths=3.0,
+        amplitudes=0.3,
+        mean_maps={"log_mass": 7.0, "Av": 1.0, "logsfr_ratio_0": 0.0},
+    )
+    defaults.update(kw)
+    return CorrelatedFieldMap(**defaults)
+
+
+class TestHyperparameters:
+    """Fitted amplitude, correlation length and slope."""
+
+    HP = {"Av": {"log_amplitude": {"loc": np.log(0.3), "scale": 0.5},
+                 "log_corr_length": {"loc": np.log(4.0), "scale": 0.4},
+                 "log_nu": {"loc": np.log(1.0), "scale": 0.3}}}  # fmt: skip
+
+    def test_layout_and_basis(self):
+        """Hyper block sits before z; basis chosen at loc - 2 scale."""
+        m = make_model6(hyper_priors=self.HP)
+        assert m.n_hyper == 3 and m.z_offset == m.n_fields + m.n_global + 3
+        f = m.fields[m.field_names.index("Av")]
+        assert f.basis_ell == pytest.approx(4.0 * np.exp(-0.8))
+        assert f.amp is None and f.k.shape == (f.n_modes,)
+        theta = m.initial_theta()
+        np.testing.assert_allclose(np.asarray(m.hyper_theta(theta)), m._hyper_loc)
+
+    def test_amplitude_scales_deviation(self):
+        """Raising log_amplitude by ln 2 doubles the Av deviation (linear part of the clamp)."""
+        m = make_model6(
+            hyper_priors={"Av": {"log_amplitude": {"loc": np.log(0.05), "scale": 0.5}}},
+            mean_maps={"log_mass": 7.0, "Av": 1.5, "logsfr_ratio_0": 0.0},
+        )
+        th = m.sample_prior(jax.random.PRNGKey(0), 1)[0].at[: m.n_fields].set(0.0)
+        i = m.n_fields + m.n_global + m.hyper_names.index("log_amplitude[Av]")
+        th = th.at[i].set(np.log(0.05))
+        k = m.field_names.index("Av")
+        d1 = np.asarray(m.field_maps(th))[k] - 1.5
+        d2 = np.asarray(m.field_maps(th.at[i].add(np.log(2.0))))[k] - 1.5
+        np.testing.assert_allclose(d2, 2.0 * d1, rtol=1e-3, atol=2e-4)
+
+    def test_corr_length_controls_smoothness(self):
+        """A longer fitted ell gives smoother draws on the same coefficients."""
+        m = make_model6(hyper_priors=self.HP)
+        k = m.field_names.index("Av")
+        f = m.fields[k]
+        i = m.n_fields + m.n_global + m.hyper_names.index("log_corr_length[Av]")
+        th = m.sample_prior(jax.random.PRNGKey(1), 50)
+
+        def lag1(log_ell):
+            g = jax.vmap(lambda t: m.unit_field(t[m.z_offset :][f.slice], k, t.at[i].set(log_ell)))(
+                th
+            )
+            g = np.asarray(g)
+            return np.mean(g[:, :, 1:] * g[:, :, :-1]) / np.mean(g**2), np.mean(g**2)
+
+        r_short, v_short = lag1(np.log(2.0))
+        r_long, v_long = lag1(np.log(8.0))
+        assert r_long > r_short
+        assert v_short == pytest.approx(1.0, abs=0.15) and v_long == pytest.approx(1.0, abs=0.15)
+
+    def test_gradients_finite(self, emulator):
+        """Gradients of the forward-model posterior w.r.t. all blocks are finite."""
+        m = make_model6(hyper_priors=self.HP, free_couplings={"Av": {"logsfr_ratio_0": 0.5}})
+
+        class Emu6(ToySEDEmulator):
+            def predict(self, params):
+                return super().predict(params[:, :5])
+
+        emu = Emu6(_param_names=NAMES6, _band_names=BANDS)
+        psf = PSFModel(kernels=_gaussian_kernels([1.0, 1.2, 1.4, 1.8]), band_names=BANDS)
+        obs = ObservationCube(
+            flux=np.ones((4, 24, 24), np.float32),
+            variance=np.ones((4, 24, 24), np.float32),
+            mask=np.ones((4, 24, 24), np.float32),
+            band_names=BANDS,
+            pixel_scale=0.03,
+        )
+        fm = ForwardModel.build(obs, psf, m, emu)
+        g = jax.grad(fm.log_posterior)(m.sample_prior(jax.random.PRNGKey(2), 1)[0])
+        assert bool(jnp.all(jnp.isfinite(g)))
+        nh = slice(m.n_fields + m.n_global, m.z_offset)
+        assert float(jnp.max(jnp.abs(g[nh]))) > 0
+
+
+class TestCouplingsAndGlobalPriors:
+    """General couplings and non-uniform global priors."""
+
+    def test_free_coupling_propagates_source_deviation(self):
+        """Av responds to the SFH-ratio deviation with the fitted coefficient."""
+        m = make_model6(free_couplings={"Av": {"logsfr_ratio_0": 0.5}})
+        assert m.coupling_names == ["c[Av<-logsfr_ratio_0]"]
+        t0 = m.initial_theta()
+        ic = m.n_fields + m.n_global + m.n_hyper
+        ir = m.field_names.index("logsfr_ratio_0")
+        ia = m.field_names.index("Av")
+        t1 = t0.at[ir].set(0.4).at[ic].set(0.25)  # ratio level +0.4, coupling 0.25
+        np.testing.assert_allclose(
+            np.asarray(m.field_maps(t1))[ia] - np.asarray(m.field_maps(t0))[ia], 0.1, atol=2e-3
+        )
+
+    def test_fixed_coupling_dict_and_order_check(self):
+        """Fixed couplings to any earlier field; later sources are rejected."""
+        m = make_model6(couplings={"Av": {"logsfr_ratio_0": 0.5, "log_mass": 0.2}})
+        f = m.fields[m.field_names.index("Av")]
+        assert f.fixed_couplings == {"logsfr_ratio_0": 0.5, "log_mass": 0.2}
+        with pytest.raises(ValueError, match="must come before"):
+            make_model6(free_couplings={"logsfr_ratio_0": {"Av": 0.5}})
+
+    def test_studentt_global_prior_density_and_samples(self):
+        """Student-t global: log_prior matches p(x)(hi-lo)sigmoid'(raw); draws follow it."""
+        spec = {"dist": "studentt", "df": 2.0, "loc": 0.0, "scale": 0.3}
+        m = make_model6(
+            field_params=["log_mass", "Av"],
+            fixed_params={"redshift": 2.0, "log10metallicity": -0.85},
+            global_priors={"logsfr_ratio_0": spec},
+            mean_maps={"log_mass": 7.0, "Av": 1.0},
+        )
+        i = m.global_names.index("logsfr_ratio_0")
+        t0 = m.initial_theta(global_values={"logsfr_ratio_0": 0.0, "fesc": 0.5})
+        t1 = m.initial_theta(global_values={"logsfr_ratio_0": 0.6, "fesc": 0.5})
+        lp0, lp1 = float(m.log_prior(t0)), float(m.log_prior(t1))
+
+        def logt(x):
+            return -1.5 * np.log1p((x / 0.3) ** 2 / 2.0)
+
+        def logjac(raw):
+            s = 1 / (1 + np.exp(-raw))
+            return np.log(s) + np.log(1 - s)
+
+        r0 = float(t0[m.n_fields + i])
+        r1 = float(t1[m.n_fields + i])
+        expect = logt(0.6) - logt(0.0) + logjac(r1) - logjac(r0)
+        assert lp1 - lp0 == pytest.approx(expect, rel=1e-3)
+        draws = np.asarray(jax.vmap(m.global_values)(m.sample_prior(jax.random.PRNGKey(3), 4000)))
+        x = draws[:, i]
+        q25, q50, q75 = np.percentile(x, [25, 50, 75])
+        assert abs(q50) < 0.03
+        assert (q75 - q25) / 2 == pytest.approx(0.3 * 0.8165, rel=0.1)  # t(2) quartile = 0.8165

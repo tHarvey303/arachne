@@ -107,22 +107,50 @@ PARAM_BOUNDS = {
     "log10metallicity": (-4.0, -1.39), "Av": (0.001, 5.0),
     **{f"logsfr_ratio_{i}": (-10.0, 10.0) for i in range(5)},
 }  # fmt: skip
-FIELDS = ["log_mass", "Av", "log10metallicity", "logsfr_ratio_0"]
-NEUTRAL = {"Av": 0.5, "log10metallicity": -2.5, "logsfr_ratio_0": 0.0}
-FIXED = {
-    "redshift": REDSHIFT, "slope": 0.0, "fesc_lya": 0.2, "dust_bump_amplitude": 1.0,
-    **{f"logsfr_ratio_{i}": 0.0 for i in range(1, 5)},
+# Neutral values: the prior centres used for the blind start (never the truth).
+NEUTRAL = {"Av": 0.5, "log10metallicity": -2.5, "logsfr_ratio_0": 0.0, "logsfr_ratio_3": 0.0}
+NEUTRAL_GLOBALS = {
+    "slope": 0.0, "fesc_lya": 0.2, "dust_bump_amplitude": 1.0,
+    **{f"logsfr_ratio_{i}": 0.0 for i in range(5)},
 }  # fmt: skip
-# Prior hyperparameters (fixed for now): break scale in px, rms in parameter units.
-CORR_LENGTHS = {"log_mass": 3.0, "Av": 5.0, "log10metallicity": 12.0, "logsfr_ratio_0": 4.0}
-AMPLITUDES = {"log_mass": 0.25, "Av": 0.3, "log10metallicity": 0.15, "logsfr_ratio_0": 0.5}
-LEVEL_SIGMAS = {"log_mass": 1.0, "Av": 1.0, "log10metallicity": 0.5, "logsfr_ratio_0": 1.0}
+# "sfh" setup: true values of the non-mapped parameters, deliberately away from NEUTRAL_GLOBALS
+# so the fit has to find them.
+TRUTH_GLOBALS = {
+    "slope": 0.25, "fesc_lya": 0.5, "dust_bump_amplitude": 2.0,
+    "logsfr_ratio_1": 0.3, "logsfr_ratio_2": -0.3, "logsfr_ratio_4": 0.2,
+}  # fmt: skip
+# Library priors (arachne.priors.specs.DEFAULT_PRIORS) for free globals.
+GLOBAL_PRIORS = {
+    f"logsfr_ratio_{i}": {"dist": "studentt", "df": 2.0, "loc": 0.0, "scale": 0.3} for i in range(5)
+}
+# Prior hyperparameters: break scale in px, rms in parameter units.
+CORR_LENGTHS = {
+    "log_mass": 3.0, "Av": 5.0, "log10metallicity": 12.0, "logsfr_ratio_0": 4.0,
+    "logsfr_ratio_3": 6.0,
+}  # fmt: skip
+AMPLITUDES = {
+    "log_mass": 0.25, "Av": 0.3, "log10metallicity": 0.15, "logsfr_ratio_0": 0.5,
+    "logsfr_ratio_3": 0.5,
+}  # fmt: skip
+LEVEL_SIGMAS = {
+    "log_mass": 1.0, "Av": 1.0, "log10metallicity": 0.5, "logsfr_ratio_0": 1.0,
+    "logsfr_ratio_3": 1.0,
+}  # fmt: skip
 LABELS = {
     "log_mass": r"$\log M_*$ / px",
     "Av": r"$A_V$",
     "log10metallicity": r"$\log Z$",
-    "logsfr_ratio_0": r"logsfr_ratio_0",
+    "logsfr_ratio_0": r"logsfr_ratio_0 (0-3 / 3-10 Myr)",
+    "logsfr_ratio_3": r"logsfr_ratio_3 (64-411 Myr / 0.4-2.6 Gyr)",
 }
+
+
+# Mapped: mass, A_V, Z, the 0-3/3-10 Myr ratio and the 64-411 Myr/0.4-2.6 Gyr ratio (age
+# structure).  Free globals with library priors: dust slope, bump, fesc_lya, ratios 1/2/4.
+# The truth uses TRUTH_GLOBALS; the fit starts from NEUTRAL_GLOBALS.
+FIELDS = ["log_mass", "Av", "log10metallicity", "logsfr_ratio_0", "logsfr_ratio_3"]
+FIXED = {"redshift": REDSHIFT}
+FIXED_TRUTH = {"redshift": REDSHIFT, **TRUTH_GLOBALS}
 
 
 # ---------------------------------------------------------------------------
@@ -250,28 +278,90 @@ def spiral_truth(n, rng):
     av = 0.3 + 0.9 * win * arm + 0.4 * np.exp(-r / rd)
     logz = -2.2 - 0.6 * (r / (0.5 * n))
     r0 = -0.8 + 2.0 * win * arm + 1.5 * np.clip(clumps, 0, 1)
-    return np.stack([logm, av, logz, r0]).astype(np.float32)
+    # Age structure: old bulge and inter-arm (less SF 64-411 Myr than 0.4-2.6 Gyr ago),
+    # younger arms and clumps.
+    r3 = -0.8 + 1.3 * win * arm + 1.0 * np.clip(clumps, 0, 1) - 0.5 * np.exp(-r / (0.06 * n))
+    return np.stack([logm, av, logz, r0, r3]).astype(np.float32)
 
 
-def build_model(n, mass_mean, mean_values=None, corr_scale=1.0, nu=1.5):
-    """CorrelatedFieldMap with the demo's hyperparameters (ell scaled by ``corr_scale``)."""
+def build_model(n, mass_mean, mean_values=None, corr_scale=1.0, nu=1.5, fixed=None,
+                hyper=False, couple=False):  # fmt: skip
+    """CorrelatedFieldMap with the demo's hyperparameters.
+
+    ``corr_scale`` multiplies every correlation length; ``nu`` is the Matérn slope of the
+    non-mass fields (mass keeps 1.5).  ``fixed`` defaults to FIXED (the fit); pass
+    FIXED_TRUTH for the truth model.  ``hyper`` fits amplitude and correlation length of
+    every non-mass field (log-normal priors around the defaults); ``couple`` fits A_V's
+    response to the mass and SFH-ratio deviations (N(0, 0.5^2) each).
+    """
+    fixed = FIXED if fixed is None else fixed
     means = {"log_mass": mass_mean}
-    means.update(mean_values or NEUTRAL)
+    means.update({k: v for k, v in (mean_values or NEUTRAL).items() if k in FIELDS})
+    free_globals = [p for p in SPS_PARAM_NAMES if p not in FIELDS and p not in fixed]
+    ells = {k: corr_scale * v for k, v in CORR_LENGTHS.items() if k in FIELDS}
+    hyper_priors = None
+    if hyper:
+        hyper_priors = {
+            k: {
+                "log_amplitude": {"loc": float(np.log(AMPLITUDES[k])), "scale": 0.5},
+                "log_corr_length": {"loc": float(np.log(ells[k])), "scale": 0.25},
+            }
+            for k in FIELDS
+            if k != "log_mass"
+        }
+    free_couplings = None
+    if couple:
+        sources = ["log_mass"] + [k for k in FIELDS if k.startswith("logsfr_ratio")]
+        # A_V must come after its sources: reorder fields so it is last.
+        free_couplings = {"Av": {s: 0.5 for s in sources}}
+    field_order = [k for k in FIELDS if k != "Av"] + ["Av"] if couple else FIELDS
     return CorrelatedFieldMap(
         image_shape=(n, n),
         emulator_param_names=SPS_PARAM_NAMES,
         param_bounds=PARAM_BOUNDS,
-        field_params=FIELDS,
+        field_params=field_order,
         mass_param="log_mass",
-        fixed_params=FIXED,
-        corr_lengths={k: corr_scale * v for k, v in CORR_LENGTHS.items()},
-        nus=nu,
-        amplitudes=AMPLITUDES,
-        level_sigmas=LEVEL_SIGMAS,
+        fixed_params=fixed,
+        corr_lengths=ells,
+        nus={k: (1.5 if k == "log_mass" else nu) for k in FIELDS},
+        amplitudes={k: v for k, v in AMPLITUDES.items() if k in FIELDS},
+        level_sigmas={k: v for k, v in LEVEL_SIGMAS.items() if k in FIELDS},
         mean_maps=means,
         variance_fraction=0.99,
         pixel_scale=PIXEL_SCALE,
+        hyper_priors=hyper_priors,
+        free_couplings=free_couplings,
+        global_priors={k: v for k, v in GLOBAL_PRIORS.items() if k in free_globals},
     )
+
+
+def in_fields_order(model, maps_model_order):
+    """Reorder (…, N_fields, H, W) maps from ``model.field_names`` order to FIELDS order."""
+    idx = [model.field_names.index(f) for f in FIELDS]
+    return np.take(np.asarray(maps_model_order), idx, axis=-3)
+
+
+def scalar_summary(model, thetas, truth_globals=None):
+    """Posterior 16/50/84 of globals, fitted hyperparameters and couplings (+ truth)."""
+    thetas = jnp.asarray(thetas)
+    out = {}
+    if model.n_global:
+        g = np.asarray(jax.vmap(model.global_values)(thetas))
+        for i, name in enumerate(model.global_names):
+            q = np.percentile(g[:, i], [16, 50, 84])
+            out[name] = {"p16_50_84": [float(x) for x in q],
+                         "truth": (truth_globals or {}).get(name)}  # fmt: skip
+    if model.n_hyper:
+        h = np.exp(np.asarray(jax.vmap(model.hyper_theta)(thetas)))
+        for i, name in enumerate(model.hyper_names):
+            q = np.percentile(h[:, i], [16, 50, 84])
+            out[name.replace("log_", "")] = {"p16_50_84": [float(x) for x in q]}
+    if model.n_coupling:
+        c = np.asarray(jax.vmap(model.coupling_theta)(thetas))
+        for i, name in enumerate(model.coupling_names):
+            q = np.percentile(c[:, i], [16, 50, 84])
+            out[name] = {"p16_50_84": [float(x) for x in q]}
+    return out
 
 
 class FixedMapsModel(CorrelatedFieldMap):
@@ -466,6 +556,7 @@ def laplace_posterior(fm, model, theta_map, n_samples, chunk, key, max_newton=30
     return {
         "theta": theta,
         "maps": maps,
+        "thetas": np.asarray(thetas),
         "chol": chol,
         "newton_s": t_newton,
         "hessian_s": t_hess,
@@ -504,6 +595,8 @@ def nuts_posterior(fm, model, theta, chol, key, n_warmup, n_samples, n_chains, m
     print(result.summary())
     return {
         "maps": maps,
+        "theta_samples": samples[::step],
+        "n_chains": n_chains,
         "runtime_s": runtime,
         "max_rhat": float(np.nanmax(rhat)),
         "frac_rhat_gt_1.01": float(np.mean(rhat > 1.01)),
@@ -611,7 +704,13 @@ def main():
         default=1.0,
         help="multiply every fit correlation length (truth unchanged)",
     )
-    ap.add_argument("--nu", type=float, default=1.5, help="Matern nu of the fit model")
+    ap.add_argument("--nu", type=float, default=1.5,
+                    help="Matern nu of the fit model's non-mass fields")  # fmt: skip
+    ap.add_argument("--hyper", action="store_true",
+                    help="fit amplitude and correlation length of the non-mass fields")  # fmt: skip
+    ap.add_argument("--couple", action="store_true",
+                    help="fit A_V couplings to the mass and SFH-ratio deviations")  # fmt: skip
+    ap.add_argument("--tag", default="", help="suffix for the output directory name")
     ap.add_argument("--laplace", action="store_true", help="Laplace posterior at the MAP")
     ap.add_argument("--n-laplace", type=int, default=400, help="Laplace samples")
     ap.add_argument("--nuts", action="store_true", help="whitened NUTS after the Laplace step")
@@ -625,7 +724,7 @@ def main():
         jax.config.update("jax_enable_x64", True)
     if args.quick:
         args.rounds, args.steps = 2, 300
-    outdir = Path(args.outdir) / f"{args.truth}_{args.bands}"
+    outdir = Path(args.outdir) / f"{args.truth}_{args.bands}{'_' + args.tag if args.tag else ''}"
     (outdir / "figures").mkdir(parents=True, exist_ok=True)
     rng = np.random.default_rng(args.seed)
     n = args.size
@@ -635,7 +734,7 @@ def main():
 
     # ----- truth
     disk = disk_mass_map(n, log_mtot=10.0, rd_px=0.11 * n)
-    truth_model = build_model(n, disk)
+    truth_model = build_model(n, disk, fixed=FIXED_TRUTH)
     if args.truth == "prior":
         theta_truth = truth_model.sample_prior(jax.random.PRNGKey(args.seed), 1)[0]
         theta_truth = theta_truth.at[: truth_model.n_fields].set(0.0)  # around the means
@@ -648,25 +747,26 @@ def main():
     obs, clean, sigma = make_observation(emulator, psf, render_model, theta_truth, args.snr, rng)
 
     # ----- blind start: mass mean from the reddest band at neutral SPS values
-    ref = {**FIXED, **NEUTRAL}
+    ref = {**NEUTRAL_GLOBALS, **NEUTRAL, **FIXED}
     # The mean map must stay smooth: structure in it is not penalised by the prior.
     mass_mean = mass_map_from_image(obs, emulator, ref, band=len(BANDS) - 1, smooth_sigma_px=1.0)
-    model = build_model(n, mass_mean, corr_scale=args.corr_scale, nu=args.nu)
+    model = build_model(n, mass_mean, corr_scale=args.corr_scale, nu=args.nu,
+                        hyper=args.hyper, couple=args.couple)  # fmt: skip
     print(model.summary())
     fm = ForwardModel.build(obs, psf, model, emulator)
-    theta0 = model.initial_theta()
+    theta0 = model.initial_theta(global_values=NEUTRAL_GLOBALS)
     if args.mass_start == "wiener":
         # Sharp detail enters the *starting coefficients*, through the field prior.
         theta0 = model.project_to_field(
             theta0, "log_mass", wiener_mass_map(obs, psf, emulator, ref)
         )
-    start_maps = np.asarray(model.field_maps(theta0))
+    start_maps = in_fields_order(model, model.field_maps(theta0))
 
     t0 = time.time()
     res = find_map(fm, theta0, n_rounds=args.rounds, steps_per_round=args.steps, lr=0.05,
                    final_steps=args.steps, final_lr=0.01)  # fmt: skip
     runtime = time.time() - t0
-    fit_maps = np.asarray(model.field_maps(res.theta))
+    fit_maps = in_fields_order(model, model.field_maps(res.theta))
     model_img = np.asarray(fm._model_image(res.theta))
     chi = (np.asarray(obs.flux) - model_img) / sigma[:, None, None]
 
@@ -678,6 +778,11 @@ def main():
         "bands": BANDS,
         "corr_scale": args.corr_scale,
         "nu": args.nu,
+        "hyper": args.hyper,
+        "couple": args.couple,
+        "fields": FIELDS,
+        "truth_globals": {k: v for k, v in FIXED_TRUTH.items() if k not in FIXED},
+        "map_scalars": scalar_summary(model, res.theta[None, :]),
         "psf": args.psf_dir or "gaussian",
         "size_px": n,
         "snr_peak": args.snr,
@@ -704,9 +809,15 @@ def main():
             print("WARNING: --laplace without --float64; the Hessian will be float32-noisy")
         post = laplace_posterior(fm, model, res.theta, args.n_laplace, args.hess_chunk,
                                  jax.random.PRNGKey(args.seed + 100))  # fmt: skip
-        pstd = prior_map_std(model, 400, jax.random.PRNGKey(args.seed + 200))
+        post["maps"] = in_fields_order(model, post["maps"])
+        pstd = in_fields_order(
+            model, prior_map_std(model, 400, jax.random.PRNGKey(args.seed + 200))
+        )
         pm, med, std, info = posterior_metrics(truth_maps, post["maps"], pstd, weight)
-        metrics["laplace"] = {k: v for k, v in post.items() if k not in ("theta", "maps", "chol")}
+        metrics["laplace"] = {
+            k: v for k, v in post.items() if k not in ("theta", "maps", "chol", "thetas")
+        }
+        metrics["laplace"]["scalars"] = scalar_summary(model, post["thetas"], TRUTH_GLOBALS)
         metrics["laplace"]["per_field"] = pm
         mass_tot = np.log10(np.sum(10.0 ** post["maps"][:, 0], axis=(1, 2)))
         metrics["laplace"]["total_log_mass_16_50_84"] = [
@@ -719,8 +830,10 @@ def main():
             nuts = nuts_posterior(fm, model, post["theta"], post["chol"],
                                   jax.random.PRNGKey(args.seed + 300), args.nuts_warmup,
                                   args.nuts_samples, args.nuts_chains)  # fmt: skip
+            nuts["maps"] = in_fields_order(model, nuts["maps"])
             npm, nmed, nstd, ninfo = posterior_metrics(truth_maps, nuts["maps"], pstd, weight)
-            metrics["nuts"] = {k: v for k, v in nuts.items() if k != "maps"}
+            metrics["nuts"] = {k: v for k, v in nuts.items() if k not in ("maps", "theta_samples")}
+            metrics["nuts"]["scalars"] = scalar_summary(model, nuts["theta_samples"], TRUTH_GLOBALS)
             metrics["nuts"]["per_field"] = npm
             nmass = np.log10(np.sum(10.0 ** nuts["maps"][:, 0], axis=(1, 2)))
             metrics["nuts"]["total_log_mass_16_50_84"] = [
@@ -772,6 +885,15 @@ def main():
                   f"z_rms {q['z_rms']:.2f}  post std {q['median_post_std']:.3f}")  # fmt: skip
         m16, m50, m84 = nm["total_log_mass_16_50_84"]
         print(f"  total log M* {m50:.3f} +{m84 - m50:.3f} -{m50 - m16:.3f}")
+    for stage in ("laplace", "nuts"):
+        sc = metrics.get(stage, {}).get("scalars")
+        if sc:
+            print(f"{stage} scalars (16/50/84, truth):")
+            for name, v in sc.items():
+                q = v["p16_50_84"]
+                tr = v.get("truth")
+                print(f"  {name:28s} {q[1]:+.3f} [{q[0]:+.3f}, {q[2]:+.3f}]"
+                      + (f"  truth {tr:+.3f}" if tr is not None else ""))  # fmt: skip
     print(f"outputs in {outdir}")
 
 

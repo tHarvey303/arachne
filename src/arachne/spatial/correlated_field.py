@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping, Sequence
+from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -42,6 +43,16 @@ def _softclip(u: jnp.ndarray, lo: float, hi: float, sharpness: float) -> jnp.nda
     return lo + jax.nn.softplus(b * (u - lo)) / b - jax.nn.softplus(b * (u - hi)) / b
 
 
+class ThetaBlocks(NamedTuple):
+    """Named blocks of a :class:`CorrelatedFieldMap` theta, in storage order."""
+
+    levels: jnp.ndarray  # (N_fields,) level offsets
+    global_raw: jnp.ndarray  # (N_global,) logit of the globals within their bounds
+    hyper: jnp.ndarray  # (N_hyper,) log hyperparameters (order: hyper_names)
+    coupling: jnp.ndarray  # (N_coupling,) free coupling coefficients (order: coupling_names)
+    z: jnp.ndarray  # (n_modes_total,) white field coefficients
+
+
 class _FieldSpec:
     """Static description of one mapped parameter (bounds, spectrum, Fourier modes)."""
 
@@ -53,7 +64,6 @@ class _FieldSpec:
         corr_length: float,
         nu: float,
         level_sigma: float,
-        coupling: float,
     ) -> None:
         self.name = name
         self.bounds = bounds
@@ -61,7 +71,12 @@ class _FieldSpec:
         self.corr_length = float(corr_length)
         self.nu = float(nu)
         self.level_sigma = float(level_sigma)
-        self.coupling = float(coupling)
+        self.fixed_couplings: dict[str, float] = {}  # source field -> fixed coefficient
+        self.free_coupling_idx: dict[str, int] = {}  # source field -> index into coupling block
+        # Free hyperparameters: name -> index into the hyper block (log_amplitude,
+        # log_corr_length, log_nu).  Absent keys use the fixed values above.
+        self.hyper_idx: dict[str, int] = {}
+        self.k: np.ndarray | None = None  # |k| of the retained modes (rad/px)
         # Filled in by CorrelatedFieldMap._build_modes
         self.iy: np.ndarray | None = None
         self.ix: np.ndarray | None = None
@@ -87,15 +102,24 @@ class CorrelatedFieldMap(SpatialModel):
     For field ``k`` with mean map ``m_k(x)``, free level offset ``a_k`` and white
     coefficients ``z_k``::
 
-        u_k(x) = m_k(x) + a_k + c_k * [mass(x) - m_mass(x) - a_mass] + s_k * g_k(x)
+        d_k(x) = a_k + s_k * g_k(x) + sum_j c_kj * d_j(x)    (j earlier fields)
+        u_k(x) = m_k(x) + d_k(x)
         g_k    = IFFT[ sqrt(P_k) * Z(z_k) ]      (unit-variance stationary field)
         p_k(x) = softclip(u_k(x), bounds_k)      (identity for the mass field)
 
     ``P_k`` is a Matérn spectrum with break ``corr_length`` (pixels) and slope
-    set by ``nu``.  ``c_k`` (``couplings``) propagates local mass fluctuations
-    into the other maps, e.g. a resolved Σ*–A_V relation; the *smooth* part of
-    any relation belongs in ``mean_maps``.  The field lives on a zero-padded
-    grid so that it does not wrap around the cutout.
+    set by ``nu``.  ``c_kj`` (``couplings`` fixed, ``free_couplings`` fitted)
+    propagates local deviations of an earlier field ``j`` into field ``k``, e.g.
+    a resolved Σ*–A_V relation (j = mass) or dust following young stars
+    (j = an SFH ratio); the *smooth* part of any relation belongs in
+    ``mean_maps``.  The field lives on a zero-padded grid so that it does not
+    wrap around the cutout.
+
+    Hyperparameters ``s_k``, ``ell_k`` and ``nu_k`` may be fixed or fitted
+    (``hyper_priors``: Gaussian priors on their logs).  When fitted, the Fourier
+    basis is fixed at the smallest ``ell`` and ``nu`` the prior reaches (loc - 2
+    scale) and the spectrum is re-evaluated in-graph, so the map, its prior and
+    the gradients stay consistent (non-centred hierarchical GP).
 
     Only Fourier modes that carry most of the prior variance are kept
     (``variance_fraction``, or an explicit ``k_max``), so a map costs a few
@@ -111,14 +135,21 @@ class CorrelatedFieldMap(SpatialModel):
             global_raw(
                 N_global
             ),
+            hyper(N_hyper),
+            couplings(
+                N_coupling
+            ),
             z_field_0,
             z_field_1,
             ...,
         ]
 
-    The prior is proper and normalised: ``z ~ N(0, I)``, ``a_k ~ N(0,
-    level_sigma_k^2)``, globals uniform in physical space.  ``sample_prior`` draws
-    from exactly that density.
+    The prior is proper: ``z ~ N(0, I)``, ``a_k ~ N(0, level_sigma_k^2)``,
+    hyperparameters and free couplings Gaussian, globals uniform in physical
+    space unless ``global_priors`` gives a density (e.g. the library's
+    Student-t on ``logsfr_ratio_*``; truncation to the bounds is not
+    renormalised, which is negligible for priors much narrower than the bounds).
+    ``sample_prior`` draws from that density.
     """
 
     def __init__(
@@ -133,7 +164,10 @@ class CorrelatedFieldMap(SpatialModel):
         amplitudes: Mapping[str, float] | float = 0.3,
         nus: Mapping[str, float] | float = 1.5,
         level_sigmas: Mapping[str, float] | None = None,
-        couplings: Mapping[str, float] | None = None,
+        couplings: Mapping[str, Mapping[str, float]] | None = None,
+        free_couplings: Mapping[str, Mapping[str, float]] | None = None,
+        hyper_priors: Mapping[str, Mapping[str, Mapping[str, float]]] | None = None,
+        global_priors: Mapping[str, Mapping] | None = None,
         mean_maps: Mapping[str, np.ndarray | float] | None = None,
         variance_fraction: float = 0.99,
         k_max: float | None = None,
@@ -159,8 +193,18 @@ class CorrelatedFieldMap(SpatialModel):
             level_sigmas: Prior sigma of the free level offset per field.
                 Default 1.0 for the mass field and a quarter of the bounds width
                 otherwise.
-            couplings: ``c_k`` per non-mass field: response of ``p_k`` to the
-                local mass-map deviation (parameter units per dex).
+            couplings: Fixed couplings ``{target: {source: c}}``: ``target`` responds
+                to an earlier field's deviation with coefficient ``c`` (target units
+                per source unit, e.g. mag per dex).
+            free_couplings: Fitted couplings ``{target: {source: prior_sigma}}``;
+                each coefficient gets a ``N(0, prior_sigma^2)`` prior.  ``source``
+                must come before ``target`` in ``field_names``.
+            hyper_priors: ``{field: {"log_amplitude" | "log_corr_length" | "log_nu":
+                {"loc": ..., "scale": ...}}}`` makes those hyperparameters free,
+                with Gaussian priors on their natural logs (``corr_length`` in px).
+            global_priors: Prior specs (``arachne.priors.specs`` format, e.g.
+                ``{"dist": "studentt", "df": 2, "loc": 0, "scale": 0.3}``) for
+                global parameters; default uniform within the bounds.
             mean_maps: Mean map per field, an ``(H, W)`` array or a scalar.
                 Default: the centre of the bounds (non-mass) or 0 (mass); set
                 the mass mean from the data with :func:`mass_map_from_image`.
@@ -210,7 +254,7 @@ class CorrelatedFieldMap(SpatialModel):
             return value
 
         level_sigmas = level_sigmas or {}
-        couplings = couplings or {}
+        couplings = dict(couplings or {})
         self.fields: list[_FieldSpec] = []
         for p in self.field_names:
             is_mass = p == mass_param
@@ -224,12 +268,76 @@ class CorrelatedFieldMap(SpatialModel):
                     corr_length=per_field(corr_lengths, p, 4.0),
                     nu=per_field(nus, p, 1.5),
                     level_sigma=level_sigmas.get(p, default_ls),
-                    coupling=0.0 if is_mass else couplings.get(p, 0.0),
                 )
             )
+        order = {p: i for i, p in enumerate(self.field_names)}
+
+        def check_source(target, source):
+            if target not in order or source not in order:
+                raise ValueError(f"coupling {source!r} -> {target!r}: both must be fields")
+            if order[source] >= order[target]:
+                raise ValueError(
+                    f"coupling source {source!r} must come before target {target!r} "
+                    f"in field order {self.field_names}"
+                )
+
+        for target, spec in couplings.items():
+            f = self.fields[order[target]] if target in order else None
+            if f is None:
+                raise ValueError(f"coupling target {target!r} is not a field")
+            for source, c in spec.items():
+                check_source(target, source)
+                f.fixed_couplings[source] = float(c)
+        coupling_sigmas = []
+        for target, spec in (free_couplings or {}).items():
+            if target not in order:
+                raise ValueError(f"free coupling target {target!r} is not a field")
+            for source, sigma in spec.items():
+                check_source(target, source)
+                self.fields[order[target]].free_coupling_idx[source] = len(coupling_sigmas)
+                coupling_sigmas.append(float(sigma))
+        self.coupling_names = [
+            f"c[{f.name}<-{s}]" for f in self.fields for s in f.free_coupling_idx
+        ]
+        self._coupling_sigma = np.asarray(coupling_sigmas, np.float64)
+
+        hyper_loc, hyper_scale, self.hyper_names = [], [], []
+        for p, spec in (hyper_priors or {}).items():
+            if p not in order:
+                raise ValueError(f"hyper_priors given for non-field {p!r}")
+            for hname in ("log_amplitude", "log_corr_length", "log_nu"):
+                if hname in spec:
+                    self.fields[order[p]].hyper_idx[hname] = len(hyper_loc)
+                    hyper_loc.append(float(spec[hname]["loc"]))
+                    hyper_scale.append(float(spec[hname]["scale"]))
+                    self.hyper_names.append(f"{hname}[{p}]")
+        self._hyper_loc = np.asarray(hyper_loc, np.float64)
+        self._hyper_scale = np.asarray(hyper_scale, np.float64)
+        # Basis-defining values: the most demanding end of each free hyperparameter's prior.
+        for f in self.fields:
+            for hname, attr in (("log_corr_length", "basis_ell"), ("log_nu", "basis_nu")):
+                if hname in f.hyper_idx:
+                    i = f.hyper_idx[hname]
+                    setattr(f, attr, math.exp(hyper_loc[i] - 2.0 * hyper_scale[i]))
+                else:
+                    setattr(f, attr, f.corr_length if hname == "log_corr_length" else f.nu)
+
+        from arachne.priors.specs import log_prior_1d, validate_prior_spec
+
+        self._global_prior_specs = {}
+        for p, spec in (global_priors or {}).items():
+            if p not in self.global_names:
+                raise ValueError(f"global_priors given for {p!r}, which is not a free global")
+            spec = dict(spec)
+            if spec.get("dist", "uniform") != "uniform":
+                validate_prior_spec(p, spec, tuple(self.param_bounds[p]))
+                if spec["dist"] not in ("normal", "studentt"):
+                    raise ValueError("global_priors support 'normal' and 'studentt' only")
+                self._global_prior_specs[p] = spec
+        self._log_prior_1d = log_prior_1d
 
         H, W = self.image_shape
-        max_ell = max(f.corr_length for f in self.fields)
+        max_ell = max(max(f.corr_length, f.basis_ell) for f in self.fields)
         if pad is None:
             pad = min(max(H, W), max(4, int(math.ceil(2.0 * max_ell))))
         self.pad = int(pad)
@@ -254,7 +362,13 @@ class CorrelatedFieldMap(SpatialModel):
         self._global_lo = jnp.asarray([self.param_bounds[p][0] for p in self.global_names])
         self._global_hi = jnp.asarray([self.param_bounds[p][1] for p in self.global_names])
         self._level_sigma = jnp.asarray([f.level_sigma for f in self.fields])
-        self._n_params = len(self.fields) + len(self.global_names) + self.n_modes_total
+        self._n_params = (
+            len(self.fields)
+            + len(self.global_names)
+            + self.n_hyper
+            + self.n_coupling
+            + self.n_modes_total
+        )
 
     # ------------------------------------------------------------------ modes
     def _build_modes(self) -> None:
@@ -276,12 +390,16 @@ class CorrelatedFieldMap(SpatialModel):
         # Full-grid (non-DC) wavenumbers, for normalising each spectrum to unit variance.
         k_full = 2.0 * np.pi * np.hypot(*np.meshgrid(fy, np.fft.fftfreq(Wp), indexing="ij"))
         nondc = k_full > 0
+        self._k_full_nondc = k_full[nondc]  # for in-graph spectrum normalisation
+        self._n_pix_padded = n_pix
 
         start = 0
         for f in self.fields:
-            p_full = matern_spectrum(k_full, f.corr_length, f.nu)
+            # Select modes at the basis-defining hyperparameters (the most demanding
+            # end of the prior when free; the fixed values otherwise).
+            p_full = matern_spectrum(k_full, f.basis_ell, f.basis_nu)
             norm = p_full[nondc].mean()  # mean over N-1 modes ≈ unit pixel variance
-            p_c = matern_spectrum(k_c, f.corr_length, f.nu) / norm
+            p_c = matern_spectrum(k_c, f.basis_ell, f.basis_nu) / norm
             # Each half-plane mode holds 2 p / N of the variance (itself + conjugate).
             share = 2.0 * p_c / n_pix
             if self.k_max is not None:
@@ -295,7 +413,12 @@ class CorrelatedFieldMap(SpatialModel):
             f.iy = iy_c[keep].astype(np.int32)
             f.ix = ix_c[keep].astype(np.int32)
             # Complex white noise Z has Re/Im variance N/2 for a unit-variance real field.
-            f.amp = np.sqrt(p_c[keep] * n_pix / 2.0)  # float64; cast at use
+            f.k = k_c[keep]
+            if not ({"log_corr_length", "log_nu"} & set(f.hyper_idx)):
+                # Fixed spectrum: amplitudes from the fixed (= basis) hyperparameters.
+                f.amp = np.sqrt(p_c[keep] * n_pix / 2.0)  # float64; cast at use
+            else:
+                f.amp = None  # computed in-graph from the fitted hyperparameters
             f.n_modes = int(keep.sum())
             f.variance_kept = float(share[keep].sum() / share.sum())
             f.slice = slice(start, start + 2 * f.n_modes)
@@ -318,16 +441,60 @@ class CorrelatedFieldMap(SpatialModel):
         """Number of free global scalars."""
         return len(self.global_names)
 
-    def split_theta(self, theta: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-        """Split theta into ``(levels (N_fields,), global_raw (N_global,), z (n_modes_total,))``."""
-        nf, ng = self.n_fields, self.n_global
-        return theta[:nf], theta[nf : nf + ng], theta[nf + ng :]
+    @property
+    def n_hyper(self) -> int:
+        """Number of free field hyperparameters."""
+        return len(self.hyper_names)
 
-    def join_theta(self, levels, global_raw, z) -> jnp.ndarray:
+    @property
+    def n_coupling(self) -> int:
+        """Number of free cross-field coupling coefficients."""
+        return len(self.coupling_names)
+
+    @property
+    def z_offset(self) -> int:
+        """Index in theta where the field coefficients start."""
+        return self.n_fields + self.n_global + self.n_hyper + self.n_coupling
+
+    def split_theta(self, theta: jnp.ndarray) -> ThetaBlocks:
+        """Split theta into its named blocks (see :class:`ThetaBlocks`)."""
+        nf, ng, nh, nc = self.n_fields, self.n_global, self.n_hyper, self.n_coupling
+        i = np.cumsum([0, nf, ng, nh, nc])
+        return ThetaBlocks(
+            levels=theta[i[0] : i[1]],
+            global_raw=theta[i[1] : i[2]],
+            hyper=theta[i[2] : i[3]],
+            coupling=theta[i[3] : i[4]],
+            z=theta[i[4] :],
+        )
+
+    def hyper_theta(self, theta: jnp.ndarray) -> jnp.ndarray:
+        """Free hyperparameters (log values), shape (N_hyper,), order ``hyper_names``."""
+        return self.split_theta(theta).hyper
+
+    def coupling_theta(self, theta: jnp.ndarray) -> jnp.ndarray:
+        """Free coupling coefficients, shape (N_coupling,), order ``coupling_names``."""
+        return self.split_theta(theta).coupling
+
+    def join_theta(self, blocks: ThetaBlocks) -> jnp.ndarray:
         """Inverse of :meth:`split_theta`."""
-        return jnp.concatenate(
-            [jnp.atleast_1d(levels), jnp.atleast_1d(global_raw), jnp.atleast_1d(z)]
-        ).astype(_default_float())
+        return jnp.concatenate([jnp.atleast_1d(jnp.asarray(b)) for b in blocks]).astype(
+            _default_float()
+        )
+
+    def field_hyperparameters(self, theta: jnp.ndarray, k: int) -> tuple:
+        """``(amplitude, corr_length, nu)`` of field ``k`` (fitted or fixed values)."""
+        f = self.fields[k]
+        h = self.hyper_theta(theta)
+
+        def get(name, fixed):
+            return jnp.exp(h[f.hyper_idx[name]]) if name in f.hyper_idx else fixed
+
+        return (
+            get("log_amplitude", f.amplitude),
+            get("log_corr_length", f.corr_length),
+            get("log_nu", f.nu),
+        )
 
     def initial_theta(self, global_values: Mapping[str, float] | None = None) -> jnp.ndarray:
         """Theta at the prior mean: zero levels and coefficients, globals mid-range or given."""
@@ -338,17 +505,45 @@ class CorrelatedFieldMap(SpatialModel):
             frac = min(max((v - lo) / (hi - lo), 1e-4), 1 - 1e-4)
             raw.append(math.log(frac / (1.0 - frac)))
         return self.join_theta(
-            jnp.zeros(self.n_fields), jnp.asarray(raw), jnp.zeros(self.n_modes_total)
+            ThetaBlocks(
+                levels=jnp.zeros(self.n_fields),
+                global_raw=jnp.asarray(raw),
+                hyper=jnp.asarray(self._hyper_loc),
+                coupling=jnp.zeros(self.n_coupling),
+                z=jnp.zeros(self.n_modes_total),
+            )
         )
 
     # ------------------------------------------------------------------ fields
-    def unit_field(self, z_k: jnp.ndarray, k: int) -> jnp.ndarray:
-        """Unit-variance random field ``g_k`` (H, W) from field ``k``'s coefficients."""
+    def _mode_amplitudes(self, k: int, corr_length, nu, dtype) -> jnp.ndarray:
+        """sqrt(P(k) N / 2) for field ``k``'s retained modes, unit-variance normalised."""
+        f = self.fields[k]
+        if f.amp is not None:
+            return jnp.asarray(f.amp, dtype)
+        k_full = jnp.asarray(self._k_full_nondc, dtype)
+        k_kept = jnp.asarray(f.k, dtype)
+        norm = jnp.mean((1.0 + (k_full * corr_length) ** 2) ** (-(nu + 1.0)))
+        p = (1.0 + (k_kept * corr_length) ** 2) ** (-(nu + 1.0)) / norm
+        return jnp.sqrt(p * self._n_pix_padded / 2.0)
+
+    def unit_field(self, z_k: jnp.ndarray, k: int, theta: jnp.ndarray | None = None) -> jnp.ndarray:
+        """Unit-variance random field ``g_k`` (H, W) from field ``k``'s coefficients.
+
+        ``theta`` is needed only when field ``k`` has a fitted correlation length or
+        slope (it supplies those hyperparameters); otherwise it may be omitted.
+        """
         f = self.fields[k]
         Hp, Wp = self.grid_shape
         re, im = z_k[: f.n_modes], z_k[f.n_modes :]
         cdtype = jnp.complex128 if z_k.dtype == jnp.float64 else jnp.complex64
-        c = (re + 1j * im).astype(cdtype) * jnp.asarray(f.amp, z_k.dtype)
+        if f.amp is None:
+            if theta is None:
+                raise ValueError(f"field {f.name!r} has fitted hyperparameters: pass theta")
+            _, ell, nu = self.field_hyperparameters(theta, k)
+            amp = self._mode_amplitudes(k, ell, nu, z_k.dtype)
+        else:
+            amp = jnp.asarray(f.amp, z_k.dtype)
+        c = (re + 1j * im).astype(cdtype) * amp
         spec = jnp.zeros((Hp, Wp // 2 + 1), cdtype)
         spec = spec.at[f.iy, f.ix].set(c, unique_indices=True)  # each mode once
         # kx = 0 modes need their conjugate partner placed explicitly.
@@ -396,16 +591,17 @@ class CorrelatedFieldMap(SpatialModel):
         """
         k = self.field_names.index(field)
         f = self.fields[k]
-        n0 = self.n_fields + self.n_global
+        n0 = self.z_offset
         z_slice = slice(n0 + f.slice.start, n0 + f.slice.stop)
         theta0 = theta.at[z_slice].set(0.0)
         current = self.field_maps(theta0)[k]
         if f.bounds is not None:
             # Pre-clip value without the field term (softclip ~ identity inside bounds).
             current = jnp.clip(current, f.bounds[0], f.bounds[1])
-        r = (jnp.asarray(target_map, current.dtype) - current) / f.amplitude
+        amplitude = self.field_hyperparameters(theta, k)[0]
+        r = (jnp.asarray(target_map, current.dtype) - current) / amplitude
         z0 = jnp.zeros(2 * f.n_modes, current.dtype)
-        g = lambda z: self.unit_field(z, k)  # noqa: E731
+        g = lambda z: self.unit_field(z, k, theta)  # noqa: E731
         gt = jax.linear_transpose(g, z0)
 
         def normal_op(z):
@@ -417,24 +613,29 @@ class CorrelatedFieldMap(SpatialModel):
 
     def field_maps(self, theta: jnp.ndarray) -> jnp.ndarray:
         """Physical parameter maps ``(N_fields, H, W)`` in ``field_names`` order."""
-        levels, _, z = self.split_theta(theta)
-        mass_dev = None
+        blocks = self.split_theta(theta)
+        levels, z, cfree = blocks.levels, blocks.z, blocks.coupling
+        devs: dict[str, jnp.ndarray] = {}
         maps = []
         for k, f in enumerate(self.fields):
-            g = self.unit_field(z[f.slice], k)
-            dev = levels[k] + f.amplitude * g
-            if k == 0:
-                mass_dev = dev
-                u = self._mean_maps[0] + dev
+            amplitude = self.field_hyperparameters(theta, k)[0]
+            g = self.unit_field(z[f.slice], k, theta)
+            dev = levels[k] + amplitude * g
+            for source, c in f.fixed_couplings.items():
+                dev = dev + c * devs[source]
+            for source, i in f.free_coupling_idx.items():
+                dev = dev + cfree[i] * devs[source]
+            devs[f.name] = dev
+            u = self._mean_maps[k] + dev
+            if f.bounds is None:
                 maps.append(u)
-                continue
-            u = self._mean_maps[k] + dev + f.coupling * mass_dev
-            maps.append(_softclip(u, f.bounds[0], f.bounds[1], self.softclip_sharpness))
+            else:
+                maps.append(_softclip(u, f.bounds[0], f.bounds[1], self.softclip_sharpness))
         return jnp.stack(maps)
 
     def global_values(self, theta: jnp.ndarray) -> jnp.ndarray:
         """Physical values of the global scalars, shape (N_global,)."""
-        _, raw, _ = self.split_theta(theta)
+        raw = self.split_theta(theta).global_raw
         return self._global_lo + (self._global_hi - self._global_lo) * jax.nn.sigmoid(raw)
 
     def decode(self, theta: jnp.ndarray, image_shape: tuple | None = None) -> jnp.ndarray:
@@ -460,23 +661,60 @@ class CorrelatedFieldMap(SpatialModel):
 
     # ------------------------------------------------------------------ prior
     def log_prior(self, theta: jnp.ndarray) -> jnp.ndarray:
-        """Normalised log prior: N(0, I) coefficients, Gaussian levels, uniform globals."""
-        levels, raw, z = self.split_theta(theta)
+        """Log prior: N(0, I) coefficients; Gaussian levels, hyperparameters, couplings; globals."""
+        blocks = self.split_theta(theta)
+        levels, raw, z = blocks.levels, blocks.global_raw, blocks.z
         lp = -0.5 * jnp.sum(z**2) - 0.5 * z.size * _LOG_2PI
         lp += jnp.sum(
             -0.5 * (levels / self._level_sigma) ** 2 - jnp.log(self._level_sigma) - 0.5 * _LOG_2PI
         )
+        if self.n_hyper:
+            h = self.hyper_theta(theta)
+            loc, scale = jnp.asarray(self._hyper_loc), jnp.asarray(self._hyper_scale)
+            lp += jnp.sum(-0.5 * ((h - loc) / scale) ** 2 - jnp.log(scale) - 0.5 * _LOG_2PI)
+        if self.n_coupling:
+            c = self.coupling_theta(theta)
+            sig = jnp.asarray(self._coupling_sigma)
+            lp += jnp.sum(-0.5 * (c / sig) ** 2 - jnp.log(sig) - 0.5 * _LOG_2PI)
         # Uniform in physical space: density of raw is sigmoid'(raw) (bounds width cancels).
         lp += jnp.sum(jax.nn.log_sigmoid(raw) + jax.nn.log_sigmoid(-raw))
+        if self._global_prior_specs:
+            # Non-uniform globals: density p(x) * (hi - lo) relative to the uniform term.
+            vals = self.global_values(theta)
+            for p, spec in self._global_prior_specs.items():
+                i = self.global_names.index(p)
+                lo, hi = self.param_bounds[p]
+                lp += self._log_prior_1d(spec, vals[i], lo, hi) + math.log(hi - lo)
         return lp
 
     def sample_prior(self, key: jax.Array, n: int) -> jnp.ndarray:
-        """Draw ``n`` theta vectors from exactly the density of :meth:`log_prior`."""
-        k1, k2, k3 = jax.random.split(key, 3)
+        """Draw ``n`` theta vectors from the density of :meth:`log_prior`.
+
+        Non-uniform globals are drawn from their distribution and clipped just
+        inside the bounds (exact up to the negligible truncated tail).
+        """
+        k1, k2, k3, k4, k5, k6 = jax.random.split(key, 6)
         levels = jax.random.normal(k1, (n, self.n_fields)) * self._level_sigma
         raw = jax.random.logistic(k2, (n, self.n_global))
+        if self._global_prior_specs:
+            keys = jax.random.split(k6, len(self._global_prior_specs))
+            for kk, (p, spec) in zip(keys, self._global_prior_specs.items(), strict=True):
+                i = self.global_names.index(p)
+                lo, hi = self.param_bounds[p]
+                if spec["dist"] == "normal":
+                    x = jax.random.normal(kk, (n,))
+                else:
+                    x = jax.random.t(kk, float(spec["df"]), (n,))
+                x = float(spec.get("loc", 0.0)) + float(spec["scale"]) * x
+                eps = 1e-6 * (hi - lo)
+                frac = (jnp.clip(x, lo + eps, hi - eps) - lo) / (hi - lo)
+                raw = raw.at[:, i].set(jnp.log(frac) - jnp.log1p(-frac))
+        hyper = jnp.asarray(self._hyper_loc) + jnp.asarray(self._hyper_scale) * jax.random.normal(
+            k4, (n, self.n_hyper)
+        )
+        coupling = jnp.asarray(self._coupling_sigma) * jax.random.normal(k5, (n, self.n_coupling))
         z = jax.random.normal(k3, (n, self.n_modes_total))
-        return jnp.concatenate([levels, raw, z], axis=1).astype(_default_float())
+        return jnp.concatenate([levels, raw, hyper, coupling, z], axis=1).astype(_default_float())
 
     def summary(self) -> str:
         """Human-readable description of the fields, modes and parameter count."""
@@ -487,10 +725,33 @@ class CorrelatedFieldMap(SpatialModel):
         for f in self.fields:
             lines.append(
                 f"  field {f.name:18s} ell={f.corr_length:5.1f}px nu={f.nu:.2f} "
-                f"s={f.amplitude:.3g} modes={f.n_modes} (x2 real, "
-                f"{100 * f.variance_kept:.1f}% of prior variance) coupling={f.coupling:g}"
+                f"s={f.amplitude:.3g} modes={f.n_modes} (x2 real, basis ell="
+                f"{f.basis_ell:.2f} nu={f.basis_nu:.2f}, {100 * f.variance_kept:.1f}% of "
+                f"basis variance) free={sorted(f.hyper_idx) or '-'} "
+                f"couplings={dict(f.fixed_couplings) or '-'}"
+                f"{' + free ' + str(sorted(f.free_coupling_idx)) if f.free_coupling_idx else ''}"
             )
         lines.append(f"  globals: {self.global_names or 'none'}; fixed: {self.fixed_params}")
+        if self._global_prior_specs:
+            lines.append(f"  global priors: {self._global_prior_specs}")
+        if self.n_hyper:
+            lines.append(
+                "  free hyperparameters: "
+                + ", ".join(
+                    f"{n}~N({lo:.2f},{s:.2f})"
+                    for n, lo, s in zip(
+                        self.hyper_names, self._hyper_loc, self._hyper_scale, strict=True
+                    )
+                )
+            )
+        if self.n_coupling:
+            lines.append(
+                "  free couplings: "
+                + ", ".join(
+                    f"{n}~N(0,{s:.2f})"
+                    for n, s in zip(self.coupling_names, self._coupling_sigma, strict=True)
+                )
+            )
         return "\n".join(lines)
 
 
