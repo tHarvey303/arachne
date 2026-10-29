@@ -124,6 +124,11 @@ TRUTH_GLOBALS = {
     "slope": 0.25, "fesc_lya": 0.5, "dust_bump_amplitude": 2.0,
     "logsfr_ratio_1": 0.3, "logsfr_ratio_2": -0.3, "logsfr_ratio_4": 0.2,
 }  # fmt: skip
+# "--honest" mocks: truth means offset from NEUTRAL (the fit's prior centres and start), and
+# for the prior-draw truth, hyperparameters different from the fit's.
+HONEST_OFFSETS = {"Av": 0.4, "log10metallicity": 0.4, "logsfr_ratio_0": -0.4, "logsfr_ratio_3": 0.5}
+HONEST_CORR_SCALE = 1.6
+HONEST_AMP_SCALE = 1.4
 # Library priors (arachne.priors.specs.DEFAULT_PRIORS) for free globals.
 GLOBAL_PRIORS = {
     f"logsfr_ratio_{i}": {"dist": "studentt", "df": 2.0, "loc": 0.0, "scale": 0.3} for i in range(5)
@@ -290,11 +295,11 @@ def spiral_truth(n, rng):
 
 
 def build_model(n, mass_mean, mean_values=None, corr_scale=1.0, nu=1.5, fixed=None,
-                hyper=False, couple=False):  # fmt: skip
+                hyper=False, couple=False, amp_scale=1.0):  # fmt: skip
     """CorrelatedFieldMap with the demo's hyperparameters.
 
     ``corr_scale`` multiplies every correlation length; ``nu`` is the Matérn slope of the
-    non-mass fields (mass keeps 1.5).  ``fixed`` defaults to FIXED (the fit); pass
+    non-mass fields (mass keeps 1.5); ``amp_scale`` multiplies every amplitude.  ``fixed`` defaults to FIXED (the fit); pass
     FIXED_TRUTH for the truth model.  ``hyper`` fits amplitude and correlation length of
     every non-mass field (log-normal priors around the defaults); ``couple`` fits A_V's
     response to the mass and SFH-ratio deviations (N(0, 0.5^2) each).
@@ -329,7 +334,7 @@ def build_model(n, mass_mean, mean_values=None, corr_scale=1.0, nu=1.5, fixed=No
         fixed_params=fixed,
         corr_lengths=ells,
         nus={k: (1.5 if k == "log_mass" else nu) for k in FIELDS},
-        amplitudes={k: v for k, v in AMPLITUDES.items() if k in FIELDS},
+        amplitudes={k: amp_scale * v for k, v in AMPLITUDES.items() if k in FIELDS},
         level_sigmas={k: v for k, v in LEVEL_SIGMAS.items() if k in FIELDS},
         mean_maps=means,
         variance_fraction=0.99,
@@ -676,7 +681,7 @@ def plot_laplace(truth, med, std, info, weight, path):
 # ---------------------------------------------------------------------------
 
 
-def truth_scalars(model, scalar_names, truth_maps, prior_truth):
+def truth_scalars(model, scalar_names, truth_maps, prior_truth, corr_scale=1.0, amp_scale=1.0):
     """Truth values of the bundle scalars, by name (NaN where the truth has none).
 
     Globals come from TRUTH_GLOBALS.  For the prior truth the hyperparameters are the truth
@@ -689,9 +694,9 @@ def truth_scalars(model, scalar_names, truth_maps, prior_truth):
         elif name in TRUTH_GLOBALS:
             out.append(float(TRUTH_GLOBALS[name]))
         elif prior_truth and name.startswith("amplitude["):
-            out.append(float(AMPLITUDES[name[len("amplitude[") : -1]]))
+            out.append(amp_scale * float(AMPLITUDES[name[len("amplitude[") : -1]]))
         elif prior_truth and name.startswith("corr_length["):
-            out.append(float(CORR_LENGTHS[name[len("corr_length[") : -1]]))
+            out.append(corr_scale * float(CORR_LENGTHS[name[len("corr_length[") : -1]]))
         elif prior_truth and name.startswith("c["):
             out.append(0.0)
         else:
@@ -744,12 +749,20 @@ def write_demo_bundle(path, fm, model, *, theta_map, samples, source, n_chains, 
         title=path.parent.name if path.name == "results.h5" else f"{path.parent.name} {source}",
     )
     content.truth.scalars = truth_scalars(
-        model, content.scalar_names, truth_maps, prior_truth=args.truth == "prior"
+        model, content.scalar_names, truth_maps, prior_truth=args.truth == "prior",
+        **truth_hyper_scales(args),
     )
     write_content(path, content, mantissa_bits=args.bundle_mantissa_bits, overwrite=True)
     size = path.stat().st_size / 2**20
     print(f"bundle {path} ({content.n_draws} draws, {size:.1f} MiB, {time.time() - t0:.1f} s)")
     return path
+
+
+def truth_hyper_scales(args):
+    """Truth-model correlation-length and amplitude scales (mismatched for ``--honest``)."""
+    if args.honest:
+        return {"corr_scale": HONEST_CORR_SCALE, "amp_scale": HONEST_AMP_SCALE}
+    return {"corr_scale": 1.0, "amp_scale": 1.0}
 
 
 def bundle_plots(path, outdir):
@@ -809,6 +822,9 @@ def main():
                     help="fit amplitude and correlation length of the non-mass fields")  # fmt: skip
     ap.add_argument("--couple", action="store_true",
                     help="fit A_V couplings to the mass and SFH-ratio deviations")  # fmt: skip
+    ap.add_argument("--honest", action="store_true",
+                    help="offset the truth means from the fit's prior centres (HONEST_OFFSETS) "
+                    "and draw the prior truth with different hyperparameters")  # fmt: skip
     ap.add_argument("--tag", default="", help="suffix for the output directory name")
     ap.add_argument("--laplace", action="store_true", help="Laplace posterior at the MAP")
     ap.add_argument("--n-laplace", type=int, default=400, help="Laplace samples")
@@ -843,7 +859,10 @@ def main():
 
     # ----- truth
     disk = disk_mass_map(n, log_mtot=10.0, rd_px=0.11 * n)
-    truth_model = build_model(n, disk, fixed=FIXED_TRUTH)
+    offsets = HONEST_OFFSETS if args.honest else {}
+    truth_means = {k: v + offsets.get(k, 0.0) for k, v in NEUTRAL.items()}
+    truth_model = build_model(n, disk, mean_values=truth_means, fixed=FIXED_TRUTH,
+                              **truth_hyper_scales(args))  # fmt: skip
     arm_weight = None
     if args.truth == "prior":
         theta_truth = truth_model.sample_prior(jax.random.PRNGKey(args.seed), 1)[0]
@@ -852,6 +871,8 @@ def main():
         render_model = truth_model
     else:
         truth_maps, arm_weight = spiral_truth(n, rng)
+        for k, dv in offsets.items():
+            truth_maps[FIELDS.index(k)] += dv
         render_model = FixedMapsModel(truth_maps, truth_model)
         theta_truth = truth_model.initial_theta()
     obs, clean, sigma = make_observation(emulator, psf, render_model, theta_truth, args.snr, rng)
@@ -890,6 +911,9 @@ def main():
         "nu": args.nu,
         "hyper": args.hyper,
         "couple": args.couple,
+        "honest": args.honest,
+        "truth_offsets": offsets,
+        "truth_hyper_scales": truth_hyper_scales(args),
         "fields": FIELDS,
         "truth_globals": {k: v for k, v in FIXED_TRUTH.items() if k not in FIXED},
         "map_scalars": scalar_summary(model, res.theta[None, :]),
