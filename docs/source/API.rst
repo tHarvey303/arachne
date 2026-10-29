@@ -298,3 +298,37 @@ Posterior predictive checks
    :members: model_image_samples, component_image_samples, residual_summary,
              predictive_bands, chi2_reduced, chi2_reduced_samples, is_multiresolution,
              n_model_params
+
+Results bundles
+---------------
+
+A fit saved as one HDF5 file (schema ``arachne.results`` 1.0): data, MAP, thinned draws of
+the model cubes and parameter maps, truth, regions and provenance.  Everything except the
+writer is numpy/h5py only.
+
+.. automodule:: arachne.results.writer
+   :members: content_from_forward_model, write_bundle, thin_indices
+
+.. automodule:: arachne.results.reader
+   :members: load_bundle, ResultsBundle, ComponentsView
+
+.. automodule:: arachne.results.regions
+   :members:
+
+.. automodule:: arachne.results.schema
+   :members: BundleContent, ComponentContent, TruthContent, validate
+
+.. automodule:: arachne.results.io
+   :members: write_content, content_to_tree, round_mantissa
+
+.. automodule:: arachne.results.display
+   :members:
+
+.. automodule:: arachne.results.metadata
+   :members: pivot_um, short_band_name
+
+.. automodule:: arachne.results.provenance
+   :members:
+
+.. automodule:: arachne.results.testing
+   :members:

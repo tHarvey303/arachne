@@ -72,21 +72,13 @@ __all__ = [
     "metadata",
     "schema",
     "testing",
-    # add *_LAZY_WRITER once writer.py exists (P1); listing them now would break `import *`
+    *_LAZY_WRITER,
 ]
 
 
 def __getattr__(name: str) -> Any:
     """Load the JAX-dependent writer on first access to its public names."""
     if name in _LAZY_WRITER:
-        try:
-            writer = importlib.import_module(f"{__name__}.writer")
-        except ModuleNotFoundError as err:
-            if err.name != f"{__name__}.writer":
-                raise
-            raise ImportError(
-                f"arachne.results.{name} is not available: arachne.results.writer has not "
-                "been implemented yet (phase P1)"
-            ) from err
+        writer = importlib.import_module(f"{__name__}.writer")
         return getattr(writer, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

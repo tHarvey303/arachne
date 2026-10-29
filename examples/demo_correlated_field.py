@@ -33,7 +33,10 @@ Emulator and PSFs:
                     PSFs, 0.03"/px, used as is); default Gaussian PSFs with
                     approximate NIRCam FWHMs.
 
-Outputs in ``--outdir``: ``metrics.json``, ``maps.npz`` and ``figures/``.
+Outputs in ``--outdir``: ``metrics.json``, ``maps.npz``, ``figures/`` and a results bundle
+``results.h5`` (``arachne.results``: data, MAP and thinned posterior draws of the model cubes,
+parameter maps and scalars, truth and regions; open it with ``arachne.load_bundle``, check it
+with ``python -m arachne.results info results.h5``).  ``--no-bundle`` skips it.
 
 Example:
     python examples/demo_correlated_field.py --truth prior --quick
@@ -67,6 +70,8 @@ from arachne import (  # noqa: E402
     mass_map_from_image,
     wiener_mass_map,
 )
+from arachne.results import Region, TruthContent, write_content  # noqa: E402
+from arachne.results.writer import content_from_forward_model  # noqa: E402
 
 PIXEL_SCALE = 0.03
 REDSHIFT = 2.0
@@ -258,7 +263,7 @@ def disk_mass_map(n, log_mtot=10.0, rd_px=7.0):
 
 
 def spiral_truth(n, rng):
-    """Face-on spiral: maps (4, n, n) in FIELDS order."""
+    """Face-on spiral: maps (5, n, n) in FIELDS order and the arm weight ``win * arm`` (n, n)."""
     yy, xx = np.mgrid[0:n, 0:n] - (n - 1) / 2.0
     r, phi = np.hypot(yy, xx), np.arctan2(yy, xx)
     pitch = np.deg2rad(18.0)
@@ -281,7 +286,7 @@ def spiral_truth(n, rng):
     # Age structure: old bulge and inter-arm (less SF 64-411 Myr than 0.4-2.6 Gyr ago),
     # younger arms and clumps.
     r3 = -0.8 + 1.3 * win * arm + 1.0 * np.clip(clumps, 0, 1) - 0.5 * np.exp(-r / (0.06 * n))
-    return np.stack([logm, av, logz, r0, r3]).astype(np.float32)
+    return np.stack([logm, av, logz, r0, r3]).astype(np.float32), win * arm
 
 
 def build_model(n, mass_mean, mean_values=None, corr_scale=1.0, nu=1.5, fixed=None,
@@ -667,6 +672,100 @@ def plot_laplace(truth, med, std, info, weight, path):
 
 
 # ---------------------------------------------------------------------------
+# Results bundle
+# ---------------------------------------------------------------------------
+
+
+def truth_scalars(model, scalar_names, truth_maps, prior_truth):
+    """Truth values of the bundle scalars, by name (NaN where the truth has none).
+
+    Globals come from TRUTH_GLOBALS.  For the prior truth the hyperparameters are the truth
+    model's fixed values and the couplings are 0; the spiral has neither.
+    """
+    out = []
+    for name in scalar_names:
+        if name == "total_log_mass":
+            out.append(float(np.log10(np.sum(10.0 ** truth_maps[FIELDS.index("log_mass")]))))
+        elif name in TRUTH_GLOBALS:
+            out.append(float(TRUTH_GLOBALS[name]))
+        elif prior_truth and name.startswith("amplitude["):
+            out.append(float(AMPLITUDES[name[len("amplitude[") : -1]]))
+        elif prior_truth and name.startswith("corr_length["):
+            out.append(float(CORR_LENGTHS[name[len("corr_length[") : -1]]))
+        elif prior_truth and name.startswith("c["):
+            out.append(0.0)
+        else:
+            out.append(float("nan"))
+    return np.asarray(out)
+
+
+def demo_regions(truth_maps, arm_weight=None):
+    """``galaxy`` (the metrics selection), plus ``arms``/``interarm`` for the spiral."""
+    weight = 10.0 ** truth_maps[0]
+    galaxy = weight > 0.02 * weight.max()
+    regions = {"galaxy": Region.from_mask(galaxy, name="galaxy")}
+    if arm_weight is not None:
+        arms = galaxy & (arm_weight > 0.3)
+        regions["arms"] = Region.from_mask(arms, name="arms")
+        # disk outside the arms (arm_weight is zero in the bulge, so exclude r < 3 px there)
+        n = truth_maps.shape[-1]
+        yy, xx = np.mgrid[0:n, 0:n] - (n - 1) / 2.0
+        regions["interarm"] = Region.from_mask(
+            galaxy & (arm_weight < 0.05) & (np.hypot(yy, xx) > 3.0), name="interarm"
+        )
+    return regions
+
+
+def write_demo_bundle(path, fm, model, *, theta_map, samples, source, n_chains, args,
+                      truth, truth_maps, regions, prior_std, metrics, diagnostics):  # fmt: skip
+    """``content_from_forward_model`` + truth scalars + ``write_content``; returns the path."""
+    t0 = time.time()
+    content = content_from_forward_model(
+        fm,
+        theta_map=theta_map,
+        samples=samples,
+        posterior_source=source,
+        n_draws=args.bundle_draws,
+        n_chains=n_chains,
+        store_intrinsic=not args.bundle_no_intrinsic,
+        truth=truth,
+        prior_std_maps=prior_std,
+        regions=regions,
+        metrics=metrics,
+        diagnostics=diagnostics,
+        pivot_um=PIVOT_UM,
+        labels=LABELS,
+        units={
+            "log_mass": "dex",
+            "Av": "mag",
+            "log10metallicity": "dex",
+            "total_log_mass": "dex",
+        },  # fmt: skip
+        title=path.parent.name if path.name == "results.h5" else f"{path.parent.name} {source}",
+    )
+    content.truth.scalars = truth_scalars(
+        model, content.scalar_names, truth_maps, prior_truth=args.truth == "prior"
+    )
+    write_content(path, content, mantissa_bits=args.bundle_mantissa_bits, overwrite=True)
+    size = path.stat().st_size / 2**20
+    print(f"bundle {path} ({content.n_draws} draws, {size:.1f} MiB, {time.time() - t0:.1f} s)")
+    return path
+
+
+def bundle_plots(path, outdir):
+    """``arachne.viz.save_all`` of the bundle into ``outdir`` (skipped if viz is missing)."""
+    try:
+        from arachne.viz import save_all
+    except ImportError as err:
+        print(f"--bundle-plots: arachne.viz unavailable ({err}); skipped")
+        return
+    from arachne.results import load_bundle
+
+    files = save_all(load_bundle(path), outdir)
+    print(f"bundle plots: {len(files)} files in {outdir}")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -718,6 +817,16 @@ def main():
     ap.add_argument("--nuts-samples", type=int, default=500)
     ap.add_argument("--nuts-chains", type=int, default=4)
     ap.add_argument("--hess-chunk", type=int, default=32, help="HVP rows per Hessian batch")
+    ap.add_argument("--no-bundle", action="store_true", help="do not write results.h5")
+    ap.add_argument("--bundle-draws", type=int, default=200, help="posterior draws in the bundle")
+    ap.add_argument("--bundle-mantissa-bits", type=int, default=None,
+                    help="round bundle draws to N mantissa bits (12: ~1e-4)")  # fmt: skip
+    ap.add_argument("--bundle-no-intrinsic", action="store_true",
+                    help="omit the unconvolved model cubes from the bundle")  # fmt: skip
+    ap.add_argument("--bundle-all", action="store_true",
+                    help="also write results_laplace.h5 when NUTS ran")  # fmt: skip
+    ap.add_argument("--bundle-plots", action="store_true",
+                    help="arachne.viz.save_all into figures/bundle/")  # fmt: skip
     args = ap.parse_args()
     set_bands(args.bands)
     if args.float64:
@@ -735,13 +844,14 @@ def main():
     # ----- truth
     disk = disk_mass_map(n, log_mtot=10.0, rd_px=0.11 * n)
     truth_model = build_model(n, disk, fixed=FIXED_TRUTH)
+    arm_weight = None
     if args.truth == "prior":
         theta_truth = truth_model.sample_prior(jax.random.PRNGKey(args.seed), 1)[0]
         theta_truth = theta_truth.at[: truth_model.n_fields].set(0.0)  # around the means
         truth_maps = np.asarray(truth_model.field_maps(theta_truth))
         render_model = truth_model
     else:
-        truth_maps = spiral_truth(n, rng)
+        truth_maps, arm_weight = spiral_truth(n, rng)
         render_model = FixedMapsModel(truth_maps, truth_model)
         theta_truth = truth_model.initial_theta()
     obs, clean, sigma = make_observation(emulator, psf, render_model, theta_truth, args.snr, rng)
@@ -803,16 +913,15 @@ def main():
         metrics["neg_log_post_truth_under_truth_model"] = float(
             -ForwardModel.build(obs, psf, truth_model, emulator).log_posterior(theta_truth)
         )
-    post = None
+    post = nuts = pstd_model = None
     if args.laplace:
         if not args.float64:
             print("WARNING: --laplace without --float64; the Hessian will be float32-noisy")
         post = laplace_posterior(fm, model, res.theta, args.n_laplace, args.hess_chunk,
                                  jax.random.PRNGKey(args.seed + 100))  # fmt: skip
         post["maps"] = in_fields_order(model, post["maps"])
-        pstd = in_fields_order(
-            model, prior_map_std(model, 400, jax.random.PRNGKey(args.seed + 200))
-        )
+        pstd_model = prior_map_std(model, 400, jax.random.PRNGKey(args.seed + 200))
+        pstd = in_fields_order(model, pstd_model)
         pm, med, std, info = posterior_metrics(truth_maps, post["maps"], pstd, weight)
         metrics["laplace"] = {
             k: v for k, v in post.items() if k not in ("theta", "maps", "chol", "thetas")
@@ -847,6 +956,51 @@ def main():
              theta_map=np.asarray(res.theta), fields=np.array(FIELDS))  # fmt: skip
     plot_maps(truth_maps, start_maps, fit_maps, weight, outdir / "figures" / "maps.png")
     plot_images(obs, model_img, sigma, outdir / "figures" / "images.png")
+
+    if not args.no_bundle:
+        try:
+            to_model = [FIELDS.index(f) for f in model.field_names]
+            truth = TruthContent(
+                convolved=clean,
+                intrinsic=np.asarray(render_model.model_image(theta_truth, emulator, (n, n))),
+                param_maps=np.asarray(truth_maps)[to_model],
+            )
+            common = dict(fm=fm, model=model, args=args, truth=truth, truth_maps=truth_maps,
+                          regions=demo_regions(truth_maps, arm_weight), prior_std=pstd_model,
+                          metrics=metrics)  # fmt: skip
+            laplace_kw = dict(
+                theta_map=post["theta"] if post else None,
+                samples=post["thetas"] if post else None,
+                source="laplace",
+                n_chains=None,
+                diagnostics={
+                    "log_evidence_laplace": post["log_evidence_laplace"] if post else None
+                },
+            )
+            if nuts is not None:
+                nm = metrics["nuts"]
+                diag = {k: nm[k] for k in ("max_rhat", "frac_rhat_gt_1.01", "min_ess",
+                                            "median_ess")}  # fmt: skip
+                diag["log_evidence_laplace"] = post["log_evidence_laplace"]
+                path = write_demo_bundle(outdir / "results.h5", theta_map=post["theta"],
+                                         samples=nuts["theta_samples"], source="nuts",
+                                         n_chains=nuts["n_chains"], diagnostics=diag,
+                                         **common)  # fmt: skip
+                if args.bundle_all:
+                    write_demo_bundle(outdir / "results_laplace.h5", **laplace_kw, **common)
+            elif post is not None:
+                path = write_demo_bundle(outdir / "results.h5", **laplace_kw, **common)
+            else:
+                path = write_demo_bundle(outdir / "results.h5", theta_map=res.theta,
+                                         samples=None, source="map", n_chains=None,
+                                         diagnostics={}, **common)  # fmt: skip
+            if args.bundle_plots:
+                bundle_plots(path, outdir / "figures" / "bundle")
+        except Exception:  # noqa: BLE001 - never lose a long run's other outputs
+            import traceback
+
+            traceback.print_exc()
+            print("WARNING: writing the results bundle failed (see traceback above)")
 
     print(f"MAP in {runtime:.0f} s ({res.n_steps} steps); chi2_red = {metrics['chi2_red_map']:.3f}")
     for name in FIELDS:

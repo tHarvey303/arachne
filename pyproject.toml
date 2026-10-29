@@ -55,7 +55,9 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["ruff==0.11.7", "pre-commit", "nb-clean"]
-test = ["pytest", "ruff==0.11.7"]
+test = ["pytest", "ruff==0.11.7", "bokeh>=3.4,<4"]  # so CI runs the GUI smoke tests
+gui = ["bokeh>=3.4,<4"]
+gui-jupyter = ["bokeh>=3.4,<4", "panel>=1.4"]
 docs = [
     "sphinx==7.4.7",
     "furo",
@@ -63,6 +65,11 @@ docs = [
     "nbsphinx",
     "sphinx-copybutton",
 ]
+
+[project.scripts]
+arachne-gui = "arachne.gui.cli:main"
+arachne-plots = "arachne.viz.cli:main"
+arachne-bundle = "arachne.results.cli:main"
 
 [project.urls]
 "Homepage" = "https://github.com/arachne-project/arachne"

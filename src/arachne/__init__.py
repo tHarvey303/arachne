@@ -61,6 +61,15 @@ from arachne.likelihood.gaussian import GaussianLikelihood
 from arachne.priors.physical import IndependentUniformPrior, LogNormalPrior
 from arachne.priors.spatial import GradientPenaltyPrior, TotalVariationPrior
 from arachne.psf.convolution import PSFConvolver
+from arachne.results import (  # numpy/h5py only
+    Region,
+    RegionSED,
+    ResultsBundle,
+    load_bundle,
+    region_sed,
+    total_sed,
+)
+from arachne.results.writer import write_bundle
 from arachne.spatial.additive import AdditiveComponentModel
 from arachne.spatial.base import SpatialModel
 from arachne.spatial.correlated_field import (
@@ -162,4 +171,11 @@ __all__ = [
     "get_profile",
     "render_on_grid",
     "sersic_b",
+    "ResultsBundle",
+    "load_bundle",
+    "write_bundle",
+    "Region",
+    "RegionSED",
+    "region_sed",
+    "total_sed",
 ]

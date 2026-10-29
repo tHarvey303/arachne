@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import importlib.util
 import json
 
 import h5py
@@ -362,13 +361,27 @@ def test_metadata_helpers():
 
 
 def test_lazy_writer_attribute():
-    """write_bundle is lazy and fails clearly until writer.py exists."""
+    """write_bundle resolves lazily; unknown names raise AttributeError."""
     import arachne.results as results
 
-    if importlib.util.find_spec("arachne.results.writer") is None:
-        with pytest.raises(ImportError, match="writer"):
-            results.write_bundle  # noqa: B018
-    else:
-        assert callable(results.write_bundle)
+    assert callable(results.write_bundle)
     with pytest.raises(AttributeError):
         results.no_such_name  # noqa: B018
+
+
+def test_cli_info_and_validate(tmp_path, capsys):
+    """``arachne-bundle info`` / ``validate`` (python -m arachne.results)."""
+    from arachne.results.cli import main
+
+    good = make_synthetic_bundle(tmp_path / "good.h5", "additive")
+    assert main(["info", str(good)]) == 0
+    assert "AdditiveComponentModel" in capsys.readouterr().out
+    assert main(["info", str(good), "--json"]) == 0
+    info = json.loads(capsys.readouterr().out)
+    assert info["components"]["n"] == 2 and info["n_draws"] == 20
+    bad = make_synthetic_bundle(tmp_path / "bad.h5", "field")
+    with h5py.File(bad, "a") as f:
+        del f["model/convolved/map"]
+    assert main(["validate", str(good), str(bad)]) == 1
+    out = capsys.readouterr().out
+    assert f"OK {good}" in out and f"INVALID {bad}" in out
