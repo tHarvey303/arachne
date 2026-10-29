@@ -64,6 +64,7 @@ chol)``, and move between the two coordinate systems with
 from __future__ import annotations
 
 import dataclasses
+import time
 from typing import Any, Callable
 
 import jax
@@ -134,16 +135,22 @@ def make_hessian_fn(fm: Any, chunk_size: int | None = None) -> Callable[[Any], n
 
     chunk = int(chunk_size)
     grad_fn = jax.grad(lambda t: -fm.log_posterior(t))
-    hvp_rows = jax.jit(
-        jax.vmap(lambda t, v: jax.jvp(grad_fn, (t,), (v,))[1], in_axes=(None, 0))
-    )
+    hvp_rows = jax.jit(jax.vmap(lambda t, v: jax.jvp(grad_fn, (t,), (v,))[1], in_axes=(None, 0)))
 
     def hessian_at_chunked(theta) -> np.ndarray:
         dtype = _model_dtype(fm)
         theta = jnp.asarray(theta, dtype)
         d = theta.shape[0]
         h = np.empty((d, d), dtype=np.float64)
-        for start in range(0, d, chunk):
+        n_chunks = -(-d // chunk)
+        t_start = time.time()
+        for i_chunk, start in enumerate(range(0, d, chunk)):
+            if i_chunk and (i_chunk % max(1, n_chunks // 10) == 0):
+                elapsed = time.time() - t_start
+                logger.info(
+                    f"Hessian: {i_chunk}/{n_chunks} chunks, {elapsed:.0f} s, "
+                    f"~{elapsed * (n_chunks / i_chunk - 1):.0f} s left"
+                )
             rows = np.arange(start, start + chunk)
             basis = np.zeros((chunk, d))
             valid = rows < d

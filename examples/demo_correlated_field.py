@@ -403,6 +403,8 @@ def newton_cg(fm, theta, max_iter=30, cg_iter=100, tol=0.05, mu0=1.0):
         f_new = float(neg_lp(cand))
         gnorm = float(jnp.linalg.norm(g))
         history.append({"iter": it, "neg_log_post": f, "grad_norm": gnorm, "mu": mu})
+        print(f"  Newton-CG {it}: -log_post {f:.3f} -> {f_new:.3f}  |grad| {gnorm:.3g}  "
+              f"mu {mu:.2g}", flush=True)  # fmt: skip
         if np.isfinite(f_new) and f_new < f:
             gain = f - f_new
             theta, f, mu = cand, f_new, max(mu / 3.0, 1e-6)
