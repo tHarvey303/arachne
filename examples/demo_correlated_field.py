@@ -113,7 +113,7 @@ PARAM_BOUNDS = {
     **{f"logsfr_ratio_{i}": (-10.0, 10.0) for i in range(5)},
 }  # fmt: skip
 # Neutral values: the prior centres used for the blind start (never the truth).
-NEUTRAL = {"Av": 0.5, "log10metallicity": -2.5, "logsfr_ratio_0": 0.0, "logsfr_ratio_3": 0.0}
+NEUTRAL = {"Av": 0.5, "log10metallicity": -2.5, **{f"logsfr_ratio_{i}": 0.0 for i in range(5)}}
 NEUTRAL_GLOBALS = {
     "slope": 0.0, "fesc_lya": 0.2, "dust_bump_amplitude": 1.0,
     **{f"logsfr_ratio_{i}": 0.0 for i in range(5)},
@@ -136,15 +136,15 @@ GLOBAL_PRIORS = {
 # Prior hyperparameters: break scale in px, rms in parameter units.
 CORR_LENGTHS = {
     "log_mass": 3.0, "Av": 5.0, "log10metallicity": 12.0, "logsfr_ratio_0": 4.0,
-    "logsfr_ratio_3": 6.0,
+    "logsfr_ratio_1": 4.0, "logsfr_ratio_2": 5.0, "logsfr_ratio_3": 6.0, "logsfr_ratio_4": 8.0,
 }  # fmt: skip
 AMPLITUDES = {
-    "log_mass": 0.25, "Av": 0.3, "log10metallicity": 0.15, "logsfr_ratio_0": 0.5,
-    "logsfr_ratio_3": 0.5,
+    "log_mass": 0.25, "Av": 0.3, "log10metallicity": 0.15,
+    **{f"logsfr_ratio_{i}": 0.5 for i in range(5)},
 }  # fmt: skip
 LEVEL_SIGMAS = {
-    "log_mass": 1.0, "Av": 1.0, "log10metallicity": 0.5, "logsfr_ratio_0": 1.0,
-    "logsfr_ratio_3": 1.0,
+    "log_mass": 1.0, "Av": 1.0, "log10metallicity": 0.5,
+    **{f"logsfr_ratio_{i}": 1.0 for i in range(5)},
 }  # fmt: skip
 LABELS = {
     "log_mass": r"$\log M_*$ / px",
@@ -152,6 +152,9 @@ LABELS = {
     "log10metallicity": r"$\log Z$",
     "logsfr_ratio_0": r"logsfr_ratio_0 (0-3 / 3-10 Myr)",
     "logsfr_ratio_3": r"logsfr_ratio_3 (64-411 Myr / 0.4-2.6 Gyr)",
+    "logsfr_ratio_1": r"logsfr_ratio_1 (3-10 / 10-64 Myr)",
+    "logsfr_ratio_2": r"logsfr_ratio_2 (10-64 / 64-411 Myr)",
+    "logsfr_ratio_4": r"logsfr_ratio_4 (0.4-2.6 / 2.6-3.1 Gyr)",
 }
 
 
@@ -161,6 +164,25 @@ LABELS = {
 FIELDS = ["log_mass", "Av", "log10metallicity", "logsfr_ratio_0", "logsfr_ratio_3"]
 FIXED = {"redshift": REDSHIFT}
 FIXED_TRUTH = {"redshift": REDSHIFT, **TRUTH_GLOBALS}
+SFH_SETUPS = ("map03", "fixed_truth", "map_all")
+
+
+def set_sfh(name):
+    """SFH setup (module globals FIELDS, FIXED, FIXED_TRUTH).
+
+    ``map03``: ratios 0 and 3 mapped, 1/2/4 free globals.  ``fixed_truth``: as map03 but the
+    fit holds ratios 1/2/4 at their true values (diagnostic for the bin-trading degeneracy).
+    ``map_all``: every ratio mapped; the truths of 1/2/4 are fields around TRUTH_GLOBALS
+    (constant maps for the spiral).
+    """
+    global FIELDS, FIXED, FIXED_TRUTH
+    ratios = [0, 1, 2, 3, 4] if name == "map_all" else [0, 3]
+    FIELDS = ["log_mass", "Av", "log10metallicity"] + [f"logsfr_ratio_{i}" for i in ratios]
+    FIXED = {"redshift": REDSHIFT}
+    if name == "fixed_truth":
+        FIXED.update({k: v for k, v in TRUTH_GLOBALS.items() if k.startswith("logsfr_ratio")})
+    FIXED_TRUTH = {"redshift": REDSHIFT,
+                   **{k: v for k, v in TRUTH_GLOBALS.items() if k not in FIELDS}}  # fmt: skip
 
 
 # ---------------------------------------------------------------------------
@@ -268,7 +290,10 @@ def disk_mass_map(n, log_mtot=10.0, rd_px=7.0):
 
 
 def spiral_truth(n, rng):
-    """Face-on spiral: maps (5, n, n) in FIELDS order and the arm weight ``win * arm`` (n, n)."""
+    """Face-on spiral: maps (len(FIELDS), n, n) in FIELDS order and the arm weight (n, n).
+
+    Mapped ratios other than 0 and 3 are constant at their TRUTH_GLOBALS values.
+    """
     yy, xx = np.mgrid[0:n, 0:n] - (n - 1) / 2.0
     r, phi = np.hypot(yy, xx), np.arctan2(yy, xx)
     pitch = np.deg2rad(18.0)
@@ -291,7 +316,10 @@ def spiral_truth(n, rng):
     # Age structure: old bulge and inter-arm (less SF 64-411 Myr than 0.4-2.6 Gyr ago),
     # younger arms and clumps.
     r3 = -0.8 + 1.3 * win * arm + 1.0 * np.clip(clumps, 0, 1) - 0.5 * np.exp(-r / (0.06 * n))
-    return np.stack([logm, av, logz, r0, r3]).astype(np.float32), win * arm
+    maps = {"log_mass": logm, "Av": av, "log10metallicity": logz, "logsfr_ratio_0": r0,
+            "logsfr_ratio_3": r3}  # fmt: skip
+    stack = [maps[k] if k in maps else np.full_like(r, TRUTH_GLOBALS[k]) for k in FIELDS]
+    return np.stack(stack).astype(np.float32), win * arm
 
 
 def build_model(n, mass_mean, mean_values=None, corr_scale=1.0, nu=1.5, fixed=None,
@@ -825,6 +853,8 @@ def main():
     ap.add_argument("--honest", action="store_true",
                     help="offset the truth means from the fit's prior centres (HONEST_OFFSETS) "
                     "and draw the prior truth with different hyperparameters")  # fmt: skip
+    ap.add_argument("--sfh", choices=SFH_SETUPS, default="map03",
+                    help="which SFH ratios are mapped / free / fixed (see set_sfh)")  # fmt: skip
     ap.add_argument("--tag", default="", help="suffix for the output directory name")
     ap.add_argument("--laplace", action="store_true", help="Laplace posterior at the MAP")
     ap.add_argument("--n-laplace", type=int, default=400, help="Laplace samples")
@@ -845,6 +875,7 @@ def main():
                     help="arachne.viz.save_all into figures/bundle/")  # fmt: skip
     args = ap.parse_args()
     set_bands(args.bands)
+    set_sfh(args.sfh)
     if args.float64:
         jax.config.update("jax_enable_x64", True)
     if args.quick:
@@ -860,7 +891,7 @@ def main():
     # ----- truth
     disk = disk_mass_map(n, log_mtot=10.0, rd_px=0.11 * n)
     offsets = HONEST_OFFSETS if args.honest else {}
-    truth_means = {k: v + offsets.get(k, 0.0) for k, v in NEUTRAL.items()}
+    truth_means = {k: TRUTH_GLOBALS.get(k, v) + offsets.get(k, 0.0) for k, v in NEUTRAL.items()}
     truth_model = build_model(n, disk, mean_values=truth_means, fixed=FIXED_TRUTH,
                               **truth_hyper_scales(args))  # fmt: skip
     arm_weight = None
@@ -912,6 +943,8 @@ def main():
         "hyper": args.hyper,
         "couple": args.couple,
         "honest": args.honest,
+        "sfh": args.sfh,
+        "seed": args.seed,
         "truth_offsets": offsets,
         "truth_hyper_scales": truth_hyper_scales(args),
         "fields": FIELDS,
