@@ -327,9 +327,10 @@ def build_model(n, mass_mean, mean_values=None, corr_scale=1.0, nu=1.5, fixed=No
     """CorrelatedFieldMap with the demo's hyperparameters.
 
     ``corr_scale`` multiplies every correlation length; ``nu`` is the Matérn slope of the
-    non-mass fields (mass keeps 1.5); ``amp_scale`` multiplies every amplitude.  ``fixed`` defaults to FIXED (the fit); pass
-    FIXED_TRUTH for the truth model.  ``hyper`` fits amplitude and correlation length of
-    every non-mass field (log-normal priors around the defaults); ``couple`` fits A_V's
+    non-mass fields (mass keeps 1.5); ``amp_scale`` multiplies every amplitude.  ``fixed``
+    defaults to FIXED (the fit); pass FIXED_TRUTH for the truth model.  ``hyper`` fits
+    amplitude and correlation length of every non-mass field (log-normal priors around the
+    defaults); ``couple`` fits A_V's
     response to the mass and SFH-ratio deviations (N(0, 0.5^2) each).
     """
     fixed = FIXED if fixed is None else fixed
@@ -815,7 +816,10 @@ def write_demo_bundle(path, fm, model, *, theta_map, samples, source, n_chains, 
         title=path.parent.name if path.name == "results.h5" else f"{path.parent.name} {source}",
     )
     content.truth.scalars = truth_scalars(
-        model, content.scalar_names, truth_maps, prior_truth=args.truth == "prior",
+        model,
+        content.scalar_names,
+        truth_maps,
+        prior_truth=args.truth == "prior",
         **truth_hyper_scales(args),
     )
     write_content(path, content, mantissa_bits=args.bundle_mantissa_bits, overwrite=True)
@@ -1051,9 +1055,7 @@ def main():
             mc["scalars"] = scalar_summary(model, nuts["theta_samples"], TRUTH_GLOBALS)
             mc["per_field"] = npm
             nmass = np.log10(np.sum(10.0 ** nuts["maps"][:, 0], axis=(1, 2)))
-            mc["total_log_mass_16_50_84"] = [
-                float(x) for x in np.percentile(nmass, [16, 50, 84])
-            ]
+            mc["total_log_mass_16_50_84"] = [float(x) for x in np.percentile(nmass, [16, 50, 84])]
             fig_path = outdir / "figures" / f"{args.sampler}.png"
             plot_laplace(truth_maps, nmed, nstd, ninfo, weight, fig_path)
             np.savez(outdir / f"{args.sampler}.npz", median=nmed, std=nstd, information=ninfo)
