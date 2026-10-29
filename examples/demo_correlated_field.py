@@ -644,6 +644,44 @@ def nuts_posterior(fm, model, theta, chol, key, n_warmup, n_samples, n_chains, m
     }
 
 
+def mclmc_posterior(fm, model, theta, chol, key, n_warmup, n_samples, n_chains, max_maps=1000):
+    """Whitened MCLMC: as ``nuts_posterior`` but blackjax MCLMC, one tuned run per chain.
+
+    Chains start at z ~ N(0, 0.3^2) around the mode; R-hat and ESS are computed in theta.
+    """
+    from arachne.inference.diagnostics import ess, split_rhat
+    from arachne.inference.laplace import WhitenedLogDensity
+    from arachne.inference.mclmc_sampler import MCLMCSampler
+
+    dtype = jnp.zeros(()).dtype
+    whitened = WhitenedLogDensity(fm, jnp.asarray(theta, dtype), jnp.asarray(chol, dtype))
+    sampler = MCLMCSampler(whitened, n_warmup=n_warmup, n_samples=n_samples)
+    t0 = time.time()
+    chains = []
+    for c, k in enumerate(jax.random.split(key, n_chains)):
+        k_init, k_run = jax.random.split(k)
+        z0 = 0.3 * jax.random.normal(k_init, (whitened.n_params,), dtype)
+        res = sampler.run(z0, k_run)
+        chains.append(np.asarray(jax.vmap(whitened.to_theta)(res.samples)))
+        print(f"MCLMC chain {c + 1}/{n_chains}: {time.time() - t0:.0f} s")
+    runtime = time.time() - t0
+    chains = np.stack(chains)
+    rhat, ess_ = split_rhat(chains), ess(chains)
+    samples = chains.reshape(-1, chains.shape[-1])
+    step = max(1, samples.shape[0] // max_maps)
+    maps = np.asarray(jax.lax.map(model.field_maps, jnp.asarray(samples[::step]), batch_size=32))
+    return {
+        "maps": maps,
+        "theta_samples": samples[::step],
+        "n_chains": n_chains,
+        "runtime_s": runtime,
+        "max_rhat": float(np.nanmax(rhat)),
+        "frac_rhat_gt_1.01": float(np.mean(rhat > 1.01)),
+        "min_ess": float(np.nanmin(ess_)),
+        "median_ess": float(np.nanmedian(ess_)),
+    }
+
+
 def prior_map_std(model, n, key):
     """Per-pixel prior std of each map's *local* structure (levels held at zero).
 
@@ -858,7 +896,11 @@ def main():
     ap.add_argument("--tag", default="", help="suffix for the output directory name")
     ap.add_argument("--laplace", action="store_true", help="Laplace posterior at the MAP")
     ap.add_argument("--n-laplace", type=int, default=400, help="Laplace samples")
-    ap.add_argument("--nuts", action="store_true", help="whitened NUTS after the Laplace step")
+    ap.add_argument("--nuts", action="store_true",
+                    help="whitened MCMC (--sampler) after the Laplace step")  # fmt: skip
+    ap.add_argument("--sampler", choices=["nuts", "mclmc"], default="nuts")
+    ap.add_argument("--mclmc-warmup", type=int, default=2000, help="MCLMC tuning steps")
+    ap.add_argument("--mclmc-samples", type=int, default=2000, help="MCLMC steps per chain")
     ap.add_argument("--nuts-warmup", type=int, default=1000)
     ap.add_argument("--nuts-samples", type=int, default=500)
     ap.add_argument("--nuts-chains", type=int, default=4)
@@ -993,20 +1035,28 @@ def main():
         np.savez(outdir / "laplace.npz", median=med, std=std, information=info,
                  theta=np.asarray(post["theta"]))  # fmt: skip
         if args.nuts:
-            nuts = nuts_posterior(fm, model, post["theta"], post["chol"],
-                                  jax.random.PRNGKey(args.seed + 300), args.nuts_warmup,
-                                  args.nuts_samples, args.nuts_chains)  # fmt: skip
+            if args.sampler == "mclmc":
+                nuts = mclmc_posterior(fm, model, post["theta"], post["chol"],
+                                       jax.random.PRNGKey(args.seed + 300), args.mclmc_warmup,
+                                       args.mclmc_samples, args.nuts_chains)  # fmt: skip
+            else:
+                nuts = nuts_posterior(fm, model, post["theta"], post["chol"],
+                                      jax.random.PRNGKey(args.seed + 300), args.nuts_warmup,
+                                      args.nuts_samples, args.nuts_chains)  # fmt: skip
             nuts["maps"] = in_fields_order(model, nuts["maps"])
             npm, nmed, nstd, ninfo = posterior_metrics(truth_maps, nuts["maps"], pstd, weight)
-            metrics["nuts"] = {k: v for k, v in nuts.items() if k not in ("maps", "theta_samples")}
-            metrics["nuts"]["scalars"] = scalar_summary(model, nuts["theta_samples"], TRUTH_GLOBALS)
-            metrics["nuts"]["per_field"] = npm
+            mc = metrics[args.sampler] = {
+                k: v for k, v in nuts.items() if k not in ("maps", "theta_samples")
+            }
+            mc["scalars"] = scalar_summary(model, nuts["theta_samples"], TRUTH_GLOBALS)
+            mc["per_field"] = npm
             nmass = np.log10(np.sum(10.0 ** nuts["maps"][:, 0], axis=(1, 2)))
-            metrics["nuts"]["total_log_mass_16_50_84"] = [
+            mc["total_log_mass_16_50_84"] = [
                 float(x) for x in np.percentile(nmass, [16, 50, 84])
             ]
-            plot_laplace(truth_maps, nmed, nstd, ninfo, weight, outdir / "figures" / "nuts.png")
-            np.savez(outdir / "nuts.npz", median=nmed, std=nstd, information=ninfo)
+            fig_path = outdir / "figures" / f"{args.sampler}.png"
+            plot_laplace(truth_maps, nmed, nstd, ninfo, weight, fig_path)
+            np.savez(outdir / f"{args.sampler}.npz", median=nmed, std=nstd, information=ninfo)
     (outdir / "metrics.json").write_text(json.dumps(metrics, indent=2))
     np.savez(outdir / "maps.npz", truth=truth_maps, start=start_maps, map=fit_maps,
              model_image=model_img, data=np.asarray(obs.flux), sigma=sigma,
@@ -1035,12 +1085,12 @@ def main():
                 },
             )
             if nuts is not None:
-                nm = metrics["nuts"]
+                nm = metrics[args.sampler]
                 diag = {k: nm[k] for k in ("max_rhat", "frac_rhat_gt_1.01", "min_ess",
                                             "median_ess")}  # fmt: skip
                 diag["log_evidence_laplace"] = post["log_evidence_laplace"]
                 path = write_demo_bundle(outdir / "results.h5", theta_map=post["theta"],
-                                         samples=nuts["theta_samples"], source="nuts",
+                                         samples=nuts["theta_samples"], source=args.sampler,
                                          n_chains=nuts["n_chains"], diagnostics=diag,
                                          **common)  # fmt: skip
                 if args.bundle_all:
@@ -1085,9 +1135,9 @@ def main():
         m16, m50, m84 = lp["total_log_mass_16_50_84"]
         print(f"  total log M* {m50:.3f} +{m84 - m50:.3f} -{m50 - m16:.3f} "
               f"(truth {metrics['total_log_mass_truth']:.3f})")  # fmt: skip
-    if "nuts" in metrics:
-        nm = metrics["nuts"]
-        print(f"NUTS: {nm['runtime_s']:.0f} s; max R-hat {nm['max_rhat']:.3f} "
+    if args.sampler in metrics:
+        nm = metrics[args.sampler]
+        print(f"{args.sampler.upper()}: {nm['runtime_s']:.0f} s; max R-hat {nm['max_rhat']:.3f} "
               f"({100 * nm['frac_rhat_gt_1.01']:.1f}% > 1.01); ESS min {nm['min_ess']:.0f}, "
               f"median {nm['median_ess']:.0f}")  # fmt: skip
         for name in FIELDS:
@@ -1096,7 +1146,7 @@ def main():
                   f"z_rms {q['z_rms']:.2f}  post std {q['median_post_std']:.3f}")  # fmt: skip
         m16, m50, m84 = nm["total_log_mass_16_50_84"]
         print(f"  total log M* {m50:.3f} +{m84 - m50:.3f} -{m50 - m16:.3f}")
-    for stage in ("laplace", "nuts"):
+    for stage in ("laplace", args.sampler):
         sc = metrics.get(stage, {}).get("scalars")
         if sc:
             print(f"{stage} scalars (16/50/84, truth):")
