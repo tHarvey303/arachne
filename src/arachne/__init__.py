@@ -63,6 +63,11 @@ from arachne.priors.spatial import GradientPenaltyPrior, TotalVariationPrior
 from arachne.psf.convolution import PSFConvolver
 from arachne.spatial.additive import AdditiveComponentModel
 from arachne.spatial.base import SpatialModel
+from arachne.spatial.correlated_field import (
+    CorrelatedFieldMap,
+    mass_map_from_image,
+    wiener_mass_map,
+)
 from arachne.spatial.gmm import GaussianMixtureSpatialModel
 from arachne.spatial.pixel_map import FreeFormPixelMap
 from arachne.spatial.profiles import (
@@ -144,6 +149,9 @@ __all__ = [
     "PSFConvolver",
     "SpatialModel",
     "AdditiveComponentModel",
+    "CorrelatedFieldMap",
+    "mass_map_from_image",
+    "wiener_mass_map",
     "GaussianMixtureSpatialModel",
     "FreeFormPixelMap",
     "Profile",

@@ -81,6 +81,28 @@ class TestHessian:
         h1 = hess_at(0.1 * jnp.ones(gmm_model.n_params))
         assert np.isfinite(h0).all() and np.isfinite(h1).all()
 
+    @pytest.mark.parametrize("chunk", [1, 4, 7])
+    def test_chunked_matches_analytic_float64(self, chunk):
+        """Chunked HVP rows reproduce an analytic non-quadratic Hessian exactly (ragged chunks)."""
+
+        class _Quartic:
+            def log_posterior(self, t):
+                return -(0.25 * jnp.sum(t**4) + 0.5 * jnp.sum(t[:-1] * t[1:]))
+
+        with jax.enable_x64(True):
+            theta = np.linspace(-1.0, 1.5, 10)
+            hess = make_hessian_fn(_Quartic(), chunk_size=chunk)(theta)
+        expect = np.diag(3.0 * theta**2) + 0.5 * (np.eye(10, k=1) + np.eye(10, k=-1))
+        np.testing.assert_allclose(hess, expect, rtol=1e-12, atol=1e-12)
+
+    def test_chunked_matches_dense_forward_model(self, forward_model, gmm_model):
+        """On a real float32 forward model the two routes agree to float32 round-off."""
+        theta = 0.1 * jnp.arange(gmm_model.n_params, dtype=jnp.float32) / gmm_model.n_params
+        dense = make_hessian_fn(forward_model)(theta)
+        chunked = make_hessian_fn(forward_model, chunk_size=5)(theta)
+        scale = np.abs(dense).max()
+        np.testing.assert_allclose(chunked, dense, rtol=0, atol=1e-2 * scale)
+
 
 # ---------------------------------------------------------------------------
 # Laplace covariance

@@ -246,16 +246,20 @@ class ParrotEmulatorV2(SPSEmulator):
             param_names = raw["param_names"].tolist()
             band_names = raw["band_names"].tolist()
             weights = bytes(raw["weights_bytes"])
-        dummy = cls(
-            param_names,
-            band_names,
-            cfg,
-            in_mean=np.zeros(cfg["n_in"], np.float32),
-            in_std=np.ones(cfg["n_in"], np.float32),
-            out_mean=np.zeros(cfg["n_out"], np.float32),
-            key=jax.random.PRNGKey(0),
-        )
-        loaded = eqx.tree_deserialise_leaves(io.BytesIO(weights), dummy)
+        # Checkpoints store float32 weights.  Build the template in float32 even when
+        # x64 is enabled, or ``tree_deserialise_leaves`` rejects the dtype mismatch.
+        # Under x64 the float32 weights simply promote against float64 inputs.
+        with jax.enable_x64(False):
+            dummy = cls(
+                param_names,
+                band_names,
+                cfg,
+                in_mean=np.zeros(cfg["n_in"], np.float32),
+                in_std=np.ones(cfg["n_in"], np.float32),
+                out_mean=np.zeros(cfg["n_out"], np.float32),
+                key=jax.random.PRNGKey(0),
+            )
+            loaded = eqx.tree_deserialise_leaves(io.BytesIO(weights), dummy)
         logger.info(f"ParrotEmulatorV2 loaded from {path}")
         return loaded
 

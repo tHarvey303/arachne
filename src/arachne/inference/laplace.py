@@ -96,33 +96,66 @@ def _model_dtype(fm: Any) -> Any:
     return jnp.float64 if jax.config.jax_enable_x64 else jnp.float32
 
 
-def make_hessian_fn(fm: Any) -> Callable[[Any], np.ndarray]:
+def make_hessian_fn(fm: Any, chunk_size: int | None = None) -> Callable[[Any], np.ndarray]:
     """Build a reusable ``theta -> Hessian of -log_posterior`` callable.
 
     ``jax.hessian`` re-traces its argument on every call and tracing a
     resolved forward model costs tens of seconds, so build this **once** per
     forward model and call it at as many points as needed.
 
+    ``jax.hessian`` also pushes all ``d`` tangent directions through the model
+    at once, which is fine for the ~60-parameter component models but exhausts
+    memory for high-dimensional models (e.g. a
+    :class:`~arachne.spatial.correlated_field.CorrelatedFieldMap` with
+    thousands of parameters and a per-pixel emulator).  With ``chunk_size``
+    set, the Hessian is assembled ``chunk_size`` rows at a time from vmapped
+    Hessian-vector products (forward-over-reverse), at the same total cost.
+
     Args:
         fm: Object exposing ``log_posterior(theta) -> scalar`` (a
             :class:`~arachne.forward_model.pipeline.ForwardModel`,
             a ``MultiResolutionForwardModel`` or a
             :class:`WhitenedLogDensity`).
+        chunk_size: Rows per batch of Hessian-vector products, or ``None``
+            for a single ``jax.hessian`` call.
 
     Returns:
         Callable mapping a parameter vector to the symmetrised Hessian of
         ``-log_posterior`` as a ``numpy`` float64 array of shape ``(d, d)``.
     """
-    jitted = jax.jit(jax.hessian(lambda t: -fm.log_posterior(t)))
+    if chunk_size is None:
+        jitted = jax.jit(jax.hessian(lambda t: -fm.log_posterior(t)))
 
-    def hessian_at(theta) -> np.ndarray:
-        h = np.asarray(jitted(jnp.asarray(theta, _model_dtype(fm))), dtype=np.float64)
+        def hessian_at(theta) -> np.ndarray:
+            h = np.asarray(jitted(jnp.asarray(theta, _model_dtype(fm))), dtype=np.float64)
+            return 0.5 * (h + h.T)
+
+        return hessian_at
+
+    chunk = int(chunk_size)
+    grad_fn = jax.grad(lambda t: -fm.log_posterior(t))
+    hvp_rows = jax.jit(
+        jax.vmap(lambda t, v: jax.jvp(grad_fn, (t,), (v,))[1], in_axes=(None, 0))
+    )
+
+    def hessian_at_chunked(theta) -> np.ndarray:
+        dtype = _model_dtype(fm)
+        theta = jnp.asarray(theta, dtype)
+        d = theta.shape[0]
+        h = np.empty((d, d), dtype=np.float64)
+        for start in range(0, d, chunk):
+            rows = np.arange(start, start + chunk)
+            basis = np.zeros((chunk, d))
+            valid = rows < d
+            basis[np.flatnonzero(valid), rows[valid]] = 1.0  # last batch zero-padded
+            block = np.asarray(hvp_rows(theta, jnp.asarray(basis, dtype)), dtype=np.float64)
+            h[rows[valid]] = block[valid]
         return 0.5 * (h + h.T)
 
-    return hessian_at
+    return hessian_at_chunked
 
 
-def hessian_neg_log_post(fm: Any, theta) -> np.ndarray:
+def hessian_neg_log_post(fm: Any, theta, chunk_size: int | None = None) -> np.ndarray:
     """Symmetrised Hessian of ``-log_posterior`` at ``theta``.
 
     Convenience wrapper around :func:`make_hessian_fn` for a single
@@ -131,11 +164,12 @@ def hessian_neg_log_post(fm: Any, theta) -> np.ndarray:
     Args:
         fm: Object exposing ``log_posterior(theta) -> scalar``.
         theta: Parameter vector of shape ``(d,)``, usually the MAP.
+        chunk_size: See :func:`make_hessian_fn`.
 
     Returns:
         ``numpy`` float64 array of shape ``(d, d)``.
     """
-    return make_hessian_fn(fm)(theta)
+    return make_hessian_fn(fm, chunk_size=chunk_size)(theta)
 
 
 def laplace_covariance(
