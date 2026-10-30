@@ -27,8 +27,11 @@ progress" and "arachne TODO" §1b.
    the modes within 10 nats of the best (`run_whitened_nuts(initial_positions=...)`), so R-hat
    can reveal modes that do not mix instead of hiding them.
 
-SFH prior: `--sfh-prior bursty` (default) puts Student-t(ν = 2, σ = 1) on every
-`logsfr_ratio`. Free globals get the density directly; mapped ratios get it as their per-pixel
+SFH prior: `--sfh-prior continuity` (default) puts Student-t(ν = 2, σ = 0.3) on every
+`logsfr_ratio`; `bursty` uses σ = 1 (the distribution the production emulator was trained on:
+its arsinh-ratio inputs have std 1.10, matching Student-t(2, 1)). Bursty was the default
+briefly: with heavy tails a whole map's level can run to the bound at little prior cost (spiral
+ratio_0 → −9, χ²_red 1.028 vs 0.996), and the optimiser cannot leave that basin. Free globals get the density directly; mapped ratios get it as their per-pixel
 marginal through a Gaussian copula (`CorrelatedFieldMap(field_marginals=...)`), so the prior on θ
 stays N(0, I) and the whitening and evidence stay exact.
 

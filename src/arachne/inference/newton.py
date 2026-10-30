@@ -156,6 +156,8 @@ class NewtonResult:
     def summary(self) -> str:
         """One-line description."""
         h0, h1 = self.history[0], self.history[-1]
+        # The trailing bookkeeping record (cg_exit "-") has no prediction; report the last step's.
+        h_pred = [h for h in self.history if h["cg_exit"] != "-"][-1]
         exits = [h["cg_exit"] for h in self.history]
         n_neg = sum(e == "negative_curvature" for e in exits)
         return (
@@ -163,7 +165,7 @@ class NewtonResult:
             f"({self.n_hvp} HVPs, {self.runtime_s:.0f} s); -log_post "
             f"{h0['neg_log_post']:.3f} -> {self.neg_log_post:.3f}; |grad| "
             f"{h0['grad_norm']:.3g} -> {h1['grad_norm']:.3g}; last predicted decrease "
-            f"{h1['predicted']:.3g}; negative curvature met in {n_neg} steps"
+            f"{h_pred['predicted']:.3g}; negative curvature met in {n_neg} steps"
         )
 
 

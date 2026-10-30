@@ -135,7 +135,11 @@ HONEST_AMP_SCALE = 1.4
 # their per-pixel marginal through a Gaussian copula (CorrelatedFieldMap field_marginals).
 # "legacy": continuity on the globals, Gaussian maps (the runs before 2026-10-30).
 SFH_PRIOR_SCALES = {"bursty": 1.0, "continuity": 0.3, "legacy": 0.3}
-SFH_PRIOR = "bursty"
+# The default is continuity: under bursty the heavy tail lets a whole map's level run to the
+# bound (spiral ratio_0 -> -9, chi2_red 1.028 vs 0.996; runs/2026-10-30_optimizer).  The
+# production emulator was trained on bursty continuity (arsinh-input std 1.10), so both priors
+# stay inside its training domain.
+SFH_PRIOR = "continuity"
 # Prior hyperparameters: break scale in px, rms in parameter units.
 CORR_LENGTHS = {
     "log_mass": 3.0, "Av": 5.0, "log10metallicity": 12.0, "logsfr_ratio_0": 4.0,
@@ -574,7 +578,7 @@ def polish_mode(fm, theta, chunk, precond="dense", max_iter=100, tol=1e-2, key=N
     return res
 
 
-def laplace_posterior(fm, model, theta_map, n_samples, chunk, key, max_newton=100,
+def laplace_posterior(fm, model, theta_map, n_samples, chunk, key, max_newton=300,
                       precond="dense", max_escapes=3):  # fmt: skip
     """Trust-region Newton from the MAP to the mode, one full Hessian there, Gaussian samples.
 
@@ -994,12 +998,12 @@ def main():
     ap.add_argument("--hess-chunk", type=int, default=32, help="HVP rows per Hessian batch")
     ap.add_argument("--precond", choices=["dense", "diag", "none"], default="dense",
                     help="trust-region Newton preconditioner (see polish_mode)")  # fmt: skip
-    ap.add_argument("--max-newton", type=int, default=100, help="trust-region Newton iterations")
+    ap.add_argument("--max-newton", type=int, default=300, help="trust-region Newton iterations")
     ap.add_argument("--n-starts", type=int, default=1,
                     help="optimiser starts: the neutral start plus prior redraws of the non-mass "
                     "levels and globals; with --laplace the best Laplace evidence is kept and "
                     "MCMC chains start at the modes within 10 nats of it")  # fmt: skip
-    ap.add_argument("--sfh-prior", choices=sorted(SFH_PRIOR_SCALES), default="bursty",
+    ap.add_argument("--sfh-prior", choices=sorted(SFH_PRIOR_SCALES), default="continuity",
                     help="SFH-ratio prior: bursty / continuity Student-t (maps via a copula), "
                     "or legacy (continuity globals, Gaussian maps)")  # fmt: skip
     ap.add_argument("--no-bundle", action="store_true", help="do not write results.h5")
