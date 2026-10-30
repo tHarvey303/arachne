@@ -8,6 +8,7 @@ import pytest
 from arachne.inference.newton import (
     dense_preconditioner,
     diagonal_preconditioner,
+    negative_curvature_step,
     trust_region_newton,
 )
 
@@ -112,3 +113,22 @@ def test_preconditioner_norm(kind):
         A = np.diag(np.diag(A))
     p = jnp.asarray(rng.normal(size=6))
     assert M.norm(p) == pytest.approx(float(np.sqrt(p @ A @ p)), rel=1e-10)
+
+
+def test_negative_curvature_step_leaves_saddle():
+    """From an exact saddle, the eigenvector search finds lower ground; at a minimum it does not."""
+
+    def f(x):
+        return 0.25 * x[0] ** 4 - 0.5 * x[0] ** 2 + 0.5 * jnp.sum(x[1:] ** 2)
+
+    x0 = jnp.zeros(3)
+    evals, evecs = jnp.linalg.eigh(jax.hessian(f)(x0))
+    cand, gain, n_neg = negative_curvature_step(f, x0, evals, evecs)
+    assert n_neg == 1
+    assert gain > 0.1
+    res = trust_region_newton(f, cand, tol=1e-12, verbose=False)
+    assert abs(abs(float(res.theta[0])) - 1.0) < 1e-4
+    evals, evecs = jnp.linalg.eigh(jax.hessian(f)(res.theta))
+    same, gain, n_neg = negative_curvature_step(f, res.theta, evals, evecs)
+    assert n_neg == 0 and gain == 0.0
+    np.testing.assert_array_equal(same, res.theta)

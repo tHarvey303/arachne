@@ -18,6 +18,11 @@ replaces that with the standard remedy:
   (:func:`diagonal_preconditioner`, Hutchinson estimate, for problems too large
   for a dense Hessian).  The trust region is measured in the ``M`` norm, i.e. in
   units of the local posterior width.
+* **Saddle check**: a CG solve that stops early on an interior step never explores
+  weak directions of negative curvature, so a "converged" point can still be a
+  saddle.  Whoever computes the dense Hessian there (the Laplace step does) should
+  pass its eigen-decomposition to :func:`negative_curvature_step` and re-polish from
+  the point it returns if that lowers ``-log p``.
 * **Convergence** is declared when the CG step is interior (no negative
   curvature met, inside the trust region) and the *predicted* decrease of
   ``-log p`` (the Newton decrement for an exact solve) is below ``tol`` nats.  A
@@ -45,6 +50,7 @@ __all__ = [
     "Preconditioner",
     "dense_preconditioner",
     "diagonal_preconditioner",
+    "negative_curvature_step",
     "trust_region_newton",
 ]
 
@@ -364,3 +370,53 @@ def trust_region_newton(
         n_iter=len([h for h in history if h["cg_exit"] != "-"]), n_hvp=n_hvp,
         history=history, runtime_s=time.time() - t_start,
     )  # fmt: skip
+
+
+def negative_curvature_step(
+    neg_log_post: Callable,
+    theta,
+    evals,
+    evecs,
+    *,
+    n_dirs: int = 4,
+    scales: tuple = (0.5, 1.0, 2.0, 4.0, 8.0, 16.0),
+    rel_tol: float = 1e-9,
+) -> tuple[jnp.ndarray, float, int]:
+    """Search along the most negative-curvature eigenvectors of the Hessian at ``theta``.
+
+    For each of the (up to ``n_dirs``) eigenvalues ``lambda < -rel_tol * max |lambda|``,
+    tries ``theta +- a v / sqrt(|lambda|)`` for every ``a`` in ``scales`` (a step of ``a``
+    curvature lengths) and keeps the lowest ``-log p``.
+
+    Args:
+        neg_log_post: ``theta -> -log p``.
+        theta: Point where the Hessian was evaluated (typically a converged
+            :func:`trust_region_newton` result).
+        evals: Ascending eigenvalues of the Hessian there.
+        evecs: Matching eigenvectors (columns).
+        n_dirs: Most negative directions to try.
+        scales: Step lengths in units of ``1 / sqrt(|lambda|)``.
+        rel_tol: Eigenvalues above ``-rel_tol * max |lambda|`` count as zero.
+
+    Returns:
+        ``(theta_best, gain, n_negative)``: the best point found (``theta`` itself if
+        nothing improves), the decrease of ``-log p`` there, and the number of
+        eigenvalues counted as negative.
+    """
+    f = jax.jit(neg_log_post)
+    theta = jnp.asarray(theta)
+    evals = np.asarray(evals)
+    thresh = -rel_tol * float(np.abs(evals).max())
+    neg = np.flatnonzero(evals < thresh)
+    f0 = float(f(theta))
+    best, best_f = theta, f0
+    for j in neg[:n_dirs]:
+        v = jnp.asarray(np.asarray(evecs)[:, j], theta.dtype)
+        base = 1.0 / np.sqrt(abs(float(evals[j])))
+        for sign in (1.0, -1.0):
+            for a in scales:
+                cand = theta + (sign * a * base) * v
+                fc = float(f(cand))
+                if np.isfinite(fc) and fc < best_f:
+                    best, best_f = cand, fc
+    return best, f0 - best_f, int(neg.size)

@@ -533,12 +533,13 @@ def plot_images(obs, model_img, sigma, path, show=("F090W", "F200W", "F444W")):
 # ---------------------------------------------------------------------------
 
 
-def polish_mode(fm, theta, chunk, precond="dense", max_iter=100, tol=1e-2, key=None):
+def polish_mode(fm, theta, chunk, precond="dense", max_iter=100, tol=1e-2, key=None, M0=None):
     """Trust-region Newton (``arachne.inference.newton``) from an Adam MAP to a local mode.
 
     ``precond``: ``dense`` builds ``M = V |Lambda| V^T`` from the full Hessian at the start
     (the Laplace step's cost, once) and rebuilds it every 20 accepted steps or when CG hits
-    its cap; ``diag`` uses a Hutchinson diagonal; ``none`` the identity.
+    its cap; ``diag`` uses a Hutchinson diagonal; ``none`` the identity.  ``M0`` is a
+    ready-made initial preconditioner (skips the first build).
     """
     from arachne.inference.laplace import make_hessian_fn
     from arachne.inference.newton import (
@@ -565,7 +566,7 @@ def polish_mode(fm, theta, chunk, precond="dense", max_iter=100, tol=1e-2, key=N
         def refresh(t):
             return diagonal_preconditioner(neg_lp, t, key)
 
-    M = refresh(theta) if refresh else None
+    M = M0 if M0 is not None else (refresh(theta) if refresh else None)
     res = trust_region_newton(neg_lp, theta, preconditioner=M, refresh_preconditioner=refresh,
                               refresh_every=20, max_iter=max_iter, tol=tol,
                               print_fn=lambda m: print(m, flush=True))  # fmt: skip
@@ -574,8 +575,12 @@ def polish_mode(fm, theta, chunk, precond="dense", max_iter=100, tol=1e-2, key=N
 
 
 def laplace_posterior(fm, model, theta_map, n_samples, chunk, key, max_newton=100,
-                      precond="dense"):  # fmt: skip
+                      precond="dense", max_escapes=3):  # fmt: skip
     """Trust-region Newton from the MAP to the mode, one full Hessian there, Gaussian samples.
+
+    After each Newton run the Hessian is checked for negative eigenvalues; if a step along
+    those directions lowers ``-log p`` the polish restarts from there (up to
+    ``max_escapes`` times), preconditioned by that Hessian.
 
     Run with ``--float64``: the Hessian of a 1e4-pixel likelihood is round-off
     dominated in float32.
@@ -585,17 +590,36 @@ def laplace_posterior(fm, model, theta_map, n_samples, chunk, key, max_newton=10
         Laplace evidence and diagnostics.
     """
     from arachne.inference.laplace import laplace_covariance, make_hessian_fn
+    from arachne.inference.newton import Preconditioner, negative_curvature_step
 
     dtype = jnp.zeros(()).dtype
     neg_lp = jax.jit(lambda t: -fm.log_posterior(t))
-    t0 = time.time()
-    newton = polish_mode(fm, jnp.asarray(theta_map, dtype), chunk, precond=precond,
-                         max_iter=max_newton)  # fmt: skip
-    theta, history = newton.theta, newton.history
-    t_newton = time.time() - t0
-    t0 = time.time()
-    hess = make_hessian_fn(fm, chunk_size=chunk)(theta)
-    t_hess = time.time() - t0
+    hess_fn = make_hessian_fn(fm, chunk_size=chunk)
+    theta, M0, history, escapes = jnp.asarray(theta_map, dtype), None, [], []
+    t_newton = t_hess = 0.0
+    for attempt in range(max_escapes + 1):
+        t0 = time.time()
+        newton = polish_mode(fm, theta, chunk, precond=precond, max_iter=max_newton, M0=M0)
+        theta = newton.theta
+        history += newton.history
+        t_newton += time.time() - t0
+        t0 = time.time()
+        hess = hess_fn(theta)
+        t_hess += time.time() - t0
+        # Saddle check: CG stopping on an interior step never sees weak negative curvature.
+        evals, evecs = jnp.linalg.eigh(0.5 * (jnp.asarray(hess) + jnp.asarray(hess).T))
+        if attempt == max_escapes or float(evals[0]) >= 0.0:
+            break
+        cand, gain, n_neg = negative_curvature_step(neg_lp, theta, evals, evecs)
+        print(f"  saddle check: {n_neg} negative eigenvalues (min {float(evals[0]):.3g}); "
+              f"best step along them gains {gain:.3g} nats", flush=True)  # fmt: skip
+        escapes.append({"n_negative": n_neg, "eig_min": float(evals[0]), "gain": gain})
+        if gain < 1e-2:
+            break
+        lam = jnp.abs(evals)
+        M0 = Preconditioner("dense", jnp.maximum(lam, jnp.maximum(1e-8 * lam.max(), 1e-6)), evecs)
+        theta = cand
+    del evals, evecs
     cov, chol, info = laplace_covariance(hess, return_info=True)
     # Laplace evidence: log Z ~ log p(d, theta*) + d/2 log 2pi - 1/2 log det H.  The
     # Gaussian likelihood omits its data-only normalisation, so compare log Z only
@@ -616,6 +640,7 @@ def laplace_posterior(fm, model, theta_map, n_samples, chunk, key, max_newton=10
         "newton_converged": newton.converged,
         "newton_reason": newton.reason,
         "newton_hvps": newton.n_hvp,
+        "saddle_escapes": escapes,
         "log_evidence_laplace": log_z,
         "eig_min": float(info["eigenvalues"].min()),
         "eig_max": float(info["eigenvalues"].max()),
