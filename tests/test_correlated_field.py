@@ -15,6 +15,8 @@ from arachne.forward_model.pipeline import ForwardModel
 from arachne.inference.initialisation import find_map
 from arachne.spatial.correlated_field import (
     CorrelatedFieldMap,
+    gaussian_from_marginal,
+    marginal_from_gaussian,
     mass_map_from_image,
     matern_spectrum,
     wiener_mass_map,
@@ -502,3 +504,64 @@ class TestCouplingsAndGlobalPriors:
         q25, q50, q75 = np.percentile(x, [25, 50, 75])
         assert abs(q50) < 0.03
         assert (q75 - q25) / 2 == pytest.approx(0.3 * 0.8165, rel=0.1)  # t(2) quartile = 0.8165
+
+
+BURSTY = {"dist": "studentt", "df": 2.0, "loc": 0.0, "scale": 1.0}
+
+
+class TestCopulaMarginals:
+    """Per-pixel Student-t marginals through a Gaussian copula."""
+
+    def test_transform_round_trip_and_tails(self):
+        """gaussian_from_marginal inverts marginal_from_gaussian, including far tails."""
+        prev = jax.config.jax_enable_x64
+        jax.config.update("jax_enable_x64", True)
+        try:
+            u = jnp.linspace(-7.5, 7.5, 301) * 1.3
+            x = marginal_from_gaussian(u, BURSTY, 1.3)
+            assert np.all(np.isfinite(np.asarray(x)))
+            np.testing.assert_allclose(gaussian_from_marginal(x, BURSTY, 1.3), u, atol=1e-6)
+            # Phi(1) = 0.8413 -> t(2) quantile 1.0 (closed form: (2p-1)/sqrt(2p(1-p)))
+            p = 0.841344746
+            expect = (2 * p - 1) / np.sqrt(2 * p * (1 - p))
+            assert float(marginal_from_gaussian(1.3, BURSTY, 1.3)) == pytest.approx(expect, 1e-6)
+            g = jax.grad(lambda v: marginal_from_gaussian(v, BURSTY, 1.0))(0.0)
+            assert float(g) > 0.5  # non-zero slope at the centre (the prior-mean start)
+        finally:
+            jax.config.update("jax_enable_x64", prev)
+
+    def test_prior_pixel_marginal_is_student_t(self):
+        """With the level and field drawn, one pixel's prior is Student-t(2, 0, 1)."""
+        m = make_model6(field_marginals={"logsfr_ratio_0": BURSTY},
+                        level_sigmas={"logsfr_ratio_0": 1.0},
+                        amplitudes={"log_mass": 0.3, "logsfr_ratio_0": 0.5, "Av": 0.3})  # fmt: skip
+        f = m.fields[m.field_names.index("logsfr_ratio_0")]
+        assert f.gauss_scale == pytest.approx(np.hypot(1.0, 0.5))
+        th = m.sample_prior(jax.random.PRNGKey(0), 4000)
+        k = m.field_names.index("logsfr_ratio_0")
+        x = np.asarray(jax.vmap(lambda t: m.field_maps(t)[k, 12, 12])(th))
+        q = np.percentile(x, [10, 25, 50, 75, 90])
+        # Student-t(2) quantiles: 0.75 -> 0.8165, 0.9 -> 1.8856
+        np.testing.assert_allclose(q, [-1.8856, -0.8165, 0.0, 0.8165, 1.8856], atol=0.12)
+
+    def test_mean_map_physical_and_projection(self):
+        """Mean maps are physical; project_to_field reproduces a smooth physical target."""
+        m = make_model6(field_marginals={"logsfr_ratio_0": BURSTY},
+                        mean_maps={"log_mass": 7.0, "Av": 1.0, "logsfr_ratio_0": -0.7})  # fmt: skip
+        k = m.field_names.index("logsfr_ratio_0")
+        t0 = m.initial_theta()
+        np.testing.assert_allclose(np.asarray(m.field_maps(t0))[k], -0.7, atol=1e-4)
+        yy, xx = np.mgrid[0:24, 0:24]
+        target = -0.7 + 0.6 * np.exp(-((xx - 12) ** 2 + (yy - 10) ** 2) / (2 * 4.0**2))
+        t1 = m.project_to_field(t0, "logsfr_ratio_0", target, ridge=1e-4, maxiter=2000)
+        got = np.asarray(m.field_maps(t1))[k]
+        assert np.sqrt(np.mean((got - target) ** 2)) < 0.03
+
+    def test_validation(self):
+        """Unsupported marginals and non-field names are rejected."""
+        with pytest.raises(ValueError, match="df = 2"):
+            make_model6(field_marginals={"logsfr_ratio_0": {**BURSTY, "df": 3.0}})
+        with pytest.raises(ValueError, match="not a bounded field"):
+            make_model6(field_marginals={"log_mass": BURSTY})
+        with pytest.raises(ValueError, match="not a bounded field"):
+            make_model6(field_marginals={"fesc": BURSTY})

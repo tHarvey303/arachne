@@ -69,6 +69,7 @@ swings with login-node load; an earlier identical run of 764 tests took 8 min 17
 | `inference/nss_sampler.py` | `NSSSampler` / `NSSResult` — `blackjax.nss` over `log_prior` + `log_likelihood`, live points from `sample_prior`; equal-weight samples, `logZ`, `logZ_err`, `ess`; bit-exact checkpoint/resume |
 | `inference/nuts_sampler.py` | `NUTSSampler` / `NUTSResult` (`get_parameter_map`, `to_hdf5`/`from_hdf5`, `summary`); per-chain vmapped window adaptation, `inverse_mass_matrix=` |
 | `inference/laplace.py` | `make_hessian_fn`, `hessian_neg_log_post`, `laplace_covariance`, `WhitenedLogDensity`, `laplace_whitening`, `run_whitened_nuts` — Laplace covariance at the MAP + whitened/dense-metric NUTS. NOT exported from `arachne/__init__.py`: import from `arachne.inference.laplace` |
+| `inference/newton.py` | `trust_region_newton` (Steihaug-Toint truncated CG, HVPs only; escapes saddles along negative curvature; converged = interior step with predicted decrease < tol), `dense_preconditioner` / `diagonal_preconditioner`, `NewtonResult`. Polishes an Adam MAP into a mode before Laplace / whitened MCMC. A mode is local: use several starts |
 | `inference/mclmc_sampler.py` | `MCLMCSampler` (blackjax 1.6.2 API) + `run_pathfinder`; for `FreeFormPixelMap` |
 | `inference/diagnostics.py` | `split_rhat`, `ess`, `chain_movement`, `summarise_chains` on `(n_chains, n_samples, n_params)` |
 | `inference/model_comparison.py` | `compare_n_components(make_forward_model, ks, key, ...) -> [ModelComparisonRow]`, `bayes_factor_table` |

@@ -347,6 +347,30 @@ class TestRunWhitenedNUTS:
         assert result.diagnostics["dense_mass_matrix"] is False
         assert np.isfinite(np.asarray(result.samples)).all()
 
+    def test_initial_positions(self, monkeypatch):
+        """Explicit per-chain starts reach the sampler in z; a wrong shape is rejected."""
+        pytest.importorskip("blackjax")
+        from arachne.inference import nuts_sampler
+
+        seen = {}
+
+        def fake_run(self, theta_init, key, n_chains=1, chain_jitter=0.0, **kw):
+            seen["init"] = np.asarray(theta_init)
+            raise RuntimeError("stop")
+
+        monkeypatch.setattr(nuts_sampler.NUTSSampler, "run", fake_run)
+        model = _Quadratic(np.diag([4.0, 1.0]))
+        starts = np.array([[2.0, -1.0], [-2.0, 1.0]])
+        with pytest.raises(RuntimeError, match="stop"):
+            run_whitened_nuts(model, np.zeros(2), jax.random.PRNGKey(3), n_chains=2,
+                              initial_positions=starts)  # fmt: skip
+        # Laplace sds are (2, 1), so the starts are (+-1, -+1) in z.
+        np.testing.assert_allclose(np.abs(seen["init"]), 1.0, rtol=1e-3)
+        assert seen["init"].shape == (2, 2)
+        with pytest.raises(ValueError, match="initial_positions"):
+            run_whitened_nuts(model, np.zeros(2), jax.random.PRNGKey(3), n_chains=3,
+                              initial_positions=starts)  # fmt: skip
+
     def test_forward_model_integration(self, forward_model, gmm_model):
         """A real (tiny) ForwardModel runs end to end and keeps its spatial model."""
         pytest.importorskip("blackjax")

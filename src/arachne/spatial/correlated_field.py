@@ -37,6 +37,55 @@ def matern_spectrum(k: np.ndarray, corr_length: float, nu: float) -> np.ndarray:
     return (1.0 + (np.asarray(k) * corr_length) ** 2) ** (-(nu + 1.0))
 
 
+# Gaussian-space clip for the copula transforms: |w| <= 8 keeps ndtr(-|w|) ~ 6e-16 well
+# inside float32, and maps to |t| ~ 3e7 for Student-t(2), far beyond any parameter bound.
+_COPULA_W_MAX = 8.0
+
+
+def _validate_marginal(name: str, spec: Mapping) -> dict:
+    """Check a ``field_marginals`` spec: ``normal`` or ``studentt`` with ``df == 2``."""
+    spec = dict(spec)
+    dist = spec.get("dist")
+    if dist not in ("normal", "studentt"):
+        raise ValueError(f"field_marginals[{name!r}]: dist must be 'normal' or 'studentt'")
+    if dist == "studentt" and float(spec.get("df", 0.0)) != 2.0:
+        # df = 2 has closed-form CDF and quantile; others would need betaincinv.
+        raise ValueError(f"field_marginals[{name!r}]: only studentt df = 2 is supported")
+    if float(spec.get("scale", 0.0)) <= 0.0:
+        raise ValueError(f"field_marginals[{name!r}]: scale must be > 0")
+    spec.setdefault("loc", 0.0)
+    return spec
+
+
+def marginal_from_gaussian(u, spec: Mapping, gauss_scale: float):
+    """Map Gaussian-space values ``u ~ N(0, gauss_scale^2)`` to the target marginal.
+
+    ``x = loc + scale * F^-1(Phi(u / gauss_scale))`` (a Gaussian copula).  For
+    Student-t with 2 degrees of freedom ``F^-1(p) = (2p - 1) / sqrt(2 p (1 - p))``,
+    evaluated with ``p = Phi(w)`` and ``1 - p = Phi(-w)`` so neither tail cancels.
+    """
+    w = jnp.clip(u / gauss_scale, -_COPULA_W_MAX, _COPULA_W_MAX)
+    if spec["dist"] == "normal":
+        t = w
+    else:
+        p = jax.scipy.special.ndtr(w)
+        q = jax.scipy.special.ndtr(-w)
+        t = (p - q) / jnp.sqrt(2.0 * p * q)
+    return float(spec["loc"]) + float(spec["scale"]) * t
+
+
+def gaussian_from_marginal(x, spec: Mapping, gauss_scale: float):
+    """Inverse of :func:`marginal_from_gaussian` (Student-t(2) CDF in closed form)."""
+    t = (jnp.asarray(x) - float(spec["loc"])) / float(spec["scale"])
+    if spec["dist"] == "normal":
+        w = t
+    else:
+        # Upper-tail probability of |t| without cancellation: 1 / (r (r + |t|)), r = sqrt(2 + t^2).
+        r = jnp.sqrt(2.0 + t**2)
+        w = -jnp.sign(t) * jax.scipy.special.ndtri(1.0 / (r * (r + jnp.abs(t))))
+    return gauss_scale * w
+
+
 def _softclip(u: jnp.ndarray, lo: float, hi: float, sharpness: float) -> jnp.ndarray:
     """Smooth clamp into ``[lo, hi]`` that is ~identity well inside the interval."""
     b = sharpness / (hi - lo)
@@ -71,6 +120,9 @@ class _FieldSpec:
         self.corr_length = float(corr_length)
         self.nu = float(nu)
         self.level_sigma = float(level_sigma)
+        # Copula marginal (see CorrelatedFieldMap field_marginals); None = Gaussian field.
+        self.marginal: dict | None = None
+        self.gauss_scale = 1.0
         self.fixed_couplings: dict[str, float] = {}  # source field -> fixed coefficient
         self.free_coupling_idx: dict[str, int] = {}  # source field -> index into coupling block
         # Free hyperparameters: name -> index into the hyper block (log_amplitude,
@@ -150,6 +202,26 @@ class CorrelatedFieldMap(SpatialModel):
     Student-t on ``logsfr_ratio_*``; truncation to the bounds is not
     renormalised, which is negligible for priors much narrower than the bounds).
     ``sample_prior`` draws from that density.
+
+    Copula marginals
+    ----------------
+    ``field_marginals`` gives a bounded field a non-Gaussian per-pixel prior
+    marginal, e.g. the bursty-continuity Student-t on ``logsfr_ratio_*``,
+    while keeping its spatial correlation.  ``u_k`` above is then a Gaussian
+    variable and the physical map is::
+
+        p_k(x) = softclip(loc + scale * F^-1(Phi(u_k(x) / sigma_k)), bounds_k)
+        sigma_k = sqrt(level_sigma_k^2 + amplitude_k^2)
+
+    so for a mean map at the marginal's centre, each pixel is distributed
+    exactly as ``F`` a priori (level and field both drawn), with the Matérn
+    correlation carried through the monotone transform.  The prior on theta
+    is unchanged (still ``N(0, I)`` for the coefficients), which keeps the
+    Laplace whitening and the evidence exact.  ``mean_maps`` for such a field
+    are given in physical units and mapped to Gaussian space internally;
+    ``level_sigma``, ``amplitude`` and couplings act in Gaussian space (units
+    of ``sigma_k``).  ``sigma_k`` uses the fixed amplitude even when the
+    amplitude is fitted, so the marginal is then only approximately ``F``.
     """
 
     def __init__(
@@ -169,6 +241,7 @@ class CorrelatedFieldMap(SpatialModel):
         hyper_priors: Mapping[str, Mapping[str, Mapping[str, float]]] | None = None,
         global_priors: Mapping[str, Mapping] | None = None,
         mean_maps: Mapping[str, np.ndarray | float] | None = None,
+        field_marginals: Mapping[str, Mapping] | None = None,
         variance_fraction: float = 0.99,
         k_max: float | None = None,
         pad: int | None = None,
@@ -208,6 +281,12 @@ class CorrelatedFieldMap(SpatialModel):
             mean_maps: Mean map per field, an ``(H, W)`` array or a scalar.
                 Default: the centre of the bounds (non-mass) or 0 (mass); set
                 the mass mean from the data with :func:`mass_map_from_image`.
+                For a field with a copula marginal: physical units, default
+                the marginal's ``loc``.
+            field_marginals: Per-pixel prior marginal for bounded fields,
+                ``{"dist": "studentt", "df": 2, "loc": 0, "scale": 1}`` (bursty
+                continuity) or ``{"dist": "normal", "loc": ..., "scale": ...}``;
+                see "Copula marginals" above.
             variance_fraction: Keep the highest-power modes that together hold
                 this fraction of each field's prior variance.
             k_max: Alternatively keep every mode with ``|k| <= k_max`` (rad/px).
@@ -271,6 +350,12 @@ class CorrelatedFieldMap(SpatialModel):
                 )
             )
         order = {p: i for i, p in enumerate(self.field_names)}
+        for p, spec in (field_marginals or {}).items():
+            if p not in order or p == mass_param:
+                raise ValueError(f"field_marginals given for {p!r}, which is not a bounded field")
+            f = self.fields[order[p]]
+            f.marginal = _validate_marginal(p, spec)
+            f.gauss_scale = math.hypot(f.level_sigma, f.amplitude)
 
         def check_source(target, source):
             if target not in order or source not in order:
@@ -350,7 +435,12 @@ class CorrelatedFieldMap(SpatialModel):
         mean_maps = dict(mean_maps or {})
         means = []
         for f in self.fields:
-            if f.name in mean_maps:
+            if f.marginal is not None:
+                m_phys = np.broadcast_to(
+                    np.asarray(mean_maps.get(f.name, f.marginal["loc"]), np.float64), (H, W)
+                )
+                m = np.asarray(gaussian_from_marginal(m_phys, f.marginal, f.gauss_scale))
+            elif f.name in mean_maps:
                 m = np.broadcast_to(np.asarray(mean_maps[f.name], np.float32), (H, W))
             elif f.bounds is None:
                 m = np.zeros((H, W), np.float32)
@@ -594,8 +684,17 @@ class CorrelatedFieldMap(SpatialModel):
         n0 = self.z_offset
         z_slice = slice(n0 + f.slice.start, n0 + f.slice.stop)
         theta0 = theta.at[z_slice].set(0.0)
-        current = self.field_maps(theta0)[k]
-        if f.bounds is not None:
+        if f.marginal is not None:
+            # Work in the field's Gaussian space.
+            current = self.gaussian_maps(theta0)[k]
+            target_map = gaussian_from_marginal(
+                jnp.clip(jnp.asarray(target_map), f.bounds[0], f.bounds[1]),
+                f.marginal,
+                f.gauss_scale,
+            )
+        else:
+            current = self.field_maps(theta0)[k]
+        if f.bounds is not None and f.marginal is None:
             # Pre-clip value without the field term (softclip ~ identity inside bounds).
             current = jnp.clip(current, f.bounds[0], f.bounds[1])
         amplitude = self.field_hyperparameters(theta, k)[0]
@@ -611,8 +710,8 @@ class CorrelatedFieldMap(SpatialModel):
         z, _ = jax.scipy.sparse.linalg.cg(normal_op, rhs, x0=z0, maxiter=maxiter)
         return theta.at[z_slice].set(z)
 
-    def field_maps(self, theta: jnp.ndarray) -> jnp.ndarray:
-        """Physical parameter maps ``(N_fields, H, W)`` in ``field_names`` order."""
+    def gaussian_maps(self, theta: jnp.ndarray) -> jnp.ndarray:
+        """Pre-transform maps ``u_k = m_k + d_k`` ``(N_fields, H, W)`` (before copula and clip)."""
         blocks = self.split_theta(theta)
         levels, z, cfree = blocks.levels, blocks.z, blocks.coupling
         devs: dict[str, jnp.ndarray] = {}
@@ -626,7 +725,17 @@ class CorrelatedFieldMap(SpatialModel):
             for source, i in f.free_coupling_idx.items():
                 dev = dev + cfree[i] * devs[source]
             devs[f.name] = dev
-            u = self._mean_maps[k] + dev
+            maps.append(self._mean_maps[k] + dev)
+        return jnp.stack(maps)
+
+    def field_maps(self, theta: jnp.ndarray) -> jnp.ndarray:
+        """Physical parameter maps ``(N_fields, H, W)`` in ``field_names`` order."""
+        u_all = self.gaussian_maps(theta)
+        maps = []
+        for k, f in enumerate(self.fields):
+            u = u_all[k]
+            if f.marginal is not None:
+                u = marginal_from_gaussian(u, f.marginal, f.gauss_scale)
             if f.bounds is None:
                 maps.append(u)
             else:
@@ -729,6 +838,7 @@ class CorrelatedFieldMap(SpatialModel):
                 f"{f.basis_ell:.2f} nu={f.basis_nu:.2f}, {100 * f.variance_kept:.1f}% of "
                 f"basis variance) free={sorted(f.hyper_idx) or '-'} "
                 f"couplings={dict(f.fixed_couplings) or '-'}"
+                f"{' marginal=' + str(f.marginal) if f.marginal else ''}"
                 f"{' + free ' + str(sorted(f.free_coupling_idx)) if f.free_coupling_idx else ''}"
             )
         lines.append(f"  globals: {self.global_names or 'none'}; fixed: {self.fixed_params}")

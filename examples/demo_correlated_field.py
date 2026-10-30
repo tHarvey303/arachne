@@ -129,10 +129,13 @@ TRUTH_GLOBALS = {
 HONEST_OFFSETS = {"Av": 0.4, "log10metallicity": 0.4, "logsfr_ratio_0": -0.4, "logsfr_ratio_3": 0.5}
 HONEST_CORR_SCALE = 1.6
 HONEST_AMP_SCALE = 1.4
-# Library priors (arachne.priors.specs.DEFAULT_PRIORS) for free globals.
-GLOBAL_PRIORS = {
-    f"logsfr_ratio_{i}": {"dist": "studentt", "df": 2.0, "loc": 0.0, "scale": 0.3} for i in range(5)
-}
+# SFH-ratio priors (Student-t, 2 dof).  "continuity" is the library default
+# (arachne.priors.specs.DEFAULT_PRIORS, scale 0.3); "bursty" is bursty continuity (scale 1.0,
+# Tacchella et al. 2022).  Free global ratios get the density directly; mapped ratios get it as
+# their per-pixel marginal through a Gaussian copula (CorrelatedFieldMap field_marginals).
+# "legacy": continuity on the globals, Gaussian maps (the runs before 2026-10-30).
+SFH_PRIOR_SCALES = {"bursty": 1.0, "continuity": 0.3, "legacy": 0.3}
+SFH_PRIOR = "bursty"
 # Prior hyperparameters: break scale in px, rms in parameter units.
 CORR_LENGTHS = {
     "log_mass": 3.0, "Av": 5.0, "log10metallicity": 12.0, "logsfr_ratio_0": 4.0,
@@ -156,6 +159,10 @@ LABELS = {
     "logsfr_ratio_2": r"logsfr_ratio_2 (10-64 / 64-411 Myr)",
     "logsfr_ratio_4": r"logsfr_ratio_4 (0.4-2.6 / 2.6-3.1 Gyr)",
 }
+
+
+SHORT = {"log_mass": "M", "Av": "Av", "log10metallicity": "Z",
+         **{f"logsfr_ratio_{i}": f"r{i}" for i in range(5)}}  # fmt: skip
 
 
 # Mapped: mass, A_V, Z, the 0-3/3-10 Myr ratio and the 64-411 Myr/0.4-2.6 Gyr ratio (age
@@ -323,7 +330,7 @@ def spiral_truth(n, rng):
 
 
 def build_model(n, mass_mean, mean_values=None, corr_scale=1.0, nu=1.5, fixed=None,
-                hyper=False, couple=False, amp_scale=1.0):  # fmt: skip
+                hyper=False, couple=False, amp_scale=1.0, sfh_prior=None):  # fmt: skip
     """CorrelatedFieldMap with the demo's hyperparameters.
 
     ``corr_scale`` multiplies every correlation length; ``nu`` is the Matérn slope of the
@@ -331,9 +338,17 @@ def build_model(n, mass_mean, mean_values=None, corr_scale=1.0, nu=1.5, fixed=No
     defaults to FIXED (the fit); pass FIXED_TRUTH for the truth model.  ``hyper`` fits
     amplitude and correlation length of every non-mass field (log-normal priors around the
     defaults); ``couple`` fits A_V's
-    response to the mass and SFH-ratio deviations (N(0, 0.5^2) each).
+    response to the mass and SFH-ratio deviations (N(0, 0.5^2) each).  ``sfh_prior``
+    (default SFH_PRIOR) sets the SFH-ratio priors; the truth model passes ``"legacy"`` so
+    the mocks do not depend on the fit's prior.
     """
     fixed = FIXED if fixed is None else fixed
+    sfh_prior = SFH_PRIOR if sfh_prior is None else sfh_prior
+    spec = {"dist": "studentt", "df": 2.0, "loc": 0.0, "scale": SFH_PRIOR_SCALES[sfh_prior]}
+    ratios = [p for p in SPS_PARAM_NAMES if p.startswith("logsfr_ratio")]
+    marginals = None
+    if sfh_prior != "legacy":
+        marginals = {p: spec for p in ratios if p in FIELDS}
     means = {"log_mass": mass_mean}
     means.update({k: v for k, v in (mean_values or NEUTRAL).items() if k in FIELDS})
     free_globals = [p for p in SPS_PARAM_NAMES if p not in FIELDS and p not in fixed]
@@ -366,11 +381,12 @@ def build_model(n, mass_mean, mean_values=None, corr_scale=1.0, nu=1.5, fixed=No
         amplitudes={k: amp_scale * v for k, v in AMPLITUDES.items() if k in FIELDS},
         level_sigmas={k: v for k, v in LEVEL_SIGMAS.items() if k in FIELDS},
         mean_maps=means,
+        field_marginals=marginals,
         variance_fraction=0.99,
         pixel_scale=PIXEL_SCALE,
         hyper_priors=hyper_priors,
         free_couplings=free_couplings,
-        global_priors={k: v for k, v in GLOBAL_PRIORS.items() if k in free_globals},
+        global_priors={p: spec for p in ratios if p in free_globals},
     )
 
 
@@ -517,54 +533,49 @@ def plot_images(obs, model_img, sigma, path, show=("F090W", "F200W", "F444W")):
 # ---------------------------------------------------------------------------
 
 
-def newton_cg(fm, theta, max_iter=30, cg_iter=100, tol=0.05, mu0=1.0):
-    """Matrix-free damped (Levenberg-Marquardt) Newton on -log_posterior.
+def polish_mode(fm, theta, chunk, precond="dense", max_iter=100, tol=1e-2, key=None):
+    """Trust-region Newton (``arachne.inference.newton``) from an Adam MAP to a local mode.
 
-    Each step solves ``(H + mu I) p = -g`` by conjugate gradients using
-    Hessian-vector products only (``cg_iter`` HVPs instead of the ``d`` a full
-    Hessian needs), then accepts it if ``-log_post`` drops (``mu /= 3``) or
-    rejects it (``mu *= 10``).  Stops when a step gains less than ``tol`` nat.
+    ``precond``: ``dense`` builds ``M = V |Lambda| V^T`` from the full Hessian at the start
+    (the Laplace step's cost, once) and rebuilds it every 20 accepted steps or when CG hits
+    its cap; ``diag`` uses a Hutchinson diagonal; ``none`` the identity.
     """
-    neg_lp = jax.jit(lambda t: -fm.log_posterior(t))
-    grad_fn = jax.grad(lambda t: -fm.log_posterior(t))
-    grad = jax.jit(grad_fn)
+    from arachne.inference.laplace import make_hessian_fn
+    from arachne.inference.newton import (
+        dense_preconditioner,
+        diagonal_preconditioner,
+        trust_region_newton,
+    )
 
-    @jax.jit
-    def solve(t, g, mu):
-        def hvp(v):
-            return jax.jvp(grad_fn, (t,), (v,))[1] + mu * v
+    def neg_lp(t):
+        return -fm.log_posterior(t)
 
-        p, _ = jax.scipy.sparse.linalg.cg(hvp, -g, maxiter=cg_iter)
-        return p
+    refresh = None
+    if precond == "dense":
+        hess_fn = make_hessian_fn(fm, chunk_size=chunk)
 
-    mu = mu0
-    f = float(neg_lp(theta))
-    history = []
-    for it in range(max_iter):
-        g = grad(theta)
-        p = solve(theta, g, jnp.asarray(mu, theta.dtype))
-        cand = theta + p
-        f_new = float(neg_lp(cand))
-        gnorm = float(jnp.linalg.norm(g))
-        history.append({"iter": it, "neg_log_post": f, "grad_norm": gnorm, "mu": mu})
-        print(f"  Newton-CG {it}: -log_post {f:.3f} -> {f_new:.3f}  |grad| {gnorm:.3g}  "
-              f"mu {mu:.2g}", flush=True)  # fmt: skip
-        if np.isfinite(f_new) and f_new < f:
-            gain = f - f_new
-            theta, f, mu = cand, f_new, max(mu / 3.0, 1e-6)
-            if gain < tol:
-                break
-        else:
-            mu *= 10.0
-            if mu > 1e8:
-                break
-    history.append({"iter": len(history), "neg_log_post": f,
-                    "grad_norm": float(jnp.linalg.norm(grad(theta))), "mu": mu})  # fmt: skip
-    return theta, history
+        def refresh(t):
+            t0 = time.time()
+            M = dense_preconditioner(hess_fn(t))
+            print(f"  preconditioner: dense Hessian + eigh in {time.time() - t0:.0f} s", flush=True)
+            return M
+    elif precond == "diag":
+        key = jax.random.PRNGKey(0) if key is None else key
+
+        def refresh(t):
+            return diagonal_preconditioner(neg_lp, t, key)
+
+    M = refresh(theta) if refresh else None
+    res = trust_region_newton(neg_lp, theta, preconditioner=M, refresh_preconditioner=refresh,
+                              refresh_every=20, max_iter=max_iter, tol=tol,
+                              print_fn=lambda m: print(m, flush=True))  # fmt: skip
+    print(res.summary(), flush=True)
+    return res
 
 
-def laplace_posterior(fm, model, theta_map, n_samples, chunk, key, max_newton=30):
-    """Newton-CG from the MAP to the mode, one full Hessian there, Gaussian map samples.
+def laplace_posterior(fm, model, theta_map, n_samples, chunk, key, max_newton=100,
+                      precond="dense"):  # fmt: skip
+    """Trust-region Newton from the MAP to the mode, one full Hessian there, Gaussian samples.
 
     Run with ``--float64``: the Hessian of a 1e4-pixel likelihood is round-off
     dominated in float32.
@@ -578,7 +589,9 @@ def laplace_posterior(fm, model, theta_map, n_samples, chunk, key, max_newton=30
     dtype = jnp.zeros(()).dtype
     neg_lp = jax.jit(lambda t: -fm.log_posterior(t))
     t0 = time.time()
-    theta, history = newton_cg(fm, jnp.asarray(theta_map, dtype), max_iter=max_newton)
+    newton = polish_mode(fm, jnp.asarray(theta_map, dtype), chunk, precond=precond,
+                         max_iter=max_newton)  # fmt: skip
+    theta, history = newton.theta, newton.history
     t_newton = time.time() - t0
     t0 = time.time()
     hess = make_hessian_fn(fm, chunk_size=chunk)(theta)
@@ -600,6 +613,9 @@ def laplace_posterior(fm, model, theta_map, n_samples, chunk, key, max_newton=30
         "newton_s": t_newton,
         "hessian_s": t_hess,
         "newton_history": history,
+        "newton_converged": newton.converged,
+        "newton_reason": newton.reason,
+        "newton_hvps": newton.n_hvp,
         "log_evidence_laplace": log_z,
         "eig_min": float(info["eigenvalues"].min()),
         "eig_max": float(info["eigenvalues"].max()),
@@ -608,11 +624,13 @@ def laplace_posterior(fm, model, theta_map, n_samples, chunk, key, max_newton=30
     }
 
 
-def nuts_posterior(fm, model, theta, chol, key, n_warmup, n_samples, n_chains, max_maps=1000):
+def nuts_posterior(fm, model, theta, chol, key, n_warmup, n_samples, n_chains, max_maps=1000,
+                   init_thetas=None):  # fmt: skip
     """Whitened NUTS (theta = mode + L z, L from the Laplace Hessian), diagonal metric in z.
 
     A dense metric cannot be adapted at d ~ 4e3, so the Laplace whitening does the
-    conditioning and the warmup only adapts a diagonal.  Returns map samples
+    conditioning and the warmup only adapts a diagonal.  ``init_thetas`` ``(n_chains, d)``
+    starts each chain at its own point (modes from different optimiser starts).  Returns map samples
     (thinned to ``max_maps``) and convergence diagnostics in theta coordinates.
     """
     from arachne.inference.laplace import WhitenedLogDensity, run_whitened_nuts
@@ -622,7 +640,7 @@ def nuts_posterior(fm, model, theta, chol, key, n_warmup, n_samples, n_chains, m
     t0 = time.time()
     result, _ = run_whitened_nuts(
         fm, theta, key, whitened=whitened, n_warmup=n_warmup, n_samples=n_samples,
-        n_chains=n_chains, dense_mass_matrix=False,
+        n_chains=n_chains, dense_mass_matrix=False, initial_positions=init_thetas,
     )  # fmt: skip
     runtime = time.time() - t0
     samples = np.asarray(result.samples)
@@ -645,10 +663,12 @@ def nuts_posterior(fm, model, theta, chol, key, n_warmup, n_samples, n_chains, m
     }
 
 
-def mclmc_posterior(fm, model, theta, chol, key, n_warmup, n_samples, n_chains, max_maps=1000):
+def mclmc_posterior(fm, model, theta, chol, key, n_warmup, n_samples, n_chains, max_maps=1000,
+                    init_thetas=None):  # fmt: skip
     """Whitened MCLMC: as ``nuts_posterior`` but blackjax MCLMC, one tuned run per chain.
 
-    Chains start at z ~ N(0, 0.3^2) around the mode; R-hat and ESS are computed in theta.
+    Chains start at z ~ N(0, 0.3^2) around the mode, or at ``init_thetas`` when given;
+    R-hat and ESS are computed in theta.
     """
     from arachne.inference.diagnostics import ess, split_rhat
     from arachne.inference.laplace import WhitenedLogDensity
@@ -662,6 +682,8 @@ def mclmc_posterior(fm, model, theta, chol, key, n_warmup, n_samples, n_chains, 
     for c, k in enumerate(jax.random.split(key, n_chains)):
         k_init, k_run = jax.random.split(k)
         z0 = 0.3 * jax.random.normal(k_init, (whitened.n_params,), dtype)
+        if init_thetas is not None:
+            z0 = whitened.from_theta(jnp.asarray(init_thetas[c], dtype))
         res = sampler.run(z0, k_run)
         chains.append(np.asarray(jax.vmap(whitened.to_theta)(res.samples)))
         print(f"MCLMC chain {c + 1}/{n_chains}: {time.time() - t0:.0f} s")
@@ -848,6 +870,42 @@ def bundle_plots(path, outdir):
     print(f"bundle plots: {len(files)} files in {outdir}")
 
 
+def perturbed_start(model, theta0, key):
+    """``theta0`` with the non-mass levels and the globals redrawn from the prior.
+
+    The mass level and every field coefficient are kept, so each start sees the same
+    data-driven mass map but a different guess for the SPS parameters: the places where
+    SED fitting is multimodal (age-dust-metallicity, SFH bin trading).
+    """
+    draw = model.sample_prior(key, 1)[0]
+    nf, ng = model.n_fields, model.n_global
+    mass = np.arange(nf) == model.field_names.index(model.mass_param)
+    levels = jnp.where(jnp.asarray(mass), theta0[:nf], draw[:nf])
+    return theta0.at[:nf].set(levels).at[nf : nf + ng].set(draw[nf : nf + ng])
+
+
+def mode_summary(model, post, truth_maps, pstd, weight):
+    """Compact per-start record: optimiser status, evidence, coverage, total mass, globals."""
+    maps = in_fields_order(model, post["maps"])
+    pm = posterior_metrics(truth_maps, maps, pstd, weight)[0]
+    mass_tot = np.log10(np.sum(10.0 ** maps[:, 0], axis=(1, 2)))
+    sc = scalar_summary(model, post["thetas"], TRUTH_GLOBALS)
+    return {
+        "neg_log_post": float(post["newton_history"][-1]["neg_log_post"]),
+        "newton_converged": post["newton_converged"],
+        "newton_reason": post["newton_reason"],
+        "log_evidence_laplace": post["log_evidence_laplace"],
+        "n_negative": post["n_negative"],
+        "total_log_mass_16_50_84": [float(x) for x in np.percentile(mass_tot, [16, 50, 84])],
+        "coverage68": {k: v["coverage68"] for k, v in pm.items()},
+        "global_medians": {
+            k: v["p16_50_84"][1]
+            for k, v in sc.items()
+            if not k.startswith(("amplitude", "corr_length", "c["))
+        },  # fmt: skip
+    }
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -909,6 +967,16 @@ def main():
     ap.add_argument("--nuts-samples", type=int, default=500)
     ap.add_argument("--nuts-chains", type=int, default=4)
     ap.add_argument("--hess-chunk", type=int, default=32, help="HVP rows per Hessian batch")
+    ap.add_argument("--precond", choices=["dense", "diag", "none"], default="dense",
+                    help="trust-region Newton preconditioner (see polish_mode)")  # fmt: skip
+    ap.add_argument("--max-newton", type=int, default=100, help="trust-region Newton iterations")
+    ap.add_argument("--n-starts", type=int, default=1,
+                    help="optimiser starts: the neutral start plus prior redraws of the non-mass "
+                    "levels and globals; with --laplace the best Laplace evidence is kept and "
+                    "MCMC chains start at the modes within 10 nats of it")  # fmt: skip
+    ap.add_argument("--sfh-prior", choices=sorted(SFH_PRIOR_SCALES), default="bursty",
+                    help="SFH-ratio prior: bursty / continuity Student-t (maps via a copula), "
+                    "or legacy (continuity globals, Gaussian maps)")  # fmt: skip
     ap.add_argument("--no-bundle", action="store_true", help="do not write results.h5")
     ap.add_argument("--bundle-draws", type=int, default=200, help="posterior draws in the bundle")
     ap.add_argument("--bundle-mantissa-bits", type=int, default=None,
@@ -922,6 +990,8 @@ def main():
     args = ap.parse_args()
     set_bands(args.bands)
     set_sfh(args.sfh)
+    global SFH_PRIOR
+    SFH_PRIOR = args.sfh_prior
     if args.float64:
         jax.config.update("jax_enable_x64", True)
     if args.quick:
@@ -939,7 +1009,7 @@ def main():
     offsets = HONEST_OFFSETS if args.honest else {}
     truth_means = {k: TRUTH_GLOBALS.get(k, v) + offsets.get(k, 0.0) for k, v in NEUTRAL.items()}
     truth_model = build_model(n, disk, mean_values=truth_means, fixed=FIXED_TRUTH,
-                              **truth_hyper_scales(args))  # fmt: skip
+                              sfh_prior="legacy", **truth_hyper_scales(args))  # fmt: skip
     arm_weight = None
     if args.truth == "prior":
         theta_truth = truth_model.sample_prior(jax.random.PRNGKey(args.seed), 1)[0]
@@ -970,15 +1040,48 @@ def main():
         )
     start_maps = in_fields_order(model, model.field_maps(theta0))
 
-    t0 = time.time()
-    res = find_map(fm, theta0, n_rounds=args.rounds, steps_per_round=args.steps, lr=0.05,
-                   final_steps=args.steps, final_lr=0.01)  # fmt: skip
-    runtime = time.time() - t0
+    weight = 10.0 ** truth_maps[0]
+    if args.laplace and not args.float64:
+        print("WARNING: --laplace without --float64; the Hessian will be float32-noisy")
+    pstd_model = prior_map_std(model, 400, jax.random.PRNGKey(args.seed + 200))
+    pstd = in_fields_order(model, pstd_model)
+    starts = [theta0] + [perturbed_start(model, theta0, jax.random.PRNGKey(args.seed + 1000 + i))
+                         for i in range(1, args.n_starts)]  # fmt: skip
+    runs = []
+    for i, ts in enumerate(starts):
+        if len(starts) > 1:
+            print(f"===== start {i + 1}/{len(starts)}", flush=True)
+        t0 = time.time()
+        r = find_map(fm, ts, n_rounds=args.rounds, steps_per_round=args.steps, lr=0.05,
+                     final_steps=args.steps, final_lr=0.01)  # fmt: skip
+        rt = time.time() - t0
+        p = None
+        if args.laplace:
+            p = laplace_posterior(fm, model, r.theta, args.n_laplace, args.hess_chunk,
+                                  jax.random.PRNGKey(args.seed + 100),
+                                  max_newton=args.max_newton, precond=args.precond)  # fmt: skip
+            summ = mode_summary(model, p, truth_maps, pstd, weight)
+            print(f"  start {i + 1}: -log_post {summ['neg_log_post']:.2f}, log Z "
+                  f"{summ['log_evidence_laplace']:.2f}, converged {summ['newton_converged']}, "
+                  f"{summ['n_negative']} neg. eig.", flush=True)  # fmt: skip
+        else:
+            summ = {"neg_log_post": float(r.neg_log_posterior)}
+        runs.append({"res": r, "runtime": rt, "post": p, "summary": summ})
+        if i > 0 and p is not None:
+            # Keep the heavy arrays only for the best mode so far.
+            best_so_far = max(runs, key=lambda x: x["summary"]["log_evidence_laplace"])
+            for x in runs:
+                if x is not best_so_far and x["post"] is not None:
+                    x["post"] = {"theta": x["post"]["theta"]}
+    key_fn = ((lambda x: x["summary"]["log_evidence_laplace"]) if args.laplace
+              else (lambda x: -x["summary"]["neg_log_post"]))  # fmt: skip
+    i_best = max(range(len(runs)), key=lambda i: key_fn(runs[i]))
+    res, runtime = runs[i_best]["res"], runs[i_best]["runtime"]
+    best_post = runs[i_best]["post"]
     fit_maps = in_fields_order(model, model.field_maps(res.theta))
     model_img = np.asarray(fm._model_image(res.theta))
     chi = (np.asarray(obs.flux) - model_img) / sigma[:, None, None]
 
-    weight = 10.0 ** truth_maps[0]
     metrics = {
         "truth": args.truth,
         "emulator": args.emulator or "toy",
@@ -990,6 +1093,10 @@ def main():
         "couple": args.couple,
         "honest": args.honest,
         "sfh": args.sfh,
+        "sfh_prior": args.sfh_prior,
+        "precond": args.precond,
+        "n_starts": args.n_starts,
+        "best_start": i_best,
         "seed": args.seed,
         "truth_offsets": offsets,
         "truth_hyper_scales": truth_hyper_scales(args),
@@ -1016,15 +1123,25 @@ def main():
         metrics["neg_log_post_truth_under_truth_model"] = float(
             -ForwardModel.build(obs, psf, truth_model, emulator).log_posterior(theta_truth)
         )
-    post = nuts = pstd_model = None
+    post = nuts = None
+    init_thetas = None
     if args.laplace:
-        if not args.float64:
-            print("WARNING: --laplace without --float64; the Hessian will be float32-noisy")
-        post = laplace_posterior(fm, model, res.theta, args.n_laplace, args.hess_chunk,
-                                 jax.random.PRNGKey(args.seed + 100))  # fmt: skip
+        post = best_post
+        if len(runs) > 1:
+            from jax.scipy.linalg import solve_triangular
+
+            chol = jnp.asarray(post["chol"])
+            lz_best = runs[i_best]["summary"]["log_evidence_laplace"]
+            for x in runs:
+                dz = solve_triangular(chol, x["post"]["theta"] - post["theta"], lower=True)
+                x["summary"]["whitened_distance_to_best"] = float(jnp.linalg.norm(dz))
+            metrics["modes"] = [x["summary"] for x in runs]
+            near = [x["post"]["theta"] for x in runs
+                    if x["summary"]["log_evidence_laplace"] > lz_best - 10.0]  # fmt: skip
+            if len(near) > 1:
+                init_thetas = np.stack([np.asarray(near[c % len(near)])
+                                        for c in range(args.nuts_chains)])  # fmt: skip
         post["maps"] = in_fields_order(model, post["maps"])
-        pstd_model = prior_map_std(model, 400, jax.random.PRNGKey(args.seed + 200))
-        pstd = in_fields_order(model, pstd_model)
         pm, med, std, info = posterior_metrics(truth_maps, post["maps"], pstd, weight)
         metrics["laplace"] = {
             k: v for k, v in post.items() if k not in ("theta", "maps", "chol", "thetas")
@@ -1042,11 +1159,13 @@ def main():
             if args.sampler == "mclmc":
                 nuts = mclmc_posterior(fm, model, post["theta"], post["chol"],
                                        jax.random.PRNGKey(args.seed + 300), args.mclmc_warmup,
-                                       args.mclmc_samples, args.nuts_chains)  # fmt: skip
+                                       args.mclmc_samples, args.nuts_chains,
+                                       init_thetas=init_thetas)  # fmt: skip
             else:
                 nuts = nuts_posterior(fm, model, post["theta"], post["chol"],
                                       jax.random.PRNGKey(args.seed + 300), args.nuts_warmup,
-                                      args.nuts_samples, args.nuts_chains)  # fmt: skip
+                                      args.nuts_samples, args.nuts_chains,
+                                      init_thetas=init_thetas)  # fmt: skip
             nuts["maps"] = in_fields_order(model, nuts["maps"])
             npm, nmed, nstd, ninfo = posterior_metrics(truth_maps, nuts["maps"], pstd, weight)
             mc = metrics[args.sampler] = {
@@ -1121,11 +1240,12 @@ def main():
           f"MAP {metrics['total_log_mass_map']:.3f}")  # fmt: skip
     if post is not None:
         lp = metrics["laplace"]
-        print(f"Laplace: Newton-CG {lp['newton_s']:.0f} s, Hessian {lp['hessian_s']:.0f} s; "
+        print(f"Laplace: TR-Newton {lp['newton_s']:.0f} s ({lp['newton_reason']}, "
+              f"{lp['newton_hvps']} HVPs), Hessian {lp['hessian_s']:.0f} s; "
               f"eigenvalues [{lp['eig_min']:.3g}, {lp['eig_max']:.3g}], "
               f"{lp['n_negative']} neg.")  # fmt: skip
         h0, h1 = lp["newton_history"][0], lp["newton_history"][-1]
-        print(f"  Newton-CG {len(lp['newton_history']) - 1} steps: -log_post "
+        print(f"  TR-Newton {len(lp['newton_history']) - 1} steps: -log_post "
               f"{h0['neg_log_post']:.2f} -> {h1['neg_log_post']:.2f}, |grad| "
               f"{h0['grad_norm']:.3g} -> {h1['grad_norm']:.3g}")  # fmt: skip
         for name in FIELDS:
@@ -1148,6 +1268,14 @@ def main():
                   f"z_rms {q['z_rms']:.2f}  post std {q['median_post_std']:.3f}")  # fmt: skip
         m16, m50, m84 = nm["total_log_mass_16_50_84"]
         print(f"  total log M* {m50:.3f} +{m84 - m50:.3f} -{m50 - m16:.3f}")
+    if "modes" in metrics:
+        print(f"modes ({len(runs)} starts; best = start {i_best + 1}):")
+        for i, m in enumerate(metrics["modes"]):
+            c = " ".join(f"{SHORT.get(k, k)}={v:.2f}" for k, v in m["coverage68"].items())
+            print(f"  {i + 1}: log Z {m['log_evidence_laplace']:.1f}  -log_post "
+                  f"{m['neg_log_post']:.1f}  conv {m['newton_converged']}  neg {m['n_negative']}"
+                  f"  |dz| {m['whitened_distance_to_best']:.1f}  M* "
+                  f"{m['total_log_mass_16_50_84'][1]:.3f}  cov68 {c}")  # fmt: skip
     for stage in ("laplace", args.sampler):
         sc = metrics.get(stage, {}).get("scalars")
         if sc:

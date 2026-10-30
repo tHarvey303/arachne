@@ -481,6 +481,7 @@ def run_whitened_nuts(
     whitened: WhitenedLogDensity | None = None,
     hess: np.ndarray | None = None,
     max_variance: float = DEFAULT_MAX_VARIANCE,
+    initial_positions=None,
 ):
     """Run NUTS in whitened coordinates and return the result in ``theta`` space.
 
@@ -520,6 +521,10 @@ def run_whitened_nuts(
         whitened: Pre-built :class:`WhitenedLogDensity` (skips the Hessian).
         hess: Pre-computed Hessian at ``theta_map`` (skips its evaluation).
         max_variance: See :func:`laplace_covariance`.
+        initial_positions: Optional ``(n_chains, d)`` starting points in ``theta``
+            (e.g. modes from different optimiser starts, so that R-hat can
+            reveal multimodality); no jitter is added to them.  Default: every
+            chain starts at ``theta_map``, jittered.
 
     Returns:
         ``(result, whitened)``: a ``NUTSResult`` whose ``samples`` and
@@ -538,7 +543,16 @@ def run_whitened_nuts(
         max_num_doublings=max_num_doublings,
         dense_mass_matrix=dense_mass_matrix,
     )
-    z_init = jnp.zeros(whitened.n_params, dtype=whitened.mean.dtype)
+    if initial_positions is None:
+        z_init = jnp.zeros(whitened.n_params, dtype=whitened.mean.dtype)
+    else:
+        init = jnp.asarray(initial_positions, dtype=whitened.mean.dtype)
+        if init.shape != (n_chains, whitened.n_params):
+            raise ValueError(
+                f"initial_positions must have shape ({n_chains}, {whitened.n_params}); "
+                f"got {init.shape}"
+            )
+        z_init = jax.vmap(whitened.from_theta)(init)
     result = sampler.run(z_init, rng_key, n_chains=n_chains, chain_jitter=chain_jitter)
 
     chains = result.chains
