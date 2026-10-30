@@ -175,7 +175,8 @@ SHORT = {"log_mass": "M", "Av": "Av", "log10metallicity": "Z",
 FIELDS = ["log_mass", "Av", "log10metallicity", "logsfr_ratio_0", "logsfr_ratio_3"]
 FIXED = {"redshift": REDSHIFT}
 FIXED_TRUTH = {"redshift": REDSHIFT, **TRUTH_GLOBALS}
-SFH_SETUPS = ("map03", "fixed_truth", "map_all")
+SFH_SETUPS = ("map03", "fixed_truth", "map_all", "merge0")
+PINNED = ()  # fit fields held at their mean (tiny prior amplitude); see set_sfh
 
 
 def set_sfh(name):
@@ -184,9 +185,13 @@ def set_sfh(name):
     ``map03``: ratios 0 and 3 mapped, 1/2/4 free globals.  ``fixed_truth``: as map03 but the
     fit holds ratios 1/2/4 at their true values (diagnostic for the bin-trading degeneracy).
     ``map_all``: every ratio mapped; the truths of 1/2/4 are fields around TRUTH_GLOBALS
-    (constant maps for the spiral).
+    (constant maps for the spiral).  ``merge0``: as map03, but the fit pins ratio_0 at 0
+    (equal SFR in 0-3 and 3-10 Myr, i.e. one 0-10 Myr bin) while the truth keeps its map:
+    a deliberately coarser SFH than the truth, testing whether removing that bin's freedom
+    stops the bin trading.
     """
-    global FIELDS, FIXED, FIXED_TRUTH
+    global FIELDS, FIXED, FIXED_TRUTH, PINNED
+    PINNED = ("logsfr_ratio_0",) if name == "merge0" else ()
     ratios = [0, 1, 2, 3, 4] if name == "map_all" else [0, 3]
     FIELDS = ["log_mass", "Av", "log10metallicity"] + [f"logsfr_ratio_{i}" for i in ratios]
     FIXED = {"redshift": REDSHIFT}
@@ -334,7 +339,8 @@ def spiral_truth(n, rng):
 
 
 def build_model(n, mass_mean, mean_values=None, corr_scale=1.0, nu=1.5, fixed=None,
-                hyper=False, couple=False, amp_scale=1.0, sfh_prior=None):  # fmt: skip
+                hyper=False, couple=False, amp_scale=1.0, sfh_prior=None,
+                pinned=None):  # fmt: skip
     """CorrelatedFieldMap with the demo's hyperparameters.
 
     ``corr_scale`` multiplies every correlation length; ``nu`` is the Matérn slope of the
@@ -344,17 +350,20 @@ def build_model(n, mass_mean, mean_values=None, corr_scale=1.0, nu=1.5, fixed=No
     defaults); ``couple`` fits A_V's
     response to the mass and SFH-ratio deviations (N(0, 0.5^2) each).  ``sfh_prior``
     (default SFH_PRIOR) sets the SFH-ratio priors; the truth model passes ``"legacy"`` so
-    the mocks do not depend on the fit's prior.
+    the mocks do not depend on the fit's prior.  ``pinned`` (default PINNED; the truth
+    passes ``()``) fields get amplitude and level sigma 1e-3 around a zero mean: held at 0.
     """
+    pinned = PINNED if pinned is None else pinned
     fixed = FIXED if fixed is None else fixed
     sfh_prior = SFH_PRIOR if sfh_prior is None else sfh_prior
     spec = {"dist": "studentt", "df": 2.0, "loc": 0.0, "scale": SFH_PRIOR_SCALES[sfh_prior]}
     ratios = [p for p in SPS_PARAM_NAMES if p.startswith("logsfr_ratio")]
     marginals = None
     if sfh_prior != "legacy":
-        marginals = {p: spec for p in ratios if p in FIELDS}
+        marginals = {p: spec for p in ratios if p in FIELDS and p not in pinned}
     means = {"log_mass": mass_mean}
     means.update({k: v for k, v in (mean_values or NEUTRAL).items() if k in FIELDS})
+    means.update({k: 0.0 for k in pinned})
     free_globals = [p for p in SPS_PARAM_NAMES if p not in FIELDS and p not in fixed]
     ells = {k: corr_scale * v for k, v in CORR_LENGTHS.items() if k in FIELDS}
     hyper_priors = None
@@ -382,8 +391,12 @@ def build_model(n, mass_mean, mean_values=None, corr_scale=1.0, nu=1.5, fixed=No
         fixed_params=fixed,
         corr_lengths=ells,
         nus={k: (1.5 if k == "log_mass" else nu) for k in FIELDS},
-        amplitudes={k: amp_scale * v for k, v in AMPLITUDES.items() if k in FIELDS},
-        level_sigmas={k: v for k, v in LEVEL_SIGMAS.items() if k in FIELDS},
+        amplitudes={
+            k: 1e-3 if k in pinned else amp_scale * v for k, v in AMPLITUDES.items() if k in FIELDS
+        },
+        level_sigmas={
+            k: 1e-3 if k in pinned else v for k, v in LEVEL_SIGMAS.items() if k in FIELDS
+        },
         mean_maps=means,
         field_marginals=marginals,
         variance_fraction=0.99,
@@ -1038,7 +1051,8 @@ def main():
     offsets = HONEST_OFFSETS if args.honest else {}
     truth_means = {k: TRUTH_GLOBALS.get(k, v) + offsets.get(k, 0.0) for k, v in NEUTRAL.items()}
     truth_model = build_model(n, disk, mean_values=truth_means, fixed=FIXED_TRUTH,
-                              sfh_prior="legacy", **truth_hyper_scales(args))  # fmt: skip
+                              sfh_prior="legacy", pinned=(),
+                              **truth_hyper_scales(args))  # fmt: skip
     arm_weight = None
     if args.truth == "prior":
         theta_truth = truth_model.sample_prior(jax.random.PRNGKey(args.seed), 1)[0]
