@@ -76,6 +76,39 @@ Risk: if the bin trading is also *pixel-local* (per-region SFH modes), the condi
 Gaussian and the split does not remove the problem. The `map_all` runs and the per-start mode table
 show which case we are in.
 
+### Tempered SMC
+
+`blackjax.adaptive_tempered_smc(logprior_fn, loglikelihood_fn, mcmc_build_kernel, mcmc_init,
+mcmc_parameters, resampling_fn, target_ess, num_mcmc_steps=...)`
+([sampling book](https://blackjax-devs.github.io/sampling-book/algorithms/temperedsmc/)).
+Particles move through the tempered sequence `π_λ ∝ prior × L^λ` from λ = 0 to 1. Each next λ
+is chosen so the ESS of the incremental weights stays at `target_ess` (e.g. 0.5); particles are
+then resampled and moved with a few MCMC steps (HMC/NUTS, step size and metric retuned per stage
+via `inner_kernel_tuning`). The sum of the log mean incremental weights is log Z. Its main
+strength is that a population of particles keeps every mode that carries prior × likelihood
+mass, with the right relative weights.
+
+Fit to this problem:
+- **Prior start is easy.** The θ prior is N(0, I) on the coefficients plus simple densities on
+  levels and globals, so `sample_prior` gives exact λ = 0 particles.
+- **Cost from the prior is high.** The number of stages grows with the information gained from
+  prior to posterior. Here that is thousands of nats (information ≈ 0.6–0.95 per map pixel,
+  17 bands), i.e. hundreds of stages. Each stage moves ~10³ particles with several HMC
+  trajectories. Each particle is a full 64×64×17 forward model, so the total is ~10⁷–10⁸
+  likelihood calls: many hours on the H100. Use it as a reference run on one mock, not routinely.
+- **Moves need per-stage whitening.** The Laplace whitening is right only at λ = 1. Use the
+  particle cloud's diagonal or low-rank covariance per stage.
+- **Bridge from an approximation instead of the prior.** Temper `q^(1−λ) × p(θ | d)^λ`, with q a
+  normalised, samplable approximation: the evidence-weighted mixture of the multi-start Laplace
+  modes, or SBI-seeded Gaussians. The number of stages then scales with KL(q → posterior), not
+  KL(prior → posterior). log Z stays exact because q is normalised. It is the SMC analogue of the
+  posterior repartitioning in TODO §1b. q must cover every mode (widen it, or mix in a little
+  prior); this ties SMC to the mode-finding steps above.
+- **Natural outer sampler for the INLA split.** With ~20 galaxy-level parameters and the field
+  integrated out by Laplace, tempered SMC needs ~10³ particles and tens of stages. Each particle
+  evaluation is an inner polish plus a log det, vmappable in principle but memory-heavy. This is
+  probably its best role here.
+
 ### SBI-seeded starts
 
 The amortised synference posteriors (same SPS library) run on the galaxy's integrated or
