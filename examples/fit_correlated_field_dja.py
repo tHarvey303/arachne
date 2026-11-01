@@ -60,6 +60,24 @@ from arachne.spatial.mass_start import default_sfh_dust_templates, template_mass
 ALL_BANDS = sorted(demo.NIRCAM_PIVOT_UM, key=demo.NIRCAM_PIVOT_UM.get)
 
 
+def parse_model_err(spec, filters):
+    """``0.05`` or ``F115W=0.05,F444W=0.03,default=0.04`` -> (N_bands,) array."""
+    spec = str(spec)
+    if "=" not in spec:
+        return np.full(len(filters), float(spec))
+    table = dict(item.split("=") for item in spec.split(","))
+    default = table.pop("default", None)
+    out = []
+    for f in filters:
+        if f in table:
+            out.append(float(table[f]))
+        elif default is not None:
+            out.append(float(default))
+        else:
+            raise ValueError(f"--model-err-frac: no value for {f} and no default")
+    return np.array(out)
+
+
 def configure_demo(filters, pixel_scale, redshift):
     """Point the demo's module globals at this data set (bands, grid, redshift)."""
     filters = sorted(filters, key=demo.NIRCAM_PIVOT_UM.get)
@@ -248,9 +266,9 @@ def main():
     ap.add_argument("--cache-dir", default=None)
     ap.add_argument(
         "--model-err-frac",
-        type=float,
-        default=0.05,
-        help="model-inadequacy floor (fraction of the model)",
+        default="0.05",
+        help="model-inadequacy floor as a fraction of the model: one value for every band, or "
+        "'F115W=0.05,F444W=0.03,default=0.04' (the per-band emulator error is added in quadrature)",
     )
     ap.add_argument(
         "--emulator-err-json",
@@ -303,9 +321,9 @@ def main():
         args.rounds, args.steps = 2, 300
     vi = args.posterior in ("geovi", "mgvi")
     laplace = args.posterior == "laplace"
-    if vi and args.model_err_frac > 0:
+    if vi and args.model_err_frac != "0":
         print("NOTE: geoVI/MGVI need model_error_frac = 0 (run_mgvi refuses a floor); forcing 0")
-        args.model_err_frac = 0.0
+        args.model_err_frac = "0"
 
     target = rdu.resolve_target(args.target, args.ra, args.dec, args.z)
     ra, dec, z = target.ra, target.dec, target.z
@@ -345,7 +363,8 @@ def main():
     if args.emulator_err_json:
         tab = json.load(open(args.emulator_err_json))["bands"]
         emu_err = np.array([tab[f"JWST/NIRCam.{f}"][args.emulator_err_key]["mad"] for f in filters])
-    frac = np.sqrt(args.model_err_frac**2 + emu_err**2)
+    model_err = parse_model_err(args.model_err_frac, filters)
+    frac = np.sqrt(model_err**2 + emu_err**2)
     print("model_error_frac per band:", np.array2string(frac, precision=4))
 
     demo.set_sfh(args.sfh, args.free_globals)
@@ -468,7 +487,7 @@ def main():
         "pixel_scale": float(obs.pixel_scale),
         "size_px": n,
         "frame_arcsec": args.frame_arcsec,
-        "model_err_frac": args.model_err_frac,
+        "model_err_frac": model_err.tolist(),
         "emulator_err_frac": emu_err.tolist(),
         "model_error_frac_per_band": frac.tolist(),
         "sfh": args.sfh,
