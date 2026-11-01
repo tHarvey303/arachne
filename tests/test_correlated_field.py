@@ -565,3 +565,234 @@ class TestCopulaMarginals:
             make_model6(field_marginals={"log_mass": BURSTY})
         with pytest.raises(ValueError, match="not a bounded field"):
             make_model6(field_marginals={"fesc": BURSTY})
+
+
+class Emu6(ToySEDEmulator):
+    """Toy emulator on NAMES6 (the SFH ratio is ignored)."""
+
+    def predict(self, params):
+        """(N, 6) -> (N, 4) nJy."""
+        return super().predict(params[:, :5])
+
+
+def _fm6(model):
+    """ForwardModel for a NAMES6 model on a flat 24x24 observation."""
+    emu = Emu6(_param_names=NAMES6, _band_names=BANDS)
+    psf = PSFModel(kernels=_gaussian_kernels([1.0, 1.2, 1.4, 1.8]), band_names=BANDS)
+    obs = ObservationCube(
+        flux=np.ones((4, 24, 24), np.float32),
+        variance=np.ones((4, 24, 24), np.float32),
+        mask=np.ones((4, 24, 24), np.float32),
+        band_names=BANDS,
+        pixel_scale=0.03,
+    )
+    return ForwardModel.build(obs, psf, model, emu)
+
+
+LATENT = {"sfh_a": (-3.0, 3.0), "sfh_b": (-3.0, 3.0)}
+DERIVED = {"logsfr_ratio_0": {"offset": 0.1, "weights": {"sfh_a": 0.8, "sfh_b": -0.5}}}
+
+
+def make_latent_model(**kw):
+    """NAMES6 model whose SFH ratio is derived from two latent fields."""
+    defaults = dict(
+        field_params=["log_mass", "sfh_a", "sfh_b", "Av"],
+        latent_fields=LATENT,
+        derived_params=DERIVED,
+        mean_maps={"log_mass": 7.0, "Av": 1.0, "sfh_a": 0.5, "sfh_b": -0.2},
+    )
+    defaults.update(kw)
+    return make_model6(**defaults)
+
+
+class TestLatentAndDerived:
+    """Latent (non-emulator) fields and derived emulator parameters."""
+
+    def test_roles_and_names(self):
+        """Latent fields are fields but not emulator inputs; the derived ratio is not global."""
+        m = make_latent_model()
+        assert m.field_names == ["log_mass", "sfh_a", "sfh_b", "Av"]
+        assert m.latent_names == ["sfh_a", "sfh_b"]
+        assert m.derived_names == ["logsfr_ratio_0"]
+        assert m.global_names == ["fesc"]
+        assert m.param_map_names == ["log_mass", "Av", "logsfr_ratio_0"]
+        assert m.fields[1].bounds == (-3.0, 3.0) and m.fields[1].latent
+
+    def test_decode_derived_column(self):
+        """Derived column = softclip(offset + weights . physical maps); maps match decode."""
+        m = make_latent_model()
+        theta = 3.0 * m.sample_prior(jax.random.PRNGKey(0), 1)[0]
+        fmaps = np.asarray(m.field_maps(theta))
+        ia, ib = m.field_names.index("sfh_a"), m.field_names.index("sfh_b")
+        assert fmaps[ia].min() >= -3.0 - 1e-4 and fmaps[ia].max() <= 3.0 + 1e-4
+        lin = 0.1 + 0.8 * fmaps[ia] - 0.5 * fmaps[ib]
+        lo, hi = BOUNDS6["logsfr_ratio_0"]
+        expect = lo + np.logaddexp(0, 20 / (hi - lo) * (lin - lo)) / (20 / (hi - lo))
+        expect -= np.logaddexp(0, 20 / (hi - lo) * (lin - hi)) / (20 / (hi - lo))
+        rows = np.asarray(m.decode(theta))
+        col = NAMES6.index("logsfr_ratio_0")
+        np.testing.assert_allclose(rows[:, col], expect.ravel(), atol=1e-4)
+        np.testing.assert_allclose(rows[:, col], lin.ravel(), atol=1e-3)  # interior: ~identity
+        pm = np.asarray(m.param_maps(theta))
+        assert pm.shape == (3, 24, 24)
+        for i, p in enumerate(m.param_map_names):
+            np.testing.assert_allclose(pm[i].ravel(), rows[:, NAMES6.index(p)], atol=1e-6)
+
+    def test_derived_clipped_to_bounds(self):
+        """A large offset is soft-clipped into the derived parameter's bounds."""
+        m = make_latent_model(
+            derived_params={"logsfr_ratio_0": {"offset": 50.0, "weights": {"sfh_a": 1.0}}}
+        )
+        rows = np.asarray(m.decode(m.initial_theta()))
+        assert rows[:, NAMES6.index("logsfr_ratio_0")].max() <= 10.0 + 1e-4
+
+    def test_latent_options_by_name(self):
+        """Couplings, hyper priors and marginals work on latent fields by name."""
+        m = make_latent_model(
+            couplings={"Av": {"sfh_a": 0.5}},
+            free_couplings={"sfh_b": {"sfh_a": 0.3}},
+            hyper_priors={"sfh_a": {"log_amplitude": {"loc": np.log(0.3), "scale": 0.5}}},
+            field_marginals={"sfh_b": BURSTY},
+            amplitudes={"log_mass": 0.3, "sfh_a": 0.4, "sfh_b": 0.6, "Av": 0.3},
+        )
+        assert m.coupling_names == ["c[sfh_b<-sfh_a]"] and m.hyper_names == ["log_amplitude[sfh_a]"]
+        g = jax.grad(_fm6(m).log_posterior)(m.sample_prior(jax.random.PRNGKey(1), 1)[0])
+        assert bool(jnp.all(jnp.isfinite(g)))
+        assert "latent sfh_a" in m.summary() and "derived logsfr_ratio_0" in m.summary()
+
+    def test_validation(self):
+        """Collisions, unknown names and missing roles raise."""
+        with pytest.raises(ValueError, match="collides"):
+            make_latent_model(latent_fields={**LATENT, "Av": (0.0, 1.0)})
+        with pytest.raises(ValueError, match="must be listed in field_params"):
+            make_latent_model(latent_fields={**LATENT, "sfh_c": (0.0, 1.0)})
+        with pytest.raises(ValueError, match="neither an emulator parameter"):
+            make_latent_model(field_params=["log_mass", "sfh_a", "sfh_b", "Av", "bogus"])
+        with pytest.raises(ValueError, match="not an emulator parameter"):
+            make_latent_model(derived_params={"sfh_a": {"weights": {"sfh_b": 1.0}}})
+        with pytest.raises(ValueError, match="also mapped or fixed"):
+            make_latent_model(derived_params={"Av": {"weights": {"sfh_a": 1.0}}})
+        with pytest.raises(ValueError, match="also mapped or fixed"):
+            make_latent_model(derived_params={"log10metallicity": {"weights": {"sfh_a": 1.0}}})
+        with pytest.raises(ValueError, match="not a field"):
+            make_latent_model(derived_params={"logsfr_ratio_0": {"weights": {"fesc": 1.0}}})
+        with pytest.raises(ValueError, match="no bounds given for derived"):
+            make_latent_model(param_bounds={k: v for k, v in BOUNDS6.items() if "sfh" not in k
+                                            and k != "logsfr_ratio_0"})  # fmt: skip
+        with pytest.raises(ValueError, match="unknown keys"):
+            make_latent_model(derived_params={"logsfr_ratio_0": {"weight": {"sfh_a": 1.0}}})
+
+
+class TestModeTruncation:
+    """Per-field k_max / variance_fraction."""
+
+    def test_per_field_k_max(self):
+        """A per-field k_max trims only that field; summary reports it."""
+        base = make_model()
+        m = make_model(k_max={"Av": 0.5})
+        n0 = {f.name: f.n_modes for f in base.fields}
+        n1 = {f.name: f.n_modes for f in m.fields}
+        av = m.fields[m.field_names.index("Av")]
+        assert av.k_max == 0.5 and av.variance_fraction == 1.0
+        assert np.all(av.k <= 0.5)
+        assert n1["log_mass"] == n0["log_mass"]
+        assert n1["log10metallicity"] == n0["log10metallicity"]
+        assert n1["Av"] != n0["Av"]
+        assert "k_max=0.5" in m.summary()
+        assert m.n_params == 3 + 1 + sum(2 * f.n_modes for f in m.fields)
+
+    def test_k_max_and_variance_combined(self):
+        """With both rules a mode must pass both; scalar k_max keeps the old behaviour."""
+        only_k = make_model(k_max={"Av": 1.0})
+        both = make_model(k_max={"Av": 1.0}, variance_fraction={"Av": 0.9})
+        var_only = make_model(variance_fraction={"Av": 0.9})
+        n = lambda m: m.fields[m.field_names.index("Av")].n_modes  # noqa: E731
+        assert n(both) <= min(n(only_k), n(var_only))
+        legacy = make_model(k_max=0.8)
+        assert all(f.variance_fraction == 1.0 and f.k_max == 0.8 for f in legacy.fields)
+        with pytest.raises(ValueError, match="non-fields"):
+            make_model(k_max={"fesc": 1.0})
+
+
+class TestCouplingLoc:
+    """Free couplings with a non-zero prior mean."""
+
+    def test_loc_in_init_prior_and_samples(self):
+        """Coupling starts at loc; log_prior peaks there; samples centre on it."""
+        m = make_model6(
+            free_couplings={"Av": {"logsfr_ratio_0": {"loc": 0.4, "scale": 0.1}, "log_mass": 0.2}}
+        )
+        c0 = np.asarray(m.coupling_theta(m.initial_theta()))
+        np.testing.assert_allclose(c0, [0.4, 0.0])
+        t = m.initial_theta()
+        ic = m.n_fields + m.n_global + m.n_hyper
+        lp0 = float(m.log_prior(t))
+        lp1 = float(m.log_prior(t.at[ic].add(0.1)))
+        assert lp0 - lp1 == pytest.approx(0.5, rel=1e-4)
+        c = np.asarray(jax.vmap(m.coupling_theta)(m.sample_prior(jax.random.PRNGKey(0), 4000)))
+        np.testing.assert_allclose(c.mean(0), [0.4, 0.0], atol=0.02)
+        np.testing.assert_allclose(c.std(0), [0.1, 0.2], rtol=0.06)
+        assert "c[Av<-logsfr_ratio_0]~N(0.40,0.10)" in m.summary()
+        with pytest.raises(ValueError, match="sigma or"):
+            make_model6(free_couplings={"Av": {"log_mass": {"loc": 0.1}}})
+
+
+class TestPhysicalCopulaLevel:
+    """copula_level="physical": the level shifts the transformed map in physical units."""
+
+    def _model(self, **kw):
+        return make_model6(
+            field_marginals={"logsfr_ratio_0": BURSTY},
+            copula_level="physical",
+            level_sigmas={"logsfr_ratio_0": 0.5},
+            amplitudes={"log_mass": 0.3, "logsfr_ratio_0": 0.5, "Av": 0.3},
+            **kw,
+        )
+
+    def test_gauss_scale_and_level_shift(self):
+        """sigma_k = amplitude; the level adds exactly in physical units."""
+        m = self._model()
+        k = m.field_names.index("logsfr_ratio_0")
+        assert m.fields[k].gauss_scale == pytest.approx(0.5)
+        th = m.sample_prior(jax.random.PRNGKey(0), 1)[0].at[: m.n_fields].set(0.0)
+        p0 = np.asarray(m.field_maps(th))[k]
+        p1 = np.asarray(m.field_maps(th.at[k].set(0.7)))[k]
+        inner = np.abs(p0) < 2.5  # heavy-tailed pixels near the +-10 bounds feel the clamp
+        assert inner.mean() > 0.7
+        np.testing.assert_allclose((p1 - p0)[inner], 0.7, atol=2e-3)
+        u0 = np.asarray(m.gaussian_maps(th))[k]
+        u1 = np.asarray(m.gaussian_maps(th.at[k].set(0.7)))[k]
+        np.testing.assert_allclose(u0, u1)  # level not in the Gaussian map
+        with pytest.raises(ValueError, match="copula_level"):
+            make_model6(copula_level="bogus")
+
+    def test_pixel_marginal_centred_at_loc_plus_level(self):
+        """At a fixed level a, one pixel is ~ loc + a + Student-t(2)."""
+        m = self._model()
+        k = m.field_names.index("logsfr_ratio_0")
+        th = m.sample_prior(jax.random.PRNGKey(1), 4000).at[:, k].set(0.6)
+        x = np.asarray(jax.vmap(lambda t: m.field_maps(t)[k, 12, 12])(th))
+        f = m.fields[k]
+        q = np.percentile(x, [25, 50, 75])
+        assert q[1] == pytest.approx(0.6, abs=0.06)
+        # Field variance slightly truncated: quartiles of t(2) at a reduced Gaussian scale.
+        w = 0.6745 * np.sqrt(f.variance_kept)
+        p = float(jax.scipy.special.ndtr(w))
+        t_q = (2 * p - 1) / np.sqrt(2 * p * (1 - p))
+        np.testing.assert_allclose(q[[0, 2]], [0.6 - t_q, 0.6 + t_q], atol=0.1)
+
+    def test_projection_and_gradients(self):
+        """project_to_field accounts for the level; ForwardModel gradients are finite."""
+        m = self._model(mean_maps={"log_mass": 7.0, "Av": 1.0, "logsfr_ratio_0": -0.7})
+        k = m.field_names.index("logsfr_ratio_0")
+        t0 = m.initial_theta().at[k].set(0.3)
+        np.testing.assert_allclose(np.asarray(m.field_maps(t0))[k], -0.4, atol=1e-4)
+        yy, xx = np.mgrid[0:24, 0:24]
+        target = -0.4 + 0.6 * np.exp(-((xx - 12) ** 2 + (yy - 10) ** 2) / (2 * 4.0**2))
+        t1 = m.project_to_field(t0, "logsfr_ratio_0", target, ridge=1e-4, maxiter=2000)
+        got = np.asarray(m.field_maps(t1))[k]
+        assert np.sqrt(np.mean((got - target) ** 2)) < 0.03
+        m2 = self._model(free_couplings={"Av": {"logsfr_ratio_0": 0.5}})
+        g = jax.grad(_fm6(m2).log_posterior)(m2.sample_prior(jax.random.PRNGKey(2), 1)[0])
+        assert bool(jnp.all(jnp.isfinite(g)))
+        assert float(jnp.abs(g[k])) > 0

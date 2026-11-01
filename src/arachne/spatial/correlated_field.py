@@ -120,9 +120,15 @@ class _FieldSpec:
         self.corr_length = float(corr_length)
         self.nu = float(nu)
         self.level_sigma = float(level_sigma)
+        self.latent = False  # True for a latent (non-emulator) field
         # Copula marginal (see CorrelatedFieldMap field_marginals); None = Gaussian field.
         self.marginal: dict | None = None
         self.gauss_scale = 1.0
+        # True when the level is added in physical units after the copula transform.
+        self.physical_level = False
+        # Mode truncation for this field (None / 1.0 = rule not applied).
+        self.k_max: float | None = None
+        self.variance_fraction = 1.0
         self.fixed_couplings: dict[str, float] = {}  # source field -> fixed coefficient
         self.free_coupling_idx: dict[str, int] = {}  # source field -> index into coupling block
         # Free hyperparameters: name -> index into the hyper block (log_amplitude,
@@ -140,7 +146,7 @@ class _FieldSpec:
 class CorrelatedFieldMap(SpatialModel):
     """Per-pixel SPS parameter maps, each a Gaussian random field around a mean map.
 
-    Every emulator parameter plays one of three roles:
+    Every emulator parameter plays exactly one of four roles:
 
     - **field**: a map ``p_k(x)`` with a Gaussian-random-field (GP) prior.  The
       mass parameter must be a field (``log_mass`` per *pixel*, unbounded:
@@ -148,6 +154,23 @@ class CorrelatedFieldMap(SpatialModel):
     - **global**: one free scalar shared by every pixel, uniform within its
       bounds (sigmoid-mapped, with the Jacobian in the prior).
     - **fixed**: a constant, e.g. the spectroscopic redshift.
+    - **derived**: a per-pixel linear combination of field maps (below).
+
+    Latent and derived parameters
+    -----------------------------
+    ``latent_fields`` declares bounded fields that are *not* emulator inputs,
+    e.g. two "SFH basis" maps spanning the directions of the five
+    ``logsfr_ratio_*`` that the photometry constrains.  They are mapped like
+    any other bounded field (they must be listed in ``field_params``, and all
+    per-field options apply to them by name).  ``derived_params`` then builds
+    emulator inputs from the *physical* field maps ``p_j`` (after copula and
+    clip)::
+
+        p_d(x) = softclip(offset_d + sum_j w_dj * p_j(x), bounds_d)
+
+    Derived parameters add no entries to theta and no prior terms.
+    :meth:`param_maps` returns every per-pixel emulator input (mapped
+    emulator fields, then derived), named by ``param_map_names``.
 
     Field model
     -----------
@@ -174,9 +197,10 @@ class CorrelatedFieldMap(SpatialModel):
     the gradients stay consistent (non-centred hierarchical GP).
 
     Only Fourier modes that carry most of the prior variance are kept
-    (``variance_fraction``, or an explicit ``k_max``), so a map costs a few
-    hundred parameters rather than ``H * W``.  The DC mode is excluded (the free
-    level ``a_k`` replaces it) and so are the self-conjugate Nyquist modes.
+    (``variance_fraction``, or an explicit ``k_max``; both may be given per
+    field), so a map costs a few hundred parameters rather than ``H * W``.  The
+    DC mode is excluded (the free level ``a_k`` replaces it) and so are the
+    self-conjugate Nyquist modes.
 
     Theta layout::
 
@@ -222,6 +246,28 @@ class CorrelatedFieldMap(SpatialModel):
     ``level_sigma``, ``amplitude`` and couplings act in Gaussian space (units
     of ``sigma_k``).  ``sigma_k`` uses the fixed amplitude even when the
     amplitude is fitted, so the marginal is then only approximately ``F``.
+
+    That is ``copula_level="gaussian"`` (the default).  Its drawback is that
+    the level is shared through the heavy-tailed transform: a 2-sigma level
+    excursion pushes *every* pixel's ``w`` to ~2, which for Student-t(2) maps
+    the whole map out to ~4.5 scale units, and an optimiser that wanders
+    there struggles to come back.  With ``copula_level="physical"`` the level
+    is added after the transform, in physical units::
+
+        p_k(x) = softclip(loc + scale * F^-1(Phi(v_k(x) / sigma_k)) + a_k, bounds_k)
+        v_k(x) = m_k(x) + s_k * g_k(x) + sum_j c_kj * d_j(x)
+        sigma_k = amplitude_k
+
+    with the same prior ``a_k ~ N(0, level_sigma_k^2)`` (now in physical
+    units).  Each pixel is then ``F`` (from the field) shifted by the shared
+    level.  :meth:`gaussian_maps` returns ``v_k`` (no level) for such a field,
+    the deviation it passes to coupled fields is ``v_k - m_k``, and
+    :meth:`project_to_field` subtracts the level from the physical target
+    before mapping it to Gaussian space.  Fields without a marginal are
+    unaffected by ``copula_level``.
+
+    Free couplings may have a non-zero prior mean (``{"loc": m, "scale": s}``);
+    such a coupling starts at ``m`` in :meth:`initial_theta`.
     """
 
     def __init__(
@@ -237,16 +283,19 @@ class CorrelatedFieldMap(SpatialModel):
         nus: Mapping[str, float] | float = 1.5,
         level_sigmas: Mapping[str, float] | None = None,
         couplings: Mapping[str, Mapping[str, float]] | None = None,
-        free_couplings: Mapping[str, Mapping[str, float]] | None = None,
+        free_couplings: Mapping[str, Mapping[str, float | Mapping[str, float]]] | None = None,
         hyper_priors: Mapping[str, Mapping[str, Mapping[str, float]]] | None = None,
         global_priors: Mapping[str, Mapping] | None = None,
         mean_maps: Mapping[str, np.ndarray | float] | None = None,
         field_marginals: Mapping[str, Mapping] | None = None,
-        variance_fraction: float = 0.99,
-        k_max: float | None = None,
+        variance_fraction: Mapping[str, float] | float = 0.99,
+        k_max: Mapping[str, float] | float | None = None,
         pad: int | None = None,
         pixel_scale: float | None = None,
         softclip_sharpness: float = 20.0,
+        latent_fields: Mapping[str, tuple[float, float]] | None = None,
+        derived_params: Mapping[str, Mapping] | None = None,
+        copula_level: str = "gaussian",
     ) -> None:
         """Initialise the model.
 
@@ -270,8 +319,9 @@ class CorrelatedFieldMap(SpatialModel):
                 to an earlier field's deviation with coefficient ``c`` (target units
                 per source unit, e.g. mag per dex).
             free_couplings: Fitted couplings ``{target: {source: prior_sigma}}``;
-                each coefficient gets a ``N(0, prior_sigma^2)`` prior.  ``source``
-                must come before ``target`` in ``field_names``.
+                each coefficient gets a ``N(0, prior_sigma^2)`` prior, or
+                ``{target: {source: {"loc": m, "scale": s}}}`` for ``N(m, s^2)``.
+                ``source`` must come before ``target`` in ``field_names``.
             hyper_priors: ``{field: {"log_amplitude" | "log_corr_length" | "log_nu":
                 {"loc": ..., "scale": ...}}}`` makes those hyperparameters free,
                 with Gaussian priors on their natural logs (``corr_length`` in px).
@@ -288,17 +338,33 @@ class CorrelatedFieldMap(SpatialModel):
                 continuity) or ``{"dist": "normal", "loc": ..., "scale": ...}``;
                 see "Copula marginals" above.
             variance_fraction: Keep the highest-power modes that together hold
-                this fraction of each field's prior variance.
-            k_max: Alternatively keep every mode with ``|k| <= k_max`` (rad/px).
+                this fraction of each field's prior variance; one value for all
+                or ``{field: fraction}`` (fields not listed: 0.99, or no
+                variance cut if they have a ``k_max``).  1.0 disables the cut.
+            k_max: Keep only modes with ``|k| <= k_max`` (rad/px); one value for
+                all or ``{field: k_max}``.  A field with a ``k_max`` and no
+                explicit per-field ``variance_fraction`` gets no variance cut;
+                with both, a mode must pass both rules.
             pad: Zero-padding in pixels on each side.  Default
                 ``min(max(H, W), ceil(2 * max corr_length))``, at least 4.
             pixel_scale: Arcsec per pixel (stored for bookkeeping only).
             softclip_sharpness: Sharpness of the soft clamp, in units of
                 ``1 / bounds width``; larger is closer to a hard clip.
+            latent_fields: ``{name: (lo, hi)}`` for bounded fields that are not
+                emulator parameters (e.g. SFH basis maps).  Each must also be
+                listed in ``field_params``.
+            derived_params: ``{emulator_param: {"offset": c, "weights": {field:
+                w, ...}}}``: the emulator input is ``softclip(c + sum_j w_j
+                p_j(x), param_bounds[emulator_param])`` from the physical field
+                maps ``p_j`` (latent or emulator fields).
+            copula_level: ``"gaussian"`` (level inside the copula transform) or
+                ``"physical"`` (level added after it, in physical units); see
+                "Copula marginals" above.
 
         Raises:
             ValueError: On an unknown or doubly assigned parameter, a missing
-                bound, or a mass parameter that is not a field.
+                bound, a mass parameter that is not a field, a latent name that
+                collides with an emulator parameter, or a bad derived spec.
         """
         self.image_shape = (int(image_shape[0]), int(image_shape[1]))
         self.emulator_param_names = list(emulator_param_names)
@@ -308,11 +374,32 @@ class CorrelatedFieldMap(SpatialModel):
         self.pixel_scale = pixel_scale
         self.softclip_sharpness = float(softclip_sharpness)
 
+        if copula_level not in ("gaussian", "physical"):
+            raise ValueError("copula_level must be 'gaussian' or 'physical'")
+        self.copula_level = copula_level
+
         names = self.emulator_param_names
         field_params = list(field_params)
+        self.latent_fields = {
+            p: (float(b[0]), float(b[1])) for p, b in (latent_fields or {}).items()
+        }
+        for p, (lo, hi) in self.latent_fields.items():
+            if p in names:
+                raise ValueError(f"latent field {p!r} collides with an emulator parameter")
+            if not hi > lo:
+                raise ValueError(f"latent field {p!r}: bounds must satisfy lo < hi")
+            if p not in field_params:
+                raise ValueError(f"latent field {p!r} must be listed in field_params")
         if mass_param not in field_params:
             raise ValueError(f"mass_param {mass_param!r} must be one of field_params")
-        for p in list(field_params) + list(self.fixed_params):
+        if mass_param not in names:
+            raise ValueError(f"mass_param {mass_param!r} is not an emulator parameter")
+        for p in field_params:
+            if p not in names and p not in self.latent_fields:
+                raise ValueError(
+                    f"field {p!r} is neither an emulator parameter ({names}) nor a latent field"
+                )
+        for p in self.fixed_params:
             if p not in names:
                 raise ValueError(f"{p!r} is not an emulator parameter ({names})")
         overlap = set(field_params) & set(self.fixed_params)
@@ -320,12 +407,42 @@ class CorrelatedFieldMap(SpatialModel):
             raise ValueError(f"parameters both mapped and fixed: {sorted(overlap)}")
         # Mass field first, so couplings can refer to it.
         self.field_names = [mass_param] + [p for p in field_params if p != mass_param]
+        self.latent_names = [p for p in self.field_names if p in self.latent_fields]
+
+        # Derived emulator parameters: linear combinations of physical field maps.
+        self.derived_params: dict[str, dict] = {}
+        for p, spec in (derived_params or {}).items():
+            if p not in names:
+                raise ValueError(f"derived parameter {p!r} is not an emulator parameter")
+            if p in self.field_names or p in self.fixed_params:
+                raise ValueError(f"derived parameter {p!r} is also mapped or fixed")
+            if p not in self.param_bounds:
+                raise ValueError(f"no bounds given for derived parameter {p!r}")
+            unknown = set(spec) - {"offset", "weights"}
+            if unknown:
+                raise ValueError(f"derived_params[{p!r}]: unknown keys {sorted(unknown)}")
+            weights = {str(j): float(w) for j, w in dict(spec.get("weights", {})).items()}
+            for j in weights:
+                if j not in self.field_names:
+                    raise ValueError(
+                        f"derived_params[{p!r}]: weight on {j!r}, which is not a field"
+                    )
+            self.derived_params[p] = {"offset": float(spec.get("offset", 0.0)), "weights": weights}
+        self.derived_names = list(self.derived_params)
         self.global_names = [
-            p for p in names if p not in self.field_names and p not in self.fixed_params
+            p
+            for p in names
+            if p not in self.field_names
+            and p not in self.fixed_params
+            and p not in self.derived_params
         ]
         for p in self.field_names[1:] + self.global_names:
-            if p not in self.param_bounds:
+            if p not in self.param_bounds and p not in self.latent_fields:
                 raise ValueError(f"no bounds given for {p!r}")
+        # Per-pixel emulator inputs, in param_maps order.
+        self.param_map_names = [
+            p for p in self.field_names if p not in self.latent_fields
+        ] + self.derived_names
 
         def per_field(value, name, default=None):
             if isinstance(value, Mapping):
@@ -337,7 +454,12 @@ class CorrelatedFieldMap(SpatialModel):
         self.fields: list[_FieldSpec] = []
         for p in self.field_names:
             is_mass = p == mass_param
-            bounds = None if is_mass else tuple(map(float, self.param_bounds[p]))
+            if is_mass:
+                bounds = None
+            elif p in self.latent_fields:
+                bounds = self.latent_fields[p]
+            else:
+                bounds = tuple(map(float, self.param_bounds[p]))
             default_ls = 1.0 if is_mass else 0.25 * (bounds[1] - bounds[0])
             self.fields.append(
                 _FieldSpec(
@@ -349,13 +471,18 @@ class CorrelatedFieldMap(SpatialModel):
                     level_sigma=level_sigmas.get(p, default_ls),
                 )
             )
+            self.fields[-1].latent = p in self.latent_fields
         order = {p: i for i, p in enumerate(self.field_names)}
         for p, spec in (field_marginals or {}).items():
             if p not in order or p == mass_param:
                 raise ValueError(f"field_marginals given for {p!r}, which is not a bounded field")
             f = self.fields[order[p]]
             f.marginal = _validate_marginal(p, spec)
-            f.gauss_scale = math.hypot(f.level_sigma, f.amplitude)
+            if copula_level == "physical":
+                f.physical_level = True
+                f.gauss_scale = f.amplitude
+            else:
+                f.gauss_scale = math.hypot(f.level_sigma, f.amplitude)
 
         def check_source(target, source):
             if target not in order or source not in order:
@@ -373,18 +500,31 @@ class CorrelatedFieldMap(SpatialModel):
             for source, c in spec.items():
                 check_source(target, source)
                 f.fixed_couplings[source] = float(c)
-        coupling_sigmas = []
+        coupling_sigmas, coupling_locs, coupling_names = [], [], []
         for target, spec in (free_couplings or {}).items():
             if target not in order:
                 raise ValueError(f"free coupling target {target!r} is not a field")
-            for source, sigma in spec.items():
+            for source, prior in spec.items():
                 check_source(target, source)
+                if isinstance(prior, Mapping):
+                    if set(prior) - {"loc", "scale"} or "scale" not in prior:
+                        raise ValueError(
+                            f"free coupling {source!r} -> {target!r}: give a sigma or "
+                            "{'loc': m, 'scale': s}"
+                        )
+                    loc, sigma = float(prior.get("loc", 0.0)), float(prior["scale"])
+                else:
+                    loc, sigma = 0.0, float(prior)
+                if sigma <= 0.0:
+                    raise ValueError(f"free coupling {source!r} -> {target!r}: scale must be > 0")
                 self.fields[order[target]].free_coupling_idx[source] = len(coupling_sigmas)
-                coupling_sigmas.append(float(sigma))
-        self.coupling_names = [
-            f"c[{f.name}<-{s}]" for f in self.fields for s in f.free_coupling_idx
-        ]
+                coupling_sigmas.append(sigma)
+                coupling_locs.append(loc)
+                coupling_names.append(f"c[{target}<-{source}]")
+        # Names in coupling-block order (the order the coefficients were declared).
+        self.coupling_names = coupling_names
         self._coupling_sigma = np.asarray(coupling_sigmas, np.float64)
+        self._coupling_loc = np.asarray(coupling_locs, np.float64)
 
         hyper_loc, hyper_scale, self.hyper_names = [], [], []
         for p, spec in (hyper_priors or {}).items():
@@ -427,8 +567,28 @@ class CorrelatedFieldMap(SpatialModel):
             pad = min(max(H, W), max(4, int(math.ceil(2.0 * max_ell))))
         self.pad = int(pad)
         self.grid_shape = (H + 2 * self.pad, W + 2 * self.pad)
-        self.variance_fraction = float(variance_fraction)
-        self.k_max = k_max
+        for arg, label in ((variance_fraction, "variance_fraction"), (k_max, "k_max")):
+            if isinstance(arg, Mapping):
+                unknown = set(arg) - set(order)
+                if unknown:
+                    raise ValueError(f"{label} given for non-fields {sorted(unknown)}")
+        self.variance_fraction = (
+            dict(variance_fraction)
+            if isinstance(variance_fraction, Mapping)
+            else float(variance_fraction)
+        )
+        self.k_max = dict(k_max) if isinstance(k_max, Mapping) else k_max
+        for f in self.fields:
+            km = per_field(k_max, f.name, None)
+            f.k_max = None if km is None else float(km)
+            if isinstance(variance_fraction, Mapping) and f.name in variance_fraction:
+                f.variance_fraction = float(variance_fraction[f.name])
+            elif f.k_max is not None:
+                f.variance_fraction = 1.0  # k_max alone: no variance cut
+            elif isinstance(variance_fraction, Mapping):
+                f.variance_fraction = 0.99
+            else:
+                f.variance_fraction = float(variance_fraction)
         self._build_modes()
 
         # Mean maps (H, W), float32
@@ -492,14 +652,16 @@ class CorrelatedFieldMap(SpatialModel):
             p_c = matern_spectrum(k_c, f.basis_ell, f.basis_nu) / norm
             # Each half-plane mode holds 2 p / N of the variance (itself + conjugate).
             share = 2.0 * p_c / n_pix
-            if self.k_max is not None:
-                keep = k_c <= self.k_max
-            else:
+            keep = np.ones_like(p_c, bool)
+            if f.k_max is not None:
+                keep &= k_c <= f.k_max
+            if f.variance_fraction < 1.0:
                 order = np.argsort(-p_c, kind="stable")
                 cum = np.cumsum(share[order]) / share.sum()
-                n_keep = int(np.searchsorted(cum, self.variance_fraction) + 1)
-                keep = np.zeros_like(p_c, bool)
-                keep[order[:n_keep]] = True
+                n_keep = int(np.searchsorted(cum, f.variance_fraction) + 1)
+                top = np.zeros_like(p_c, bool)
+                top[order[:n_keep]] = True
+                keep &= top
             f.iy = iy_c[keep].astype(np.int32)
             f.ix = ix_c[keep].astype(np.int32)
             # Complex white noise Z has Re/Im variance N/2 for a unit-variance real field.
@@ -587,7 +749,10 @@ class CorrelatedFieldMap(SpatialModel):
         )
 
     def initial_theta(self, global_values: Mapping[str, float] | None = None) -> jnp.ndarray:
-        """Theta at the prior mean: zero levels and coefficients, globals mid-range or given."""
+        """Theta at the prior mean: zero levels and coefficients, globals mid-range or given.
+
+        Free hyperparameters and couplings start at their prior means (``loc``).
+        """
         raw = []
         for i, p in enumerate(self.global_names):
             lo, hi = float(self._global_lo[i]), float(self._global_hi[i])
@@ -599,7 +764,7 @@ class CorrelatedFieldMap(SpatialModel):
                 levels=jnp.zeros(self.n_fields),
                 global_raw=jnp.asarray(raw),
                 hyper=jnp.asarray(self._hyper_loc),
-                coupling=jnp.zeros(self.n_coupling),
+                coupling=jnp.asarray(self._coupling_loc),
                 z=jnp.zeros(self.n_modes_total),
             )
         )
@@ -667,7 +832,9 @@ class CorrelatedFieldMap(SpatialModel):
         detail into the mean map, where the prior would not penalise it.
 
         For bounded fields ``target_map`` is in physical units and is treated as
-        the pre-clip value (the soft clamp is ~identity inside the bounds).
+        the pre-clip value (the soft clamp is ~identity inside the bounds).  For
+        a copula field it is mapped to Gaussian space first (after subtracting
+        the current level when ``copula_level="physical"``).
 
         Args:
             theta: Current theta (levels, globals and other fields are kept).
@@ -685,13 +852,12 @@ class CorrelatedFieldMap(SpatialModel):
         z_slice = slice(n0 + f.slice.start, n0 + f.slice.stop)
         theta0 = theta.at[z_slice].set(0.0)
         if f.marginal is not None:
-            # Work in the field's Gaussian space.
+            # Work in the field's Gaussian space (without the level if it is physical).
             current = self.gaussian_maps(theta0)[k]
-            target_map = gaussian_from_marginal(
-                jnp.clip(jnp.asarray(target_map), f.bounds[0], f.bounds[1]),
-                f.marginal,
-                f.gauss_scale,
-            )
+            target_phys = jnp.clip(jnp.asarray(target_map), f.bounds[0], f.bounds[1])
+            if f.physical_level:
+                target_phys = target_phys - self.split_theta(theta).levels[k]
+            target_map = gaussian_from_marginal(target_phys, f.marginal, f.gauss_scale)
         else:
             current = self.field_maps(theta0)[k]
         if f.bounds is not None and f.marginal is None:
@@ -711,7 +877,11 @@ class CorrelatedFieldMap(SpatialModel):
         return theta.at[z_slice].set(z)
 
     def gaussian_maps(self, theta: jnp.ndarray) -> jnp.ndarray:
-        """Pre-transform maps ``u_k = m_k + d_k`` ``(N_fields, H, W)`` (before copula and clip)."""
+        """Pre-transform maps ``u_k = m_k + d_k`` ``(N_fields, H, W)`` (before copula and clip).
+
+        For a copula field with ``copula_level="physical"`` the level is *not*
+        included (it is added after the transform, see :meth:`field_maps`).
+        """
         blocks = self.split_theta(theta)
         levels, z, cfree = blocks.levels, blocks.z, blocks.coupling
         devs: dict[str, jnp.ndarray] = {}
@@ -719,7 +889,7 @@ class CorrelatedFieldMap(SpatialModel):
         for k, f in enumerate(self.fields):
             amplitude = self.field_hyperparameters(theta, k)[0]
             g = self.unit_field(z[f.slice], k, theta)
-            dev = levels[k] + amplitude * g
+            dev = amplitude * g if f.physical_level else levels[k] + amplitude * g
             for source, c in f.fixed_couplings.items():
                 dev = dev + c * devs[source]
             for source, i in f.free_coupling_idx.items():
@@ -729,13 +899,16 @@ class CorrelatedFieldMap(SpatialModel):
         return jnp.stack(maps)
 
     def field_maps(self, theta: jnp.ndarray) -> jnp.ndarray:
-        """Physical parameter maps ``(N_fields, H, W)`` in ``field_names`` order."""
+        """Physical field maps ``(N_fields, H, W)`` in ``field_names`` order (incl. latent)."""
         u_all = self.gaussian_maps(theta)
+        levels = self.split_theta(theta).levels
         maps = []
         for k, f in enumerate(self.fields):
             u = u_all[k]
             if f.marginal is not None:
                 u = marginal_from_gaussian(u, f.marginal, f.gauss_scale)
+                if f.physical_level:
+                    u = u + levels[k]
             if f.bounds is None:
                 maps.append(u)
             else:
@@ -747,15 +920,48 @@ class CorrelatedFieldMap(SpatialModel):
         raw = self.split_theta(theta).global_raw
         return self._global_lo + (self._global_hi - self._global_lo) * jax.nn.sigmoid(raw)
 
+    def _derived_maps(self, fmaps: jnp.ndarray) -> list[jnp.ndarray]:
+        """Derived-parameter maps from physical field maps, in ``derived_names`` order."""
+        out = []
+        for p in self.derived_names:
+            spec = self.derived_params[p]
+            u = jnp.full(fmaps.shape[1:], spec["offset"], fmaps.dtype)
+            for j, w in spec["weights"].items():
+                u = u + w * fmaps[self.field_names.index(j)]
+            lo, hi = self.param_bounds[p]
+            out.append(_softclip(u, float(lo), float(hi), self.softclip_sharpness))
+        return out
+
+    def derived_maps(self, theta: jnp.ndarray) -> jnp.ndarray:
+        """Derived-parameter maps ``(N_derived, H, W)`` in ``derived_names`` order."""
+        maps = self._derived_maps(self.field_maps(theta))
+        if not maps:
+            return jnp.zeros((0, *self.image_shape), self._mean_maps.dtype)
+        return jnp.stack(maps)
+
+    def param_maps(self, theta: jnp.ndarray) -> jnp.ndarray:
+        """Per-pixel emulator-parameter maps ``(N, H, W)``, named by ``param_map_names``.
+
+        The mapped emulator parameters (``field_names`` order, latent fields
+        excluded) followed by the derived parameters (``derived_names`` order).
+        """
+        fmaps = self.field_maps(theta)
+        maps = [fmaps[k] for k, f in enumerate(self.fields) if not f.latent]
+        return jnp.stack(maps + self._derived_maps(fmaps))
+
     def decode(self, theta: jnp.ndarray, image_shape: tuple | None = None) -> jnp.ndarray:
         """Per-pixel emulator input rows ``(H*W, N_emulator)`` in emulator order."""
         H, W = self.image_shape
-        maps = self.field_maps(theta).reshape(self.n_fields, H * W)
+        fmaps = self.field_maps(theta)
+        maps = fmaps.reshape(self.n_fields, H * W)
+        derived = dict(zip(self.derived_names, self._derived_maps(fmaps), strict=True))
         gvals = self.global_values(theta)
         cols = []
         for p in self.emulator_param_names:
             if p in self.field_names:
                 cols.append(maps[self.field_names.index(p)])
+            elif p in derived:
+                cols.append(derived[p].reshape(H * W))
             elif p in self.fixed_params:
                 cols.append(jnp.full((H * W,), self.fixed_params[p], maps.dtype))
             else:
@@ -784,7 +990,8 @@ class CorrelatedFieldMap(SpatialModel):
         if self.n_coupling:
             c = self.coupling_theta(theta)
             sig = jnp.asarray(self._coupling_sigma)
-            lp += jnp.sum(-0.5 * (c / sig) ** 2 - jnp.log(sig) - 0.5 * _LOG_2PI)
+            loc = jnp.asarray(self._coupling_loc)
+            lp += jnp.sum(-0.5 * ((c - loc) / sig) ** 2 - jnp.log(sig) - 0.5 * _LOG_2PI)
         # Uniform in physical space: density of raw is sigmoid'(raw) (bounds width cancels).
         lp += jnp.sum(jax.nn.log_sigmoid(raw) + jax.nn.log_sigmoid(-raw))
         if self._global_prior_specs:
@@ -821,7 +1028,9 @@ class CorrelatedFieldMap(SpatialModel):
         hyper = jnp.asarray(self._hyper_loc) + jnp.asarray(self._hyper_scale) * jax.random.normal(
             k4, (n, self.n_hyper)
         )
-        coupling = jnp.asarray(self._coupling_sigma) * jax.random.normal(k5, (n, self.n_coupling))
+        coupling = jnp.asarray(self._coupling_loc) + jnp.asarray(
+            self._coupling_sigma
+        ) * jax.random.normal(k5, (n, self.n_coupling))
         z = jax.random.normal(k3, (n, self.n_modes_total))
         return jnp.concatenate([levels, raw, hyper, coupling, z], axis=1).astype(_default_float())
 
@@ -832,15 +1041,23 @@ class CorrelatedFieldMap(SpatialModel):
             f"(padded {self.grid_shape[0]}x{self.grid_shape[1]}), {self.n_params} parameters"
         ]
         for f in self.fields:
+            kmax = f"{f.k_max:.3g}" if f.k_max is not None else "-"
             lines.append(
-                f"  field {f.name:18s} ell={f.corr_length:5.1f}px nu={f.nu:.2f} "
-                f"s={f.amplitude:.3g} modes={f.n_modes} (x2 real, basis ell="
-                f"{f.basis_ell:.2f} nu={f.basis_nu:.2f}, {100 * f.variance_kept:.1f}% of "
-                f"basis variance) free={sorted(f.hyper_idx) or '-'} "
+                f"  {'latent' if f.latent else 'field'} {f.name:18s} ell={f.corr_length:5.1f}px "
+                f"nu={f.nu:.2f} s={f.amplitude:.3g} modes={f.n_modes} (x2 real, k_max={kmax}, "
+                f"basis ell={f.basis_ell:.2f} nu={f.basis_nu:.2f}, "
+                f"{100 * f.variance_kept:.1f}% of basis variance) "
+                f"free={sorted(f.hyper_idx) or '-'} "
                 f"couplings={dict(f.fixed_couplings) or '-'}"
                 f"{' marginal=' + str(f.marginal) if f.marginal else ''}"
                 f"{' + free ' + str(sorted(f.free_coupling_idx)) if f.free_coupling_idx else ''}"
             )
+        for p in self.derived_names:
+            spec = self.derived_params[p]
+            terms = " ".join(f"{w:+.3g}*{j}" for j, w in spec["weights"].items())
+            lines.append(f"  derived {p} = softclip({spec['offset']:.3g} {terms})")
+        if any(f.marginal for f in self.fields):
+            lines.append(f"  copula level: {self.copula_level}")
         lines.append(f"  globals: {self.global_names or 'none'}; fixed: {self.fixed_params}")
         if self._global_prior_specs:
             lines.append(f"  global priors: {self._global_prior_specs}")
@@ -858,8 +1075,10 @@ class CorrelatedFieldMap(SpatialModel):
             lines.append(
                 "  free couplings: "
                 + ", ".join(
-                    f"{n}~N(0,{s:.2f})"
-                    for n, s in zip(self.coupling_names, self._coupling_sigma, strict=True)
+                    f"{n}~N({m:.2f},{s:.2f})"
+                    for n, m, s in zip(
+                        self.coupling_names, self._coupling_loc, self._coupling_sigma, strict=True
+                    )
                 )
             )
         return "\n".join(lines)
