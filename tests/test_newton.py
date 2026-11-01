@@ -6,8 +6,10 @@ import numpy as np
 import pytest
 
 from arachne.inference.newton import (
+    block_newton,
     dense_preconditioner,
     diagonal_preconditioner,
+    galaxy_block_indices,
     negative_curvature_step,
     trust_region_newton,
 )
@@ -132,3 +134,61 @@ def test_negative_curvature_step_leaves_saddle():
     same, gain, n_neg = negative_curvature_step(f, res.theta, evals, evecs)
     assert n_neg == 0 and gain == 0.0
     np.testing.assert_array_equal(same, res.theta)
+
+
+def test_block_newton_quadratic_one_step():
+    """On a quadratic the exact block Newton step lands on the block minimiser at once."""
+    f, A, _ = _quadratic(d=20, cond=1e6)
+    idx = np.array([0, 3, 7, 11, 19])
+    x0 = jnp.asarray(np.random.default_rng(4).normal(size=20))
+    res = block_newton(f, x0, idx, tol=1e-10)
+    assert res.converged and res.reason == "converged"
+    accepted = [h for h in res.history if h["accepted"]]
+    assert len(accepted) == 1 and res.n_iter == 2
+    assert accepted[0]["rho"] == pytest.approx(1.0, rel=1e-6)
+    # Block optimum: A_bb x_b = b_b - A_b,rest x_rest.
+    An, b = np.asarray(A), np.asarray(jax.grad(f)(jnp.zeros(20)) * -1.0)
+    rest = np.setdiff1d(np.arange(20), idx)
+    x_b = np.linalg.solve(
+        An[np.ix_(idx, idx)], b[idx] - An[np.ix_(idx, rest)] @ np.asarray(x0)[rest]
+    )
+    np.testing.assert_allclose(np.asarray(res.theta)[idx], x_b, rtol=1e-8, atol=1e-10)
+    np.testing.assert_array_equal(np.asarray(res.theta)[rest], np.asarray(x0)[rest])
+    assert res.n_hvp == 2 * idx.size
+
+
+def test_block_newton_negative_curvature_and_chunks():
+    """Indefinite block: |lambda| step plus line search still descends; chunking is exact."""
+
+    def f(x):
+        return 0.25 * x[0] ** 4 - 0.5 * x[0] ** 2 + 0.5 * jnp.sum(x[1:] ** 2)
+
+    x0 = jnp.array([0.1, 1.0, -2.0, 0.5])
+    r1 = block_newton(f, x0, [0, 1, 2], tol=1e-12, max_iter=50)
+    r2 = block_newton(f, x0, [0, 1, 2], tol=1e-12, max_iter=50, chunk_size=2)
+    assert r1.converged and abs(abs(float(r1.theta[0])) - 1.0) < 1e-6
+    np.testing.assert_allclose(r1.theta, r2.theta, rtol=1e-12)
+    assert float(r1.theta[3]) == 0.5
+
+
+def test_block_newton_rejects_bad_indices():
+    """Empty, out-of-range and duplicate indices raise."""
+    f, _, _ = _quadratic(d=5)
+    for bad in ([], [5], [1, 1]):
+        with pytest.raises(ValueError):
+            block_newton(f, jnp.zeros(5), bad)
+
+
+def test_galaxy_block_indices_duck_typing():
+    """z_offset models give arange(z_offset); forward models add the nuisance tail."""
+
+    class _Spatial:
+        z_offset, n_params = 4, 30
+
+    class _FM:
+        spatial_model, n_params = _Spatial(), 33
+
+    np.testing.assert_array_equal(galaxy_block_indices(_Spatial()), np.arange(4))
+    np.testing.assert_array_equal(galaxy_block_indices(_FM()), [0, 1, 2, 3, 30, 31, 32])
+    with pytest.raises(TypeError):
+        galaxy_block_indices(object())

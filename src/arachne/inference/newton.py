@@ -25,9 +25,20 @@ replaces that with the standard remedy:
   the point it returns if that lowers ``-log p``.
 * **Convergence** is declared when the CG step is interior (no negative
   curvature met, inside the trust region) and the *predicted* decrease of
-  ``-log p`` (the Newton decrement for an exact solve) is below ``tol`` nats.  A
-  small last-step gain is not convergence: it is what a stalled optimiser
-  looks like too.
+  ``-log p`` (the Newton decrement for an exact solve) is below ``tol`` nats,
+  confirmed by a re-solve to a tight residual (``verify_eta``): with the loose
+  Eisenstat-Walker forcing, an identity-preconditioned CG that has only resolved
+  the stiff directions dominating ``|g|`` predicts a tiny decrease while the soft
+  ones are untouched (measured on a correlated-field toy: "converged" 10-180 nats
+  above the mode without the check).  A small last-step gain is not convergence
+  either: it is what a stalled optimiser looks like too.
+
+* **Block Newton** (:func:`block_newton`): exact Newton on a small sub-block of
+  the parameters (e.g. the ~20 galaxy-level parameters of a correlated-field fit,
+  :func:`galaxy_block_indices`) with everything else held fixed.  The block
+  Hessian costs one Hessian-vector product per block coordinate, so a stiff
+  low-dimensional block (curvature 1e6-1e8) can be solved exactly while the
+  field coefficients are left to a cheaper optimiser.
 
 A converged result is a local mode.  It says nothing about other modes; run
 several starts (see ``examples/demo_correlated_field.py --n-starts``) and compare
@@ -48,13 +59,16 @@ __all__ = [
     "CG_EXIT",
     "NewtonResult",
     "Preconditioner",
+    "block_newton",
     "dense_preconditioner",
     "diagonal_preconditioner",
+    "galaxy_block_indices",
     "negative_curvature_step",
     "trust_region_newton",
 ]
 
 # CG exit codes (index into CG_EXIT).
+# block_newton records cg_exit = "block" (no CG: the block Hessian is solved exactly).
 CG_EXIT = ("interior", "boundary", "negative_curvature", "maxiter")
 _INTERIOR, _BOUNDARY, _NEGATIVE, _MAXITER = range(4)
 
@@ -135,9 +149,12 @@ class NewtonResult:
         theta: Final point.
         neg_log_post: ``-log p`` there.
         converged: Interior CG step with predicted decrease below ``tol``.
-        reason: Why it stopped (``"converged"``, ``"max_iter"``, ``"radius"``, ``"nonfinite"``).
+        reason: Why it stopped (``"converged"``, ``"max_iter"``, ``"radius"``,
+            ``"nonfinite"``; :func:`block_newton` also ``"rejected"``, a step the
+            line search could not make decrease ``-log p``).
         n_iter: Outer iterations taken.
-        n_hvp: Hessian-vector products used by CG.
+        n_hvp: Hessian-vector products used by CG (by the block Hessians for
+            :func:`block_newton`).
         history: One dict per iteration: ``iter``, ``neg_log_post``, ``grad_norm``,
             ``radius``, ``rho``, ``cg_iters``, ``cg_exit``, ``predicted``, ``actual``,
             ``accepted``.
@@ -160,8 +177,9 @@ class NewtonResult:
         h_pred = [h for h in self.history if h["cg_exit"] != "-"][-1]
         exits = [h["cg_exit"] for h in self.history]
         n_neg = sum(e == "negative_curvature" for e in exits)
+        label = "block Newton" if "block" in exits else "trust-region Newton"
         return (
-            f"trust-region Newton: {self.reason} after {self.n_iter} iterations "
+            f"{label}: {self.reason} after {self.n_iter} iterations "
             f"({self.n_hvp} HVPs, {self.runtime_s:.0f} s); -log_post "
             f"{h0['neg_log_post']:.3f} -> {self.neg_log_post:.3f}; |grad| "
             f"{h0['grad_norm']:.3g} -> {h1['grad_norm']:.3g}; last predicted decrease "
@@ -169,8 +187,13 @@ class NewtonResult:
         )
 
 
-def _make_solver(neg_log_post: Callable, kind: str, max_cg: int, eta_max: float):
-    """Jitted Steihaug-Toint CG: ``(theta, g, radius, *M arrays) -> (p, Hp, n_iter, exit)``."""
+def _make_solver(
+    neg_log_post: Callable, kind: str, max_cg: int, eta_max: float, abs_tol: float = 0.0
+):
+    """Jitted Steihaug-Toint CG: ``(theta, g, radius, *M arrays) -> (p, Hp, n_iter, exit)``.
+
+    Stops on ``|r| <= max(min(eta_max, sqrt|g|) |g|, abs_tol)``.
+    """
     grad_fn = jax.grad(neg_log_post)
 
     def solve(theta, g, radius, lam, V=None):
@@ -194,7 +217,7 @@ def _make_solver(neg_log_post: Callable, kind: str, max_cg: int, eta_max: float)
 
         gnorm = jnp.linalg.norm(g)
         # Eisenstat-Walker style forcing: loose far away, tight near the mode.
-        tol = jnp.minimum(eta_max, jnp.sqrt(gnorm)) * gnorm
+        tol = jnp.maximum(jnp.minimum(eta_max, jnp.sqrt(gnorm)) * gnorm, abs_tol)
 
         def to_boundary(z, Mz, d, Md):
             # Positive root of |z + tau d|_M = radius.
@@ -258,6 +281,7 @@ def trust_region_newton(
     max_radius: float = 1e4,
     min_radius: float = 1e-8,
     eta_max: float = 0.5,
+    verify_eta: float = 1e-6,
     verbose: bool = True,
     print_fn: Callable = print,
 ) -> NewtonResult:
@@ -283,6 +307,12 @@ def trust_region_newton(
         max_radius: Largest trust radius.
         min_radius: Stop (``reason="radius"``) if the radius shrinks below this.
         eta_max: Largest CG forcing term (relative residual tolerance).
+        verify_eta: Forcing term of the confirming re-solve: an interior step with
+            predicted decrease below ``tol`` is re-solved to this relative residual
+            (or to ``|r| <= 0.1 sqrt(tol)``, whichever is looser) before convergence
+            is declared (a loose solve that has only resolved
+            the stiff directions dominating ``|g|`` predicts a tiny decrease while
+            the soft directions are far from converged).  ``>= eta_max`` disables it.
         verbose: Print one line per iteration.
         print_fn: Printer for those lines.
 
@@ -296,12 +326,12 @@ def trust_region_newton(
     g_fn = jax.jit(jax.grad(neg_log_post))
     if preconditioner is None:
         preconditioner = Preconditioner("diag", jnp.ones(d, theta.dtype))
-    solvers: dict[str, Callable] = {}
+    solvers: dict[tuple, Callable] = {}
 
-    def solver_for(kind):
-        if kind not in solvers:
-            solvers[kind] = _make_solver(neg_log_post, kind, max_cg, eta_max)
-        return solvers[kind]
+    def solver_for(kind, eta=eta_max, abs_tol=0.0):
+        if (kind, eta) not in solvers:
+            solvers[kind, eta] = _make_solver(neg_log_post, kind, max_cg, eta, abs_tol)
+        return solvers[kind, eta]
 
     radius = float(np.sqrt(d) if radius0 is None else radius0)
     f = float(f_fn(theta))
@@ -320,6 +350,17 @@ def trust_region_newton(
         n_cg, exit_code = int(n_cg), int(exit_code)
         n_hvp += n_cg + 1
         predicted = float(-(g @ p + 0.5 * (p @ Hp)))
+        if exit_code == _INTERIOR and predicted < tol and verify_eta < eta_max:
+            # Confirm with a tight solve before calling it a mode (see verify_eta).
+            # The floor bounds the unexplored decrement |r|^2 / (2 lambda_min) by ~tol / 200
+            # in prior-whitened coordinates (lambda_min >~ 1) without chasing round-off.
+            p, Hp, n_cg2, exit_code = solver_for(
+                preconditioner.kind, verify_eta, 0.1 * float(np.sqrt(tol))
+            )(theta, g, jnp.asarray(radius, theta.dtype), *preconditioner.arrays())
+            n_cg2, exit_code = int(n_cg2), int(exit_code)
+            n_hvp += n_cg2 + 1
+            n_cg += n_cg2 + 1
+            predicted = float(-(g @ p + 0.5 * (p @ Hp)))
         if exit_code == _INTERIOR and predicted < tol:
             history.append(dict(iter=it, neg_log_post=f, grad_norm=gnorm, radius=radius,
                                 rho=float("nan"), cg_iters=n_cg, cg_exit=CG_EXIT[exit_code],
@@ -422,3 +463,196 @@ def negative_curvature_step(
                 if np.isfinite(fc) and fc < best_f:
                     best, best_f = cand, fc
     return best, f0 - best_f, int(neg.size)
+
+
+def galaxy_block_indices(model) -> np.ndarray:
+    """Indices of the galaxy-level parameters of a correlated-field model.
+
+    For a :class:`~arachne.spatial.correlated_field.CorrelatedFieldMap`-like
+    spatial model (anything with ``z_offset``) these are the field levels,
+    globals, hyperparameters and couplings, ``arange(z_offset)``.  For a forward
+    model wrapping one (``model.spatial_model.z_offset``) the nuisance
+    parameters appended after the spatial block are included too, since they
+    are equally few and equally stiff.
+
+    Args:
+        model: Spatial model with ``z_offset``, or a forward model whose
+            ``spatial_model`` has one.
+
+    Returns:
+        ``int64`` array of parameter indices, ascending.
+
+    Raises:
+        TypeError: If neither ``model`` nor ``model.spatial_model`` has ``z_offset``.
+    """
+    if hasattr(model, "z_offset"):
+        return np.arange(int(model.z_offset))
+    spatial = getattr(model, "spatial_model", None)
+    if spatial is not None and hasattr(spatial, "z_offset"):
+        n_spatial, n_total = int(spatial.n_params), int(model.n_params)
+        return np.concatenate([np.arange(int(spatial.z_offset)), np.arange(n_spatial, n_total)])
+    raise TypeError(f"{type(model).__name__} has no z_offset (not a correlated-field model)")
+
+
+def _block_hessian_fn(
+    neg_log_post: Callable, idx, chunk_size: int | None = None
+) -> Callable[[jnp.ndarray], np.ndarray]:
+    """``theta -> H[idx][:, idx]`` (numpy float64) from one HVP per block coordinate.
+
+    The HVPs along the unit vectors of ``idx`` are vmapped (``chunk_size`` at a
+    time, the last chunk padded so only one shape is ever compiled) and only
+    their ``idx`` entries are kept, so memory is ``O(chunk * d)``.
+    """
+    idx = np.asarray(idx, dtype=np.int64)
+    n = idx.size
+    chunk = n if chunk_size is None else max(1, min(int(chunk_size), n))
+    grad_fn = jax.grad(neg_log_post)
+    idx_j = jnp.asarray(idx)
+
+    @jax.jit
+    def rows(theta, cols):
+        def one(i):
+            v = jnp.zeros_like(theta).at[i].set(1.0)
+            return jax.jvp(grad_fn, (theta,), (v,))[1][idx_j]
+
+        return jax.vmap(one)(cols)
+
+    def block_hessian(theta) -> np.ndarray:
+        out = np.empty((n, n), dtype=np.float64)
+        for start in range(0, n, chunk):
+            sel = idx[start : start + chunk]
+            m = sel.size
+            cols = np.concatenate([sel, np.full(chunk - m, idx[0])])  # pad the ragged tail
+            out[start : start + m] = np.asarray(rows(theta, jnp.asarray(cols)), np.float64)[:m]
+        return 0.5 * (out + out.T)
+
+    return block_hessian
+
+
+def block_newton(
+    neg_log_post: Callable,
+    theta,
+    idx,
+    *,
+    max_iter: int = 10,
+    tol: float = 1e-3,
+    rel_floor: float = 1e-8,
+    min_eig: float = 1e-6,
+    chunk_size: int | None = None,
+    verbose: bool = False,
+    print_fn: Callable = print,
+) -> NewtonResult:
+    """Exact (eigen-modified) Newton on the sub-block ``idx``, all other coordinates fixed.
+
+    Each iteration builds the block Hessian ``H_bb`` from ``len(idx)``
+    Hessian-vector products (jitted once), replaces its eigenvalues by
+    ``max(|lambda|, max(rel_floor * max|lambda|, min_eig))`` (as
+    :func:`dense_preconditioner` does, so negative curvature becomes a descent
+    direction of the right length), and takes ``p = -H_mod^-1 g_b`` with an
+    Armijo backtracking line search on the full objective (step halved up to
+    10 times).  Coordinates outside ``idx`` are never touched (bit-identical).
+
+    Stops when the predicted decrease ``g_b^T H_mod^-1 g_b / 2`` is below
+    ``tol`` (converged), when no step length satisfies Armijo (``"rejected"``)
+    or after ``max_iter`` iterations.  Typical use: the galaxy-level block of a
+    correlated-field fit (``idx = galaxy_block_indices(model)``), whose
+    curvature (1e6-1e8) is far above that of the field coefficients.
+
+    Args:
+        neg_log_post: ``theta -> -log p(theta | d)`` (JAX-differentiable).
+        theta: Start, shape ``(d,)``.
+        idx: Integer indices of the block (``(n,)``, no duplicates).
+        max_iter: Newton iterations.
+        tol: Converged when the predicted decrease is below this (nats).
+        rel_floor: Eigenvalue floor relative to the largest ``|lambda|``.
+        min_eig: Absolute eigenvalue floor.
+        chunk_size: HVPs vmapped at once (default: all ``n``).
+        verbose: Print one line per iteration.
+        print_fn: Printer for those lines.
+
+    Returns:
+        :class:`NewtonResult` whose history entries have ``cg_exit == "block"``,
+        ``cg_iters == len(idx)`` and ``rho`` = actual / predicted decrease of the
+        accepted (possibly shortened) step.
+
+    Raises:
+        ValueError: If ``idx`` is empty, out of range or has duplicates.
+    """
+    t_start = time.time()
+    theta = jnp.asarray(theta)
+    d = theta.size
+    idx = np.asarray(idx, dtype=np.int64).ravel()
+    if idx.size == 0 or idx.min() < 0 or idx.max() >= d or np.unique(idx).size != idx.size:
+        raise ValueError(f"idx must be distinct indices in [0, {d}); got {idx}")
+    n = idx.size
+    idx_j = jnp.asarray(idx)
+    f_fn = jax.jit(neg_log_post)
+    g_fn = jax.jit(lambda t: jax.grad(neg_log_post)(t)[idx_j])
+    hess_fn = _block_hessian_fn(neg_log_post, idx, chunk_size)
+
+    @jax.jit
+    def moved(t, step):
+        return t.at[idx_j].add(step.astype(t.dtype))
+
+    f = float(f_fn(theta))
+    history: list[dict] = []
+    n_hvp = 0
+    converged, reason = False, "max_iter"
+    for it in range(max_iter):
+        if not np.isfinite(f):
+            reason = "nonfinite"
+            break
+        g = np.asarray(g_fn(theta), np.float64)
+        hb = hess_fn(theta)
+        n_hvp += n
+        lam, V = np.linalg.eigh(hb)
+        lam = np.abs(lam)
+        lam = np.maximum(lam, max(rel_floor * float(lam.max()), min_eig))
+        u = V.T @ g
+        p = -V @ (u / lam)
+        predicted = 0.5 * float(np.sum(u * u / lam))
+        gnorm = float(np.linalg.norm(g))
+        record = dict(iter=it, neg_log_post=f, grad_norm=gnorm, radius=float("nan"),
+                      cg_iters=n, cg_exit="block", predicted=predicted)  # fmt: skip
+        if predicted < tol:
+            history.append(dict(record, rho=float("nan"), actual=0.0, accepted=False))
+            if verbose:
+                print_fn(f"  block Newton {it}: converged, predicted decrease {predicted:.3g} "
+                         f"< {tol:g}  |grad_b| {gnorm:.3g}")  # fmt: skip
+            converged, reason = True, "converged"
+            break
+        slope = float(g @ p)  # = -2 * predicted < 0
+        alpha, accepted, f_new, cand = 1.0, False, np.inf, theta
+        for _ in range(11):
+            cand = moved(theta, jnp.asarray(alpha * p))
+            f_new = float(f_fn(cand))
+            if np.isfinite(f_new) and f_new <= f + 1e-4 * alpha * slope:
+                accepted = True
+                break
+            alpha *= 0.5
+        actual = f - f_new if np.isfinite(f_new) else -np.inf
+        # Predicted decrease of the quadratic model along the shortened step.
+        pred_alpha = alpha * predicted * (2.0 - alpha)
+        rho = actual / pred_alpha if pred_alpha > 0 else float("nan")
+        history.append(dict(record, rho=float(rho), actual=float(actual),
+                            accepted=bool(accepted)))  # fmt: skip
+        if verbose:
+            print_fn(
+                f"  block Newton {it}: -log_post {f:.3f} -> {f_new:.3f}  pred {predicted:.3g}  "
+                f"step {alpha:.3g}  |grad_b| {gnorm:.3g}{'' if accepted else '  rejected'}"
+            )
+        if not accepted:
+            reason = "rejected"
+            break
+        theta, f = cand, f_new
+    if not converged and history and history[-1]["accepted"]:
+        g = np.asarray(g_fn(theta), np.float64)
+        history.append(dict(iter=len(history), neg_log_post=f,
+                            grad_norm=float(np.linalg.norm(g)), radius=float("nan"),
+                            rho=float("nan"), cg_iters=0, cg_exit="-", predicted=float("nan"),
+                            actual=0.0, accepted=False))  # fmt: skip
+    return NewtonResult(
+        theta=theta, neg_log_post=f, converged=converged, reason=reason,
+        n_iter=len([h for h in history if h["cg_exit"] != "-"]), n_hvp=n_hvp,
+        history=history, runtime_s=time.time() - t_start,
+    )  # fmt: skip
