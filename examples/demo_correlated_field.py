@@ -706,11 +706,16 @@ def nuts_posterior(fm, model, theta, chol, key, n_warmup, n_samples, n_chains, m
 
 
 def mclmc_posterior(fm, model, theta, chol, key, n_warmup, n_samples, n_chains, max_maps=1000,
-                    init_thetas=None):  # fmt: skip
-    """Whitened MCLMC: as ``nuts_posterior`` but blackjax MCLMC, one tuned run per chain.
+                    init_thetas=None, n_burn=500, diag=False):  # fmt: skip
+    """Whitened MCLMC: as ``nuts_posterior`` but blackjax MCLMC.
 
-    Chains start at z ~ N(0, 0.3^2) around the mode, or at ``init_thetas`` when given;
-    R-hat and ESS are computed in theta.
+    One tuning run from the mode (no diagonal re-preconditioning unless ``diag``, since the
+    target is already whitened) is shared by every chain.  Tuning each chain separately gave
+    L 15-157 and step 0.6-34 across four chains and R-hat 2.4 (runs/2026-11-01_mclmc, commit
+    f16613e); with d = 5035 a step of ~30 is ~0.5 sigma per coordinate, so the small-step
+    chains barely moved.  Chains start at z ~ N(0, 0.3^2) around the mode, or at
+    ``init_thetas`` when given, and discard ``n_burn`` steps; R-hat and ESS are computed in
+    theta.
     """
     from arachne.inference.diagnostics import ess, split_rhat
     from arachne.inference.laplace import WhitenedLogDensity
@@ -718,15 +723,22 @@ def mclmc_posterior(fm, model, theta, chol, key, n_warmup, n_samples, n_chains, 
 
     dtype = jnp.zeros(()).dtype
     whitened = WhitenedLogDensity(fm, jnp.asarray(theta, dtype), jnp.asarray(chol, dtype))
-    sampler = MCLMCSampler(whitened, n_warmup=n_warmup, n_samples=n_samples)
+    sampler = MCLMCSampler(
+        whitened, n_warmup=n_warmup, n_samples=n_samples, diagonal_preconditioning=diag
+    )
     t0 = time.time()
+    k_tune, key = jax.random.split(key)
+    _, params = sampler.tune(jnp.zeros(whitened.n_params, dtype), k_tune)
+    tuned = {"L": float(params.L), "step_size": float(params.step_size)}
+    print(f"MCLMC tuning: {time.time() - t0:.0f} s, L {tuned['L']:.3g}, "
+          f"step {tuned['step_size']:.3g}")  # fmt: skip
     chains = []
     for c, k in enumerate(jax.random.split(key, n_chains)):
         k_init, k_run = jax.random.split(k)
         z0 = 0.3 * jax.random.normal(k_init, (whitened.n_params,), dtype)
         if init_thetas is not None:
             z0 = whitened.from_theta(jnp.asarray(init_thetas[c], dtype))
-        res = sampler.run(z0, k_run)
+        res = sampler.run(z0, k_run, params=params, n_burn=n_burn)
         chains.append(np.asarray(jax.vmap(whitened.to_theta)(res.samples)))
         print(f"MCLMC chain {c + 1}/{n_chains}: {time.time() - t0:.0f} s")
     runtime = time.time() - t0
@@ -744,6 +756,7 @@ def mclmc_posterior(fm, model, theta, chol, key, n_warmup, n_samples, n_chains, 
         "frac_rhat_gt_1.01": float(np.mean(rhat > 1.01)),
         "min_ess": float(np.nanmin(ess_)),
         "median_ess": float(np.nanmedian(ess_)),
+        "tuned": tuned,
     }
 
 
@@ -1003,7 +1016,23 @@ def main():
     ap.add_argument("--nuts", action="store_true",
                     help="whitened MCMC (--sampler) after the Laplace step")  # fmt: skip
     ap.add_argument("--sampler", choices=["nuts", "mclmc"], default="nuts")
-    ap.add_argument("--mclmc-warmup", type=int, default=2000, help="MCLMC tuning steps")
+    ap.add_argument(
+        "--mclmc-warmup",
+        type=int,
+        default=5000,
+        help="MCLMC tuning steps (one tuning shared by all chains)",
+    )
+    ap.add_argument(
+        "--mclmc-burn",
+        type=int,
+        default=500,
+        help="MCLMC steps discarded per chain after the shared tuning",
+    )
+    ap.add_argument(
+        "--mclmc-diag",
+        action="store_true",
+        help="also adapt a diagonal mass matrix on top of the whitening",
+    )
     ap.add_argument("--mclmc-samples", type=int, default=2000, help="MCLMC steps per chain")
     ap.add_argument("--nuts-warmup", type=int, default=1000)
     ap.add_argument("--nuts-samples", type=int, default=500)
@@ -1203,7 +1232,8 @@ def main():
                 nuts = mclmc_posterior(fm, model, post["theta"], post["chol"],
                                        jax.random.PRNGKey(args.seed + 300), args.mclmc_warmup,
                                        args.mclmc_samples, args.nuts_chains,
-                                       init_thetas=init_thetas)  # fmt: skip
+                                       init_thetas=init_thetas, n_burn=args.mclmc_burn,
+                                       diag=args.mclmc_diag)  # fmt: skip
             else:
                 nuts = nuts_posterior(fm, model, post["theta"], post["chol"],
                                       jax.random.PRNGKey(args.seed + 300), args.nuts_warmup,

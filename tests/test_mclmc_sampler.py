@@ -84,6 +84,26 @@ class TestMCLMCSampler:
         assert result.samples.shape == (5, gmm_model.n_params)
         assert jnp.all(jnp.isfinite(result.samples))
 
+    def test_shared_tuning(self, forward_model, gmm_model):
+        """tune() once, then run() with those params skips tuning and reuses them."""
+        sampler = MCLMCSampler(
+            forward_model=forward_model,
+            n_warmup=100,
+            n_samples=5,
+            diagonal_preconditioning=False,
+            initial_step_size=1.0,
+        )
+        theta_init = jnp.zeros(gmm_model.n_params)
+        _, params = sampler.tune(theta_init, jax.random.PRNGKey(3))
+        assert np.isfinite(float(params.L)) and float(params.L) > 0
+        assert np.isfinite(float(params.step_size)) and float(params.step_size) > 0
+        np.testing.assert_array_equal(np.asarray(params.inverse_mass_matrix), 1.0)
+        for seed in (4, 5):
+            result = sampler.run(theta_init, jax.random.PRNGKey(seed), params=params, n_burn=10)
+            assert sampler.params_ is params
+            assert result.samples.shape == (5, gmm_model.n_params)
+            assert jnp.all(jnp.isfinite(result.samples))
+
     def test_hdf5_roundtrip(self, mclmc_result, gmm_model, tmp_path):
         """NUTSResult from MCLMC saves and loads from HDF5."""
         path = tmp_path / "mclmc_result.h5"

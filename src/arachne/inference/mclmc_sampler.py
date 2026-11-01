@@ -171,6 +171,9 @@ class MCLMCSampler:
         n_samples: int = 500,
         diagonal_preconditioning: bool = True,
         desired_energy_var: float = 5e-4,
+        initial_L: Optional[float] = None,
+        initial_step_size: Optional[float] = None,
+        frac_tune3: float = 0.1,
     ) -> None:
         """Initialise the MCLMC sampler.
 
@@ -180,21 +183,115 @@ class MCLMCSampler:
                 reasonable default; increase for very high-d problems.
             n_samples: Number of posterior samples to collect after warmup.
             diagonal_preconditioning: Adapt diagonal inverse-mass-matrix
-                during warmup.  Defaults to True.
+                during warmup.  Defaults to True.  Turn off when the target
+                is already whitened (e.g. ``WhitenedLogDensity``): the noisy
+                re-estimate only undoes the whitening.
             desired_energy_var: Energy variance target for the integrator.
                 Defaults to 5e-4.
+            initial_L: Starting momentum decoherence length for tuning.
+                Defaults to ``sqrt(d)`` (the blackjax choice).
+            initial_step_size: Starting step size for tuning.  Defaults to
+                ``0.25 sqrt(d)`` (the blackjax choice).  The velocity is a unit
+                vector in d dimensions, so a step moves each coordinate by about
+                ``step_size / sqrt(d)``: steps of order ``sqrt(d)`` are normal
+                for a whitened (unit-scale) target.
+            frac_tune3: Fraction of ``n_warmup`` used for the final,
+                autocorrelation-based L estimate (blackjax default 0.1).
         """
         self.forward_model = forward_model
         self.n_warmup = n_warmup
         self.n_samples = n_samples
         self.diagonal_preconditioning = diagonal_preconditioning
         self.desired_energy_var = desired_energy_var
+        self.initial_L = initial_L
+        self.initial_step_size = initial_step_size
+        self.frac_tune3 = frac_tune3
+
+    def _kernel(self):
+        """Jitted log posterior and the MCLMC kernel."""
+        try:
+            import blackjax.mcmc.integrators as integrators
+            import blackjax.mcmc.mclmc as mclmc_mod
+        except ImportError as e:
+            raise ImportError(
+                "blackjax is required for MCLMC sampling. Install with: pip install blackjax"
+            ) from e
+        logpost = jax.jit(self.forward_model.log_posterior)
+        # In blackjax >= 1.6.2 the kernel signature is
+        # kernel(rng_key, state, logdensity_fn, inverse_mass_matrix, L, step_size),
+        # i.e. logdensity_fn and the tuned parameters are passed per call.
+        kernel = mclmc_mod.build_kernel(
+            integrator=integrators.isokinetic_mclachlan,
+            desired_energy_var=self.desired_energy_var,
+        )
+        return logpost, kernel, mclmc_mod.init
+
+    def tune(
+        self,
+        theta_init: jnp.ndarray,
+        rng_key: jnp.ndarray,
+        inverse_mass_matrix: Optional[jnp.ndarray] = None,
+    ) -> tuple[Any, Any]:
+        """Tune L, step size and (optionally) a diagonal inverse mass matrix.
+
+        Args:
+            theta_init: Initial unconstrained parameter vector, shape (N,).
+            rng_key: JAX random key.
+            inverse_mass_matrix: Optional initial diagonal inverse mass matrix.
+
+        Returns:
+            ``(state, params)``: the MCLMC state after tuning and the
+            ``MCLMCAdaptationState`` (``L``, ``step_size``,
+            ``inverse_mass_matrix``).  Pass ``params`` to ``run`` to reuse one
+            tuning for several chains.
+        """
+        import blackjax
+        from blackjax.adaptation.mclmc_adaptation import MCLMCAdaptationState
+
+        logpost, kernel, init = self._kernel()
+        d = theta_init.shape[0]
+        k_init, k_tune = jax.random.split(rng_key)
+        state = init(theta_init, logpost, k_init)
+        init_imm = inverse_mass_matrix if inverse_mass_matrix is not None else jnp.ones(d)
+        L0 = self.initial_L if self.initial_L is not None else jnp.sqrt(float(d))
+        eps0 = (
+            self.initial_step_size
+            if self.initial_step_size is not None
+            else jnp.sqrt(float(d)) * 0.25
+        )
+        init_params = MCLMCAdaptationState(
+            L=jnp.asarray(L0, theta_init.dtype),
+            step_size=jnp.asarray(eps0, theta_init.dtype),
+            inverse_mass_matrix=init_imm,
+        )
+        logger.info(
+            f"Tuning MCLMC: {self.n_warmup} steps, d={d}, "
+            f"diagonal_preconditioning={self.diagonal_preconditioning}, "
+            f"L0={float(L0):.4g}, step0={float(eps0):.4g}"
+        )
+        state, params, _ = blackjax.mclmc_find_L_and_step_size(
+            mclmc_kernel=kernel,
+            num_steps=self.n_warmup,
+            state=state,
+            rng_key=k_tune,
+            logdensity_fn=logpost,  # required by blackjax >= 1.6.2
+            frac_tune3=self.frac_tune3,
+            diagonal_preconditioning=self.diagonal_preconditioning,
+            desired_energy_var=self.desired_energy_var,
+            params=init_params,
+        )
+        logger.info(
+            f"Warmup complete. L={float(params.L):.4g}, step_size={float(params.step_size):.4g}"
+        )
+        return state, params
 
     def run(
         self,
         theta_init: jnp.ndarray,
         rng_key: jnp.ndarray,
         inverse_mass_matrix: Optional[jnp.ndarray] = None,
+        params: Optional[Any] = None,
+        n_burn: int = 0,
     ) -> NUTSResult:
         """Run MCLMC warmup (tuning) and sampling.
 
@@ -207,69 +304,30 @@ class MCLMCSampler:
                 ``None``, defaults to a vector of ones (isotropic).  Pass
                 the ``inverse_mass_matrix`` returned by ``run_pathfinder``
                 to skip most of the mass-matrix adaptation.
+            params: Tuned ``MCLMCAdaptationState`` from ``tune``.  When given,
+                tuning is skipped and these L / step size / mass matrix are
+                used, so several chains can share one tuning.
+            n_burn: Steps run with the tuned parameters and discarded before
+                sampling (used with ``params``, where the chain has not been
+                equilibrated by tuning).
 
         Returns:
             ``NUTSResult`` containing posterior samples (shape
             ``(n_samples, N)``), MCLMC step info, and the spatial model
             reference.  The ``acceptance_rate`` attribute reflects the
             Metropolis acceptance rate of the underlying integrator.
+            The parameters used are stored on ``self.params_``.
         """
-        try:
-            import blackjax
-            import blackjax.mcmc.integrators as integrators
-            import blackjax.mcmc.mclmc as mclmc_mod
-            from blackjax.adaptation.mclmc_adaptation import MCLMCAdaptationState
-        except ImportError as e:
-            raise ImportError(
-                "blackjax is required for MCLMC sampling. Install with: pip install blackjax"
-            ) from e
+        logpost, kernel, init = self._kernel()
+        k_tune, k_burn, k_sample = jax.random.split(rng_key, 3)
+        if params is None:
+            state, params = self.tune(theta_init, k_tune, inverse_mass_matrix)
+        else:
+            state = init(theta_init, logpost, k_tune)
+        self.params_ = params
 
-        logpost = jax.jit(self.forward_model.log_posterior)
-        d = theta_init.shape[0]
-
-        logger.info(
-            f"Starting MCLMC: {self.n_warmup} warmup steps + {self.n_samples} samples, "
-            f"d={d}, diagonal_preconditioning={self.diagonal_preconditioning}"
-        )
-
-        k_init, k_tune, k_sample = jax.random.split(rng_key, 3)
-
-        # 1. Initialise MCLMC state (samples initial momentum from key)
-        state = mclmc_mod.init(theta_init, logpost, k_init)
-
-        # 2. Build the MCLMC kernel.  In blackjax >= 1.6.2 the kernel signature is
-        #    kernel(rng_key, state, logdensity_fn, inverse_mass_matrix, L, step_size),
-        #    i.e. logdensity_fn and the tuned parameters are passed per call.
-        kernel = mclmc_mod.build_kernel(
-            integrator=integrators.isokinetic_mclachlan,
-            desired_energy_var=self.desired_energy_var,
-        )
-
-        # 3. Set initial adaptation params (L, step_size, inverse_mass_matrix)
-        init_imm = inverse_mass_matrix if inverse_mass_matrix is not None else jnp.ones(d)
-        init_params = MCLMCAdaptationState(
-            L=jnp.sqrt(float(d)),
-            step_size=jnp.sqrt(float(d)) * 0.25,
-            inverse_mass_matrix=init_imm,
-        )
-
-        # 4. Auto-tune L, step_size, and (optionally) inverse_mass_matrix
-        state, params, _ = blackjax.mclmc_find_L_and_step_size(
-            mclmc_kernel=kernel,
-            num_steps=self.n_warmup,
-            state=state,
-            rng_key=k_tune,
-            logdensity_fn=logpost,  # required by blackjax >= 1.6.2
-            diagonal_preconditioning=self.diagonal_preconditioning,
-            desired_energy_var=self.desired_energy_var,
-            params=init_params,
-        )
-        logger.info(
-            f"Warmup complete. L={float(params.L):.4g}, step_size={float(params.step_size):.4g}"
-        )
-
-        # 5. + 6. Sampling with the tuned parameters via jax.lax.scan
-        #    (full GPU efficiency, no Python overhead)
+        # Sampling with the tuned parameters via jax.lax.scan
+        # (full GPU efficiency, no Python overhead)
         def one_step(carry: Any, rng_key: jnp.ndarray) -> tuple[Any, tuple[jnp.ndarray, Any]]:
             state, info = kernel(
                 rng_key=rng_key,
@@ -281,6 +339,10 @@ class MCLMCSampler:
             )
             return state, (state.position, info)
 
+        if n_burn > 0:
+            state, _ = jax.lax.scan(
+                lambda c, k: (one_step(c, k)[0], None), state, jax.random.split(k_burn, n_burn)
+            )
         sample_keys = jax.random.split(k_sample, self.n_samples)
         final_state, (samples, infos) = jax.lax.scan(one_step, state, sample_keys)
 
