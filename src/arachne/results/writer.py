@@ -69,13 +69,19 @@ class _Adapter:
 
 
 class _FieldAdapter(_Adapter):
-    """CorrelatedFieldMap: maps = field_maps; scalars = globals, exp(hyper), couplings."""
+    """CorrelatedFieldMap: maps = per-pixel emulator parameters; scalars = globals, hyper, ...
+
+    The maps are ``param_maps`` / ``param_map_names`` (mapped emulator parameters, then
+    derived ones; latent fields excluded) when the spatial model has them, else
+    ``field_maps`` / ``field_names``.
+    """
 
     kind = "field"
 
     def __init__(self, sm: Any):
         self.sm = sm
-        self.map_names = list(sm.field_names)
+        self._use_param_maps = hasattr(sm, "param_maps") and hasattr(sm, "param_map_names")
+        self.map_names = list(sm.param_map_names if self._use_param_maps else sm.field_names)
         self.mass_param = sm.mass_param
         hyper = [n.replace("log_", "", 1) for n in getattr(sm, "hyper_names", [])]
         self._raw_scalar_names = (
@@ -84,7 +90,7 @@ class _FieldAdapter(_Adapter):
         self.scalar_names = [*self._raw_scalar_names, "total_log_mass"]
 
     def maps(self, ts):
-        return self.sm.field_maps(ts)
+        return self.sm.param_maps(ts) if self._use_param_maps else self.sm.field_maps(ts)
 
     def scalars(self, ts):
         parts = [jnp.atleast_1d(self.sm.global_values(ts))]
@@ -252,8 +258,8 @@ def content_from_forward_model(
         theta_map: Best point (full theta).  ``None`` with ``samples`` uses the draw with the
             highest ``log_posterior`` among the thinned draws (``best_point="best_draw"``).
         samples: Posterior samples (N, P), chains concatenated, or None (MAP only).
-        posterior_source: ``"nuts"``, ``"laplace"``, ``"nss"``, ``"mclmc"`` or ``"map"``
-            (forced to ``"map"`` when there are no samples).
+        posterior_source: ``"nuts"``, ``"laplace"``, ``"nss"``, ``"mclmc"``, ``"geovi"``,
+            ``"mgvi"`` or ``"map"`` (forced to ``"map"`` when there are no samples).
         n_draws: Number of evenly thinned draws S to store.
         chain_ids: (N,) chain of every sample; otherwise derived from ``n_chains`` (equal
             consecutive blocks) or 0.
@@ -262,8 +268,10 @@ def content_from_forward_model(
         store_theta: Store the thinned theta draws.
         component_draws: Draws (subset of S) with full component image cubes (additive).
         order_components: Sort additive components compact-first in every draw.
-        truth: Ground truth for mocks, in the bundle's map order.
-        prior_std_maps: (Nm, H, W) prior std of the maps (enables ``information``).
+        truth: Ground truth for mocks, in the bundle's map order (for a
+            ``CorrelatedFieldMap``: ``param_map_names`` order when it has them).
+        prior_std_maps: (Nm, H, W) prior std of the maps, in the bundle's map order
+            (enables ``information``).
         regions: Named regions (Region or (H, W) masks); added to the defaults.
         default_regions: Add ``"all"`` (pixels valid in any band) and ``"segment"``
             (:func:`detection_region`, when something is detected).

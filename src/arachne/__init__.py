@@ -61,6 +61,7 @@ from arachne.likelihood.gaussian import GaussianLikelihood
 from arachne.priors.physical import IndependentUniformPrior, LogNormalPrior
 from arachne.priors.spatial import GradientPenaltyPrior, TotalVariationPrior
 from arachne.psf.convolution import PSFConvolver
+from arachne.psf.resolution import psf_k_max
 from arachne.results import (  # numpy/h5py only
     Region,
     RegionSED,
@@ -78,6 +79,7 @@ from arachne.spatial.correlated_field import (
     wiener_mass_map,
 )
 from arachne.spatial.gmm import GaussianMixtureSpatialModel
+from arachne.spatial.mass_start import default_sfh_dust_templates, template_mass_map
 from arachne.spatial.pixel_map import FreeFormPixelMap
 from arachne.spatial.profiles import (
     PROFILES,
@@ -156,11 +158,14 @@ __all__ = [
     "GradientPenaltyPrior",
     "TotalVariationPrior",
     "PSFConvolver",
+    "psf_k_max",
     "SpatialModel",
     "AdditiveComponentModel",
     "CorrelatedFieldMap",
     "mass_map_from_image",
     "wiener_mass_map",
+    "template_mass_map",
+    "default_sfh_dust_templates",
     "GaussianMixtureSpatialModel",
     "FreeFormPixelMap",
     "Profile",

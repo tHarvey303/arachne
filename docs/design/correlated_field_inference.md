@@ -1,31 +1,54 @@
 # Correlated-field inference: what exists, what to try next
 
-Status: working notes, 2026-10-30. Scope: `CorrelatedFieldMap` fits (10³–10⁵ parameters: field
+Status: working notes, 2026-10-30 (pipeline section updated 2026-11-01). Scope: `CorrelatedFieldMap` fits (10³–10⁵ parameters: field
 levels, global SPS parameters, optional hyperparameters and couplings, and the white Fourier
 coefficients of each map). Results so far are in the vault notes "arachne correlated-field
 progress" and "arachne TODO" §1b.
 
 ## 1. Current pipeline (`examples/demo_correlated_field.py`)
 
-1. **Start.** Mass mean map from the reddest band (optionally Wiener-deconvolved coefficients),
-   SPS levels at neutral values. `--n-starts K` adds K−1 starts that redraw the non-mass levels and
-   the globals from the prior (mass level and field coefficients kept).
-2. **Adam MAP** (`find_map`, float32).
+0. **Parameterisation.** Mass, A_V and Z are maps; the SFH is `--sfh basis2` by default: two
+   latent maps whose fixed 2 × 5 basis (top right-singular vectors of d ln F / d ratio of the fit
+   emulator at a neutral reference, `sfh_basis`) derives all five `logsfr_ratio_i` per pixel. The
+   photometry constrains only ~2 SFH directions per pixel at z = 2, and mapping more (or mixing
+   mapped and free global ratios) left a null space that Laplace filled confidently. `fesc_lya`
+   and `dust_bump_amplitude` (< 0.3 % flux per unit at z = 2) are fixed (`--free-globals` frees
+   them). The mocks are the same for every `--sfh` setup; fit and truth are compared by
+   emulator-parameter name (`param_maps`).
+1. **Start.** Mass mean map from the reddest band; `--mass-start template` adds a per-pixel
+   colour-template correction (`template_mass_map`; one neutral template biases young clumps);
+   optionally Wiener-deconvolved coefficients. SPS levels at neutral values. `--n-starts K` adds
+   K−1 starts that redraw the non-mass levels and the globals from the prior (mass level and field
+   coefficients kept). `--k-max-mtf T` truncates the field bases at the PSF MTF cutoff
+   (`psf_k_max`).
+2. **Adam MAP** (`find_map`, float32). `--block-newton` (off by default) runs block-coordinate
+   descent instead: Adam on the field coefficients with the galaxy-level block (levels, globals,
+   hyperparameters, couplings) frozen, alternating with exact Newton on that block
+   (`block_newton`). On the toy spiral (24 px, quick, 900 Adam steps either way) it gave −log p
+   4343.4 vs 4362.2 for basis2 but 4354.6 vs 4352.4 for map03; the second lr-0.05 coefficient
+   round after a converged block solve made −log p worse and was discarded in both setups.
 3. **Mode polish** (`arachne.inference.newton.trust_region_newton`, float64). Steihaug-Toint
    trust-region Newton with Hessian-vector products, preconditioned by the eigen-decomposed dense
    Hessian (`|λ|`, floored). Converged = an interior CG step whose predicted decrease is
-   < 0.01 nat. Replaced a damped Newton-CG that handed indefinite systems to CG and stopped on a
+   < 0.01 nat (re-verified by a tighter CG solve). A diagonal Fourier-Fisher preconditioner
+   (`--precond fourier`, `field_precond.fisher_preconditioner`) was measured slower than the
+   identity on the toy and is experimental. Replaced a damped Newton-CG that handed indefinite systems to CG and stopped on a
    small last-step gain.
 4. **Saddle check.** The Laplace Hessian at the polished point is eigen-decomposed; if a step
    along a negative-curvature eigenvector (`negative_curvature_step`) lowers −log p, polish again
    from there (≤ 3 times). Needed because CG stopping early on an interior step never explores weak
    negative directions.
-5. **Laplace** (eigen-modified covariance, `|λ|`) and Laplace evidence. With several starts the
-   best evidence is kept and `metrics.json["modes"]` records each start's log Z, −log p, whitened
-   distance to the best mode, total mass and coverage.
-6. **Whitened MCMC** (NUTS or MCLMC) in z = L⁻¹(θ − mode). With several starts, chains begin at
-   the modes within 10 nats of the best (`run_whitened_nuts(initial_positions=...)`), so R-hat
-   can reveal modes that do not mix instead of hiding them.
+5. **Laplace** (eigen-modified covariance, `|λ|`) and Laplace evidence, or (`--posterior geovi`
+   / `mgvi`) geoVI / MGVI from the MAP (`arachne.inference.mgvi.run_mgvi`, in the standardised
+   latents of `StandardisingTransform`). With several starts the kept mode is the lowest −log p
+   among converged modes with no negative Hessian eigenvalue (else the lowest overall; for VI,
+   −log p at the VI mean). The Laplace evidence is recorded but never used to select: it favoured
+   unconverged modes. `metrics.json["modes"]` records each start's −log p, convergence, log Z,
+   whitened distance to the best mode, total mass and coverage.
+6. **Whitened MCMC** (NUTS or MCLMC) in z = L⁻¹(θ − mode), or after VI in the standardised
+   latents (`StandardisedLogDensity`, metric seeded with `mgvi_scale²`). With several starts,
+   chains begin at the modes within 10 nats of the best in −log p, so R-hat can reveal modes that
+   do not mix instead of hiding them.
 
 SFH prior: `--sfh-prior continuity` (default) puts Student-t(ν = 2, σ = 0.3) on every
 `logsfr_ratio`; `bursty` uses σ = 1 (the distribution the production emulator was trained on:

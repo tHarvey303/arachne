@@ -220,6 +220,61 @@ def test_field_bundle_invariants(tmp_path, field_setup):
     assert sed.model_draws.shape == (10, 3) and np.isfinite(sed.chi()).all()
 
 
+def test_field_bundle_derived_param(tmp_path):
+    """A latent field + derived emulator input: the bundle stores ``param_maps`` by name."""
+    names = ["redshift", "log_mass", "Av", "log10metallicity"]
+    model = CorrelatedFieldMap(
+        image_shape=(H, W),
+        emulator_param_names=names,
+        param_bounds={"Av": (0.0, 3.0), "log10metallicity": (-2.0, 0.3)},
+        field_params=["log_mass", "dust_a"],
+        fixed_params={"redshift": 2.0},
+        corr_lengths={"log_mass": 2.0, "dust_a": 3.0},
+        amplitudes={"log_mass": 0.3, "dust_a": 0.5},
+        mean_maps={"log_mass": 8.0},
+        latent_fields={"dust_a": (-3.0, 3.0)},
+        derived_params={"Av": {"offset": 0.8, "weights": {"dust_a": 0.4}}},
+    )
+    assert model.field_names == ["log_mass", "dust_a"]
+    assert model.param_map_names == ["log_mass", "Av"]
+    emulator = ToySED(_param_names=names, _band_names=BANDS)
+    theta_true = model.sample_prior(jax.random.PRNGKey(5), 1)[0]
+    clean = np.asarray(
+        ForwardModel.build(_blank(), _psf(), model, emulator)._model_image(theta_true)
+    )
+    fm = ForwardModel.build(_observation(clean, 3), _psf(), model, emulator, model_error_frac=0.05)
+    samples = theta_true[None] + 0.05 * jax.random.normal(
+        jax.random.PRNGKey(6), (12, model.n_params)
+    )
+    truth_maps = np.asarray(model.param_maps(theta_true))
+    truth = results.TruthContent(convolved=clean, param_maps=truth_maps)
+    path = write_bundle(
+        tmp_path / "derived.h5",
+        fm,
+        theta_map=theta_true,
+        samples=samples,
+        posterior_source="laplace",
+        n_draws=6,
+        truth=truth,
+        prior_std_maps=np.ones((2, H, W), np.float32),
+    )
+    assert validate(path) == []
+    b = load_bundle(path)
+    assert b.map_names == ["log_mass", "Av"] and b.mass_param == "log_mass"
+    assert b.scalar_names == ["log10metallicity", "total_log_mass"]
+    np.testing.assert_allclose(b.param_map("Av", "map"), truth_maps[1], rtol=1e-5)
+    assert b.has_truth and np.isfinite(b.param_map("Av", "diff")).all()
+    thetas = b.theta_draws()
+    av = np.asarray(model.param_maps(jnp.asarray(thetas[2])))[1]
+    np.testing.assert_allclose(b.param_draws("Av")[2], av, rtol=1e-5)
+    lat = np.asarray(model.field_maps(jnp.asarray(thetas[2])))[1]
+    np.testing.assert_allclose(av, 0.8 + 0.4 * lat, atol=1e-2)  # softclip ~ identity inside
+    lm = b.param_draws("log_mass").astype(float)
+    np.testing.assert_allclose(
+        b.scalar_draws()["total_log_mass"], np.log10((10.0**lm).sum(axis=(1, 2))), rtol=1e-6
+    )
+
+
 def test_map_only_and_best_draw(field_setup):
     """No samples gives an S=0 'map' bundle; no theta_map picks the best draw."""
     fm, _, theta_true, samples, _ = field_setup

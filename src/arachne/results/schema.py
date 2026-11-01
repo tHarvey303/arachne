@@ -39,7 +39,7 @@ NUISANCE_KEYS = (
     "log_noise_scale_map",
     "log_noise_scale",
 )
-POSTERIOR_SOURCES = ("nuts", "laplace", "nss", "mclmc", "map")
+POSTERIOR_SOURCES = ("nuts", "laplace", "nss", "mclmc", "map", "geovi", "mgvi")
 
 
 @dataclass
