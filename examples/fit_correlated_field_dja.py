@@ -287,6 +287,12 @@ def main():
         help="x the demo's correlation lengths (set in 0.03\" px; 0.6 keeps the angular "
         'lengths at 0.05"/px)',
     )
+    ap.add_argument(
+        "--z-prior",
+        default=None,
+        help="MEAN,SIGMA for the log10metallicity field level (default: the demo's -2.5, 0.5); "
+        "e.g. '-2.0,0.3' for a mass-metallicity prior at log M* ~ 11, z ~ 2",
+    )
     ap.add_argument("--hyper", action="store_true")
     ap.add_argument("--couple", action="store_true")
     ap.add_argument("--k-max-mtf", type=float, default=0.0)
@@ -367,6 +373,11 @@ def main():
     frac = np.sqrt(model_err**2 + emu_err**2)
     print("model_error_frac per band:", np.array2string(frac, precision=4))
 
+    if args.z_prior:
+        z_mean, z_sigma = (float(x) for x in args.z_prior.split(","))
+        demo.NEUTRAL["log10metallicity"] = z_mean
+        demo.LEVEL_SIGMAS["log10metallicity"] = z_sigma
+        print(f"log10metallicity level prior: N({z_mean}, {z_sigma}^2)")
     demo.set_sfh(args.sfh, args.free_globals)
     demo.SFH_PRIOR = args.sfh_prior
     emulator = demo.BandSubsetEmulator(load_emulator(args.emulator), demo.BANDS)
@@ -495,6 +506,7 @@ def main():
         "free_globals": args.free_globals,
         "nu": args.nu,
         "corr_scale": args.corr_scale,
+        "z_prior": args.z_prior,
         "hyper": args.hyper,
         "couple": args.couple,
         "k_max": k_max,
