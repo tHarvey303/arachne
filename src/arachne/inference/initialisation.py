@@ -46,6 +46,7 @@ import numpy as np
 import optax
 
 from arachne.data.multires import MultiResolutionObservation
+from arachne.emulator.spec import param_info
 from arachne.forward_model.multires import MultiResolutionForwardModel
 from arachne.forward_model.pipeline import ForwardModel
 from arachne.spatial.additive import AdditiveComponentModel
@@ -60,17 +61,10 @@ AnyForwardModel = Union[ForwardModel, MultiResolutionForwardModel]
 _BOUND_MARGIN = 0.01  # fraction of (hi - lo) kept clear of each bound before logit
 _MASS_REF = 9.0  # templates in solve_component_masses are per 10**_MASS_REF Msun
 
-# Neutral physical values for commonly used emulator parameter names.  Anything
-# not listed here (and not matched by ``_neutral_default``) starts at the
-# midpoint of its bounds.
-_NEUTRAL_DEFAULTS: dict[str, float] = {
-    "Av": 0.5,
-    "log10metallicity": -2.5,
-    "log_mass": 9.5,
-    "fesc_lya": 0.2,
-    "dust_bump_amplitude": 1.0,
-    "slope": 0.0,
-}
+# Neutral physical values come from the registry of known library parameters
+# (arachne.emulator.spec.KNOWN_PARAMS).  Anything unknown starts at the midpoint
+# of its bounds.
+_NEUTRAL_MASS = 9.5
 
 
 # ---------------------------------------------------------------------------
@@ -80,14 +74,13 @@ _NEUTRAL_DEFAULTS: dict[str, float] = {
 
 def _neutral_default(name: str, bounds: tuple[float, float], mass_param: str) -> float:
     """Neutral physical value for parameter ``name`` (see :func:`blind_initial_theta`)."""
-    if name.startswith("logsfr_ratio"):
-        return 0.0
+    lo, hi = (float(b) for b in bounds)
     if name == mass_param:
-        return _NEUTRAL_DEFAULTS["log_mass"]
-    if name in _NEUTRAL_DEFAULTS:
-        return _NEUTRAL_DEFAULTS[name]
-    lo, hi = bounds
-    return 0.5 * (float(lo) + float(hi))
+        return _NEUTRAL_MASS
+    default = param_info(name).default
+    if default is None or not lo <= default <= hi:
+        return 0.5 * (lo + hi)
+    return float(default)
 
 
 def _logit_in_bounds(value: float, lo: float, hi: float, margin: float = _BOUND_MARGIN) -> float:
@@ -842,8 +835,18 @@ def find_map(
     theta = best_theta
 
     if final_steps > 0:
-        theta, losses = run_adam(theta, jnp.float32(final_lr), int(final_steps))
+        polished, losses = run_adam(theta, jnp.float32(final_lr), int(final_steps))
         history.append(np.asarray(losses, dtype=np.float32))
+        # The polish can go uphill (noisy float32 gradients near the mode): keep it only
+        # if it improved on the best round.
+        polished_loss = float(loss_jit(polished))
+        if np.isfinite(polished_loss) and polished_loss <= best_loss:
+            theta = polished
+        else:
+            logger.info(
+                f"find_map: polish went uphill ({best_loss:.2f} -> {polished_loss:.2f}); "
+                "keeping the best round"
+            )
 
     if order_by_size and is_additive:
         # ``order_components_by_size`` rebuilds theta from the spatial blocks

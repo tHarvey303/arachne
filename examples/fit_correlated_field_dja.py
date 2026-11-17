@@ -380,8 +380,10 @@ def main():
         print(f"log10metallicity level prior: N({z_mean}, {z_sigma}^2)")
     demo.set_sfh(args.sfh, args.free_globals)
     demo.SFH_PRIOR = args.sfh_prior
-    emulator = demo.BandSubsetEmulator(load_emulator(args.emulator), demo.BANDS)
-    assert list(emulator.param_names) == demo.SPS_PARAM_NAMES
+    emulator = load_emulator(args.emulator, params=demo.SPS_PARAM_NAMES, bands=demo.BANDS)
+    demo.PARAM_BOUNDS.update(
+        emulator.spec.clip_bounds(demo.PARAM_BOUNDS, names=list(demo.PARAM_BOUNDS))
+    )
     psf = PSFModel.from_fits({b: psf_dir / f"{b.split('.')[-1]}_psf_norm.fits" for b in demo.BANDS})
     basis_info = None
     if any(k in demo.LATENT_SFH for k in demo.FIELDS):

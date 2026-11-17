@@ -353,6 +353,7 @@ import argparse
 import dataclasses
 import json
 import math
+import os
 import sys
 import time
 from collections.abc import Callable
@@ -370,8 +371,8 @@ from fit_catalogue import PARAM_BOUNDS, SPS_PARAM_NAMES  # noqa: E402
 
 from arachne.data.observation import ObservationCube  # noqa: E402
 from arachne.data.psf import PSFModel  # noqa: E402
+from arachne.emulator import load_emulator  # noqa: E402
 from arachne.emulator.base import SPSEmulator  # noqa: E402
-from arachne.emulator.parrot_emulator_v2 import load_emulator  # noqa: E402
 from arachne.forward_model.nuisance import NuisanceModel  # noqa: E402
 from arachne.forward_model.pipeline import ForwardModel  # noqa: E402
 from arachne.inference.initialisation import (  # noqa: E402
@@ -411,8 +412,15 @@ from arachne.spatial.additive import AdditiveComponentModel  # noqa: E402
 # Configuration
 # ---------------------------------------------------------------------------
 
-CHECKPOINT = _ARACHNE / "scripts/outputs/emulators/parrot_emulator_v2.eqx"
-PSF_DIR = Path("/cosma/apps/dp276/dc-harv3/synference/priv/JADES-DR3-GS")
+# Data locations: environment variables, else the COSMA paths the demo was developed with.
+CHECKPOINT = Path(
+    os.environ.get(
+        "ARACHNE_EMULATOR", _ARACHNE / "scripts/outputs/emulators/parrot_emulator_v2.eqx"
+    )
+).expanduser()
+PSF_DIR = Path(
+    os.environ.get("ARACHNE_PSF_DIR", "/cosma/apps/dp276/dc-harv3/synference/priv/JADES-DR3-GS")
+).expanduser()
 DEFAULT_OUTDIR = _ARACHNE / "outputs/demo/resolved_sed_fitting"
 
 PIXEL_SCALE = 0.03  # arcsec/px, assumed -- see module docstring
@@ -559,41 +567,16 @@ def wrap180(x: np.ndarray) -> np.ndarray:
     return (np.asarray(x) + 90.0) % 180.0 - 90.0
 
 
-class BandSubsetEmulator(SPSEmulator):
-    """Restrict an emulator's output to a subset of its bands (same inputs)."""
-
-    inner: SPSEmulator
-    _band_names: tuple[str, ...] = eqx.field(static=True)
-    _band_idx: tuple[int, ...] = eqx.field(static=True)
-
-    def __init__(self, inner: SPSEmulator, band_names: list[str]) -> None:
-        missing = [b for b in band_names if b not in inner.band_names]
-        if missing:
-            raise ValueError(f"bands not in emulator: {missing}")
-        self.inner = inner
-        self._band_names = tuple(band_names)
-        self._band_idx = tuple(inner.band_names.index(b) for b in band_names)
-
-    @property
-    def param_names(self) -> list[str]:
-        return list(self.inner.param_names)
-
-    @property
-    def band_names(self) -> list[str]:
-        return list(self._band_names)
-
-    def predict(self, params: jnp.ndarray) -> jnp.ndarray:
-        return self.inner.predict(params)[:, jnp.array(self._band_idx)]
-
-
 def _psf_path(band_name: str) -> Path:
     return PSF_DIR / f"{band_name.split('.')[-1]}_psf_norm.fits"
 
 
 def load_emulator_and_psf() -> tuple[SPSEmulator, PSFModel]:
     print(f"Loading emulator checkpoint: {CHECKPOINT}")
-    emulator = BandSubsetEmulator(load_emulator(CHECKPOINT), BAND_NAMES)
-    assert list(emulator.param_names) == SPS_PARAM_NAMES
+    # Any checkpoint: presented under SPS_PARAM_NAMES and BAND_NAMES, with the fit
+    # bounds narrowed to its training domain.
+    emulator = load_emulator(CHECKPOINT, params=SPS_PARAM_NAMES, bands=BAND_NAMES)
+    PARAM_BOUNDS.update(emulator.spec.clip_bounds(PARAM_BOUNDS, names=list(PARAM_BOUNDS)))
     print(f"  {len(emulator.param_names)} emulator params, {len(emulator.band_names)} bands")
     missing = [b for b in BAND_NAMES if not _psf_path(b).exists()]
     if missing:

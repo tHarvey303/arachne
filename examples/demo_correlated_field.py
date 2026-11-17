@@ -331,41 +331,15 @@ class ToySEDEmulator(SPSEmulator, eqx.Module):
         return 2.0e-6 * 10.0**logm * lam**beta * brk * dust
 
 
-class BandSubsetEmulator(SPSEmulator, eqx.Module):
-    """Restrict a production emulator's output to ``BANDS``, in that order."""
-
-    inner: SPSEmulator
-    _band_names: list[str] = eqx.field(static=True)
-    _idx: tuple[int, ...] = eqx.field(static=True)
-
-    def __init__(self, inner, bands):
-        """Wrap ``inner`` and select ``bands``."""
-        self.inner = inner
-        self._band_names = list(bands)
-        self._idx = tuple(inner.band_names.index(b) for b in bands)
-
-    @property
-    def param_names(self):
-        """Inner emulator inputs."""
-        return self.inner.param_names
-
-    @property
-    def band_names(self):
-        """Selected bands."""
-        return self._band_names
-
-    def predict(self, params):
-        """Inner prediction, selected bands."""
-        return self.inner.predict(params)[:, jnp.array(self._idx)]
-
-
 def load_emulator_and_psf(args) -> tuple[SPSEmulator, PSFModel]:
     """Production emulator / JADES PSFs if given, else the toy SED and Gaussian PSFs."""
     if args.emulator:
         from arachne import load_emulator
 
-        emulator = BandSubsetEmulator(load_emulator(args.emulator), BANDS)
-        assert list(emulator.param_names) == SPS_PARAM_NAMES, emulator.param_names
+        # Any checkpoint: presented under SPS_PARAM_NAMES and BANDS (inputs outside that
+        # list held at the emulator's defaults), fit bounds narrowed to its training domain.
+        emulator = load_emulator(args.emulator, params=SPS_PARAM_NAMES, bands=BANDS)
+        PARAM_BOUNDS.update(emulator.spec.clip_bounds(PARAM_BOUNDS, names=list(PARAM_BOUNDS)))
     else:
         emulator = ToySEDEmulator(_param_names=SPS_PARAM_NAMES, _band_names=BANDS)
     if args.psf_dir:

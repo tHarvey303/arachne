@@ -10,30 +10,41 @@ matplotlib figures.  The physics (model, priors, likelihood, sampling) lives in
 from __future__ import annotations
 
 import csv
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
-import equinox as eqx
 import jax.numpy as jnp
 import numpy as np
 
 from arachne.data.dja import fetch_dja_cutout, load_dja_cutout
 from arachne.data.observation import ObservationCube
 from arachne.data.psf import PSFModel
-from arachne.emulator.base import SPSEmulator
 
 # ---------------------------------------------------------------------------
 # Static configuration
 # ---------------------------------------------------------------------------
 
 ARACHNE_ROOT = Path(__file__).resolve().parent.parent
-CHECKPOINT = ARACHNE_ROOT / "scripts/outputs/emulators/parrot_emulator_v2.eqx"
-PSF_DIR = Path("/cosma/apps/dp276/dc-harv3/synference/priv/JADES-DR3-GS")
-DATA_ROOT = Path("/cosma7/data/dp276/dc-harv3/work/arachne_data")
+
+
+def _path(env: str, default: str | Path) -> Path:
+    """A data location: the environment variable ``env`` if set, else ``default``."""
+    return Path(os.environ.get(env, default)).expanduser()
+
+
+# Data locations.  The defaults are the COSMA paths the examples were developed with;
+# set the environment variables to run anywhere else.
+CHECKPOINT = _path(
+    "ARACHNE_EMULATOR", ARACHNE_ROOT / "scripts/outputs/emulators/parrot_emulator_v2.eqx"
+)
+PSF_DIR = _path("ARACHNE_PSF_DIR", "/cosma/apps/dp276/dc-harv3/synference/priv/JADES-DR3-GS")
+DATA_ROOT = _path("ARACHNE_DATA_ROOT", "/cosma7/data/dp276/dc-harv3/work/arachne_data")
 DJA_CACHE = DATA_ROOT / "target_scan/dja_cache9"  # populated by the target scan
 JADES_DR4_FILE = DATA_ROOT / "Combined_DR4_external_v1.2.1.fits"
-JADES_DR3_PHOT = Path(
-    "/cosma7/data/dp276/dc-harv3/work/catalogs/JADES_DR3_GS_Matched_Specz_total_flux_good.fits"
+JADES_DR3_PHOT = _path(
+    "ARACHNE_JADES_DR3_PHOT",
+    "/cosma7/data/dp276/dc-harv3/work/catalogs/JADES_DR3_GS_Matched_Specz_total_flux_good.fits",
 )
 
 # The nine NIRCam bands the DJA GOODS-S mosaics, the emulator and PSF_DIR share.
@@ -272,33 +283,6 @@ def build_psf_model(
         [resample_psf(native[b], psf_scale, to_scale, method, broaden_arcsec) for b in bands]
     ).astype(np.float32)
     return PSFModel(kernels=kernels, band_names=list(bands))
-
-
-class BandSubsetEmulator(SPSEmulator):
-    """Restrict an emulator's output to a subset of its bands (same inputs)."""
-
-    inner: SPSEmulator
-    _band_names: tuple[str, ...] = eqx.field(static=True)
-    _band_idx: tuple[int, ...] = eqx.field(static=True)
-
-    def __init__(self, inner: SPSEmulator, band_names: list[str]) -> None:
-        missing = [b for b in band_names if b not in inner.band_names]
-        if missing:
-            raise ValueError(f"bands not in emulator: {missing}")
-        self.inner = inner
-        self._band_names = tuple(band_names)
-        self._band_idx = tuple(inner.band_names.index(b) for b in band_names)
-
-    @property
-    def param_names(self) -> list[str]:
-        return list(self.inner.param_names)
-
-    @property
-    def band_names(self) -> list[str]:
-        return list(self._band_names)
-
-    def predict(self, params: jnp.ndarray) -> jnp.ndarray:
-        return self.inner.predict(params)[:, jnp.array(self._band_idx)]
 
 
 # ---------------------------------------------------------------------------

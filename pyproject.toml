@@ -22,7 +22,7 @@ keywords = [
 ]
 
 authors = [
-    { name = "arachne contributors" },
+    { name = "Tom Harvey" },
 ]
 
 requires-python = ">=3.12"
@@ -73,9 +73,9 @@ arachne-plots = "arachne.viz.cli:main"
 arachne-bundle = "arachne.results.cli:main"
 
 [project.urls]
-"Homepage" = "https://github.com/arachne-project/arachne"
-"Bug Reports" = "https://github.com/arachne-project/arachne/issues"
-"Source" = "https://github.com/arachne-project/arachne"
+"Homepage" = "https://github.com/tHarvey303/arachne"
+"Bug Reports" = "https://github.com/tHarvey303/arachne/issues"
+"Source" = "https://github.com/tHarvey303/arachne"
 
 [build-system]
 requires = ["hatchling"]

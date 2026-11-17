@@ -3,6 +3,8 @@
 import equinox as eqx
 import jax.numpy as jnp
 
+from arachne.emulator.spec import EmulatorSpec
+
 
 class SPSEmulator(eqx.Module):
     """Abstract base class for stellar population synthesis emulators.
@@ -47,6 +49,21 @@ class SPSEmulator(eqx.Module):
             Predicted photometry of shape (N_pixels, N_bands) in nJy.
         """
         raise NotImplementedError
+
+    @property
+    def spec(self) -> EmulatorSpec:
+        """Input names, valid domain, neutral values, default priors and roles.
+
+        The base implementation fills everything from the registry of known
+        library parameters (:data:`arachne.emulator.spec.KNOWN_PARAMS`).
+        Emulators that record their training domain override this.
+        """
+        return EmulatorSpec.from_names(self.param_names, self.band_names)
+
+    @property
+    def param_bounds(self) -> dict[str, tuple[float, float]]:
+        """``{name: (lo, hi)}``: the domain the emulator is valid on (``spec.param_bounds``)."""
+        return dict(self.spec.param_bounds)
 
     @property
     def n_params(self) -> int:

@@ -3,7 +3,7 @@ Quickstart
 
 This guide walks through a blind bulge + disk fit of a galaxy image with the
 2-component :class:`~arachne.AdditiveComponentModel`, against your own FITS files and a
-trained emulator checkpoint.  The README's "Quick Start" is the same workflow made
+trained emulator checkpoint.  The "Quick Start" in ``docs/guide/image_fitting.md`` is the same workflow made
 self-contained — a toy emulator and synthetic arrays — so it can be run end to end on a CPU
 without any data.
 
@@ -30,8 +30,8 @@ Load observations
 Load the emulator
 -----------------
 
-Use a trained :class:`~arachne.ParrotEmulatorV2` checkpoint (see the README for
-training from a synference library):
+Use a trained :class:`~arachne.ParrotEmulatorV2` checkpoint (see ``docs/guide/emulators.md``
+for training from a synference library):
 
 .. code-block:: python
 

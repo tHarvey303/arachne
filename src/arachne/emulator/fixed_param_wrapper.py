@@ -6,6 +6,7 @@ import equinox as eqx
 import jax.numpy as jnp
 
 from arachne.emulator.base import SPSEmulator
+from arachne.emulator.spec import EmulatorSpec
 
 
 class FixedParamEmulator(SPSEmulator):
@@ -21,6 +22,9 @@ class FixedParamEmulator(SPSEmulator):
     as ``FreeFormPixelMap`` or the legacy ``GaussianMixtureSpatialModel``.
     ``AdditiveComponentModel`` supports ``fixed_params`` and
     ``shared_param_names`` natively, so this wrapper is not needed there.
+
+    :class:`~arachne.emulator.view.EmulatorView` is the general form (several
+    fixed inputs, renaming, reordering); this class is kept for existing code.
     """
 
     inner: SPSEmulator
@@ -74,6 +78,15 @@ class FixedParamEmulator(SPSEmulator):
     def band_names(self) -> list[str]:
         """Band names returned by ``predict`` (subset of ``inner.band_names``)."""
         return list(self._band_names)
+
+    @property
+    def spec(self) -> EmulatorSpec:
+        """The inner spec without the fixed input, restricted to the selected bands."""
+        inner = self.inner.spec
+        fixed = {**inner.meta.get("fixed", {}), self.fixed_param_name: self.fixed_value}
+        return inner.subset(
+            param_names=self._param_names, band_names=self._band_names, meta={"fixed": fixed}
+        )
 
     def predict(self, params: jnp.ndarray) -> jnp.ndarray:
         """Free params (N, n_params-1) -> photometry (N, n_bands) nJy."""

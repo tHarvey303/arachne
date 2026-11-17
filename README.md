@@ -1,79 +1,27 @@
 # arachne
 
-**JAX-native SED fitting and image-level forward modelling of galaxy populations.**
+**JAX-native SED fitting and image-level forward modelling of galaxies.**
 
-arachne trains fast neural emulators of stellar-population-synthesis (SPS) photometry and
-uses them for GPU-accelerated Bayesian inference — from fitting a single integrated SED, to
-fitting a catalogue of thousands of galaxies in parallel, to full spatially-resolved
-image-level forward modelling with PSF convolution.
+arachne trains fast neural emulators of stellar-population-synthesis (SPS) photometry and uses
+them for GPU-accelerated Bayesian inference: one integrated SED, a catalogue of thousands of
+galaxies, or a spatially resolved multi-band image with PSF convolution. The pipeline is pure
+JAX/Equinox, so it is differentiable end to end, JIT-compiled, and needs no PyTorch.
 
-## Overview
+Status: alpha (v0.1.0), under active development. Example command-line flags change; check
+`--help`.
 
-Two use cases share the same emulator + inference core:
+## What it does
 
-1. **Catalogue / single-galaxy SED fitting** (`scripts/fit_*.py`) — integrated photometry for
-   one galaxy or a whole catalogue, with GPU-batched Pathfinder+NUTS for speed or gradient-free
-   Nested Slice Sampling (NSS) for multimodal posteriors and evidence (`logZ`).
-2. **Image-level forward modelling** — a galaxy as a sum of `K` additive light components
-   (`AdditiveComponentModel`: a Gaussian, Sérsic or point-source surface-brightness profile
-   carrying the emulator SED of its *own* SPS parameters and total stellar mass), as
-   per-pixel SPS parameter maps with Gaussian-random-field priors (`CorrelatedFieldMap`:
-   stellar-mass, dust, metallicity and SFH maps of one resolved galaxy, 10³–10⁴ parameters),
-   or as a free-form per-pixel map; the full multi-band image forward-modelled through FFT PSF
-   convolution and optional instrumental nuisances; initialised *blind* from the data; sampled
-   with NSS, whitened NUTS, geoVI/MGVI or MCLMC. Bands may share one pixel grid (`ForwardModel`) or each keep its own
-   WCS grid (`MultiResolutionForwardModel`), and a sample of equal-shape cutouts can be fitted
-   in one vmapped program (`BatchedForwardModel`).
+| Problem | Model | Sampler |
+|---|---|---|
+| Integrated photometry, one galaxy or a catalogue | emulator SED | GPU-batched Pathfinder + NUTS, or nested slice sampling (NSS) for multimodal posteriors and evidence |
+| A galaxy as a few light components (bulge, disk, point source) | `AdditiveComponentModel`: each component has its own SED at its own stellar mass, times a Gaussian, Sérsic or point profile | NSS up to about 40 parameters, whitened NUTS above |
+| Maps of stellar mass, dust, metallicity and star-formation history | `CorrelatedFieldMap`: per-pixel SPS parameters with Gaussian-random-field priors (10³–10⁴ parameters) | trust-region Newton mode, then whitened NUTS; geoVI/MGVI optional |
 
-The entire pipeline is pure JAX/Equinox — end-to-end differentiable, JIT-compilable to GPU,
-and has no PyTorch dependency at inference time.
-
-Full API documentation lives in `docs/` (Sphinx): `pip install -e ".[docs]" && cd docs && make html`.
-The working notes on correlated-field inference (what was measured, what to try next) are in
-[`docs/design/correlated_field_inference.md`](docs/design/correlated_field_inference.md).
-
-## Emulators
-
-Both emulators are trained directly from the HDF5 model library produced by
-[synference](https://github.com/tHarvey303/synference).
-
-### ParrotEmulatorV2 (recommended)
-
-The current production emulator (`arachne.ParrotEmulatorV2` / `arachne.load_emulator`), built
-on three validated improvements over the original Parrot design (see the module docstring in
-[`src/arachne/emulator/parrot_emulator_v2.py`](src/arachne/emulator/parrot_emulator_v2.py) for
-the full rationale and ablations):
-
-1. **Analytic mass factorisation** — photometry is exactly linear in stellar mass, so the
-   network predicts flux per 10⁹ M☉ and `log_mass` is reapplied analytically at inference.
-   (Every blind-initialisation trick downstream depends on this exact linearity.)
-2. **Fourier redshift features** — sin/cos encodings let the network represent the sharp
-   Lyman-break cutoff without extreme depth (the single largest accuracy win, ~2×).
-3. **arsinh-compressed SFH-ratio inputs** — preserves the informative core of the
-   Student-t-distributed `logsfr_ratio_*` inputs that plain z-scoring squashes.
-
-```bash
-python scripts/train_parrot_emulator_v2.py --library galaxy_library.hdf5 \
-    --output outputs/emulators/parrot_emulator_v2.eqx
-python scripts/validate_parrot_emulator.py --emulator outputs/emulators/parrot_emulator_v2.eqx \
-    --library galaxy_library.hdf5 --output-dir outputs/validation/
-```
-
-`load_emulator(path)` (`arachne.load_emulator`) loads either a V1 or V2 checkpoint
-transparently — use it in downstream code instead of `ParrotEmulatorV2.load` directly. The
-architecture-search harness that produced the V2 recipe (Optuna HPO, ablation sweeps, scaling
-studies) lives in `scripts/experiments/` — see [Experiments](#experiments--training-harness).
-
-### ParrotEmulator (legacy) and SPSMLPEmulator
-
-`ParrotEmulator` (v1) is the original Parrot-style MLP
-([Mathews et al. 2023](https://iopscience.iop.org/article/10.3847/1538-4357/ace720)) with
-GELU activations and an arsinh-magnitude output transform; superseded by V2 above but kept for
-compatibility. `SPSMLPEmulator` uses the [Speculator](https://arxiv.org/abs/1911.11778)
-architecture (Alsing et al. 2020), trained in log10-flux space.
-
-All emulators produce `.eqx` checkpoints — native Equinox pytrees, differentiable and
-JIT-compilable with no PyTorch dependency.
+Image fits forward-model the full multi-band cutout through FFT PSF convolution, with optional
+per-band sky, shift and noise-scale nuisances. They start blind from the data. Bands can share
+one pixel grid, keep their native grids (`MultiResolutionForwardModel`), or a sample of
+equal-shape cutouts can be fitted as one vmapped program (`BatchedForwardModel`).
 
 ## Installation
 
@@ -82,915 +30,132 @@ git clone https://github.com/tHarvey303/arachne
 cd arachne
 pip install -e ".[dev,test]"
 
-# JAX with GPU support — install the CUDA plugin at the SAME version as jax/jaxlib,
-# or JAX will silently fall back to CPU instead of erroring (see Gotchas below):
+# GPU: install the CUDA plugin at the SAME version as jax/jaxlib.
+# On a mismatch JAX silently falls back to CPU.
 pip install "jax[cuda12]==<jaxlib version>"
 
-# synference (provides the HDF5 model libraries used to train the emulator):
-pip install -e /path/to/synference
-
-# Optional: geoVI / MGVI posteriors for correlated-field fits (arachne.inference.mgvi) need
-# NIFTy.re.  nifty8 itself depends only on numpy and scipy, so it leaves jax/jaxlib alone:
-pip install -e ".[vi]"
+pip install -e ".[vi]"     # optional: geoVI / MGVI (NIFTy.re)
+pip install -e ".[gui]"    # optional: the browser viewer
 ```
 
-Nested Slice Sampling requires `blackjax>=1.6.2` (nested sampling shipped upstream in
-blackjax 1.6; no fork is needed any more — see [Samplers](#samplers)).
+Requires Python ≥ 3.12 and `blackjax>=1.6.2`. Emulators are trained on HDF5 model libraries
+from [synference](https://github.com/tHarvey303/synference). In a virtual environment shared
+with other projects, do not let `pip` upgrade `jax` or `numpy`.
 
-In a venv shared across projects (e.g. a department HPC venv), **do not upgrade or remove
-packages without checking the blast radius first** — `pip`'s resolver will happily bump
-transitive dependencies (numpy, jax, jaxlib, ...) that other projects pin to older versions.
-See [Gotchas](#gotchas) for a concrete example of this breaking the environment.
+## Emulators
 
-## Catalogue / Single-Galaxy SED Fitting
+An emulator maps SPS parameters to photometry in nJy and describes itself, so fitting code
+never hard-codes a parameter list:
 
-Three scripts share the same forward model and likelihood machinery
-(`scripts/fit_catalogue.py` is the shared driver — the others import from it); the
-per-parameter prior specifications they use live in the library, in
-[`arachne.priors.specs`](src/arachne/priors/specs.py) (see [Priors](#priors) below):
+```python
+from arachne import load_emulator
 
-| Script | Use for |
-|---|---|
-| `fit_sed.py` | One mock galaxy, minimal reference example (no catalogue needed). |
-| `fit_one_galaxy.py` | One real or mock galaxy with verbose diagnostics — debug fits here before scaling up. |
-| `fit_catalogue.py` | Production catalogue fitting, thousands of galaxies. |
+emulator = load_emulator("parrot_emulator_v2.eqx")
+print(emulator.spec.describe())      # inputs, valid domain, neutral values, default priors
+bounds = emulator.spec.param_bounds
+```
 
-`fit_catalogue.py` supports two inference backends via `--sampler`:
+To use a checkpoint trained on a different library in an existing fit, ask for the inputs and
+bands the fit uses. Aliases are matched, and inputs the fit does not use are held at stated
+defaults:
+
+```python
+emulator = load_emulator("parrot_emulator_v3.eqx", params=my_param_names, bands=my_bands)
+emulator.spec.meta["fixed"]          # what is being held constant, and at what value
+```
+
+Train one from any synference library:
 
 ```bash
-EMU=outputs/emulators/parrot_emulator_v2.eqx
-# GPU-batched Pathfinder + multi-chain NUTS (default; thousands of galaxies/min)
-python scripts/fit_catalogue.py catalogue.fits bands_config.json --emulator $EMU \
-    --sampler nuts --n-chains 2 --n-samples 500
-# Nested slice sampling: gradient-free, multimodal, reports logZ; sequential per galaxy
-# (~10-30x slower than the batched NUTS path), so use it for QA and hard cases.
-python scripts/fit_catalogue.py catalogue.fits bands_config.json --emulator $EMU \
-    --sampler nss --num-live 500 --num-inner-steps 24 --num-delete 50
+python scripts/train_parrot_emulator_v2.py --library library.hdf5 --output emulator.eqx
+python -m arachne.emulator describe emulator.eqx
 ```
 
-`--print-config-template --emulator <ckpt>` prints a band-config JSON template (bands + default
-priors); see `scripts/configs/*.json` for worked examples. `fit_catalogue.py` also defines
-`SPS_PARAM_NAMES` and `PARAM_BOUNDS` — the 12-parameter emulator training domain (`redshift`,
-`log_mass`, `slope`, `fesc_lya`, `dust_bump_amplitude`, `log10metallicity`, `Av`,
-`logsfr_ratio_0..4`) that image-level fits should reuse as their bounds.
-`diagnose_parrot_emulator.py` and `validate_parrot_emulator.py` round out the toolkit for
-inspecting emulator accuracy before trusting it in a fit.
+More in [docs/guide/emulators.md](docs/guide/emulators.md).
 
-## Experiments / Training Harness
+## Fitting a catalogue
 
-`scripts/experiments/` holds the emulator architecture-search harness used to derive the V2
-recipe: `hpo_lab.py` (Optuna HPO), `emulator_lab.py` / `train_final_v2.py` (ablation training),
-`bench_inference.py`, `make_summary_figs.py` and shell drivers. Results go to `scripts/outputs/`
-(gitignored; only the harness code is tracked). `archive_gmm_blend/` holds retired diagnostics
-from the old parameter-blending demo — kept for the record, they do not run against the current
-code.
+```bash
+python scripts/fit_catalogue.py catalogue.fits bands_config.json --emulator emulator.eqx \
+    --sampler nuts --n-chains 2 --n-samples 500        # thousands of galaxies per minute
+python scripts/fit_catalogue.py catalogue.fits bands_config.json --emulator emulator.eqx \
+    --sampler nss --num-live 500                       # per-galaxy evidence, multimodal
+```
 
-## Image-Level Forward Modelling
+`--print-config-template --emulator emulator.eqx` writes a starting band configuration. More in
+[docs/guide/catalogue_fitting.md](docs/guide/catalogue_fitting.md).
 
-### Quick Start
-
-A blind two-component fit, complete and runnable: it builds a toy mass-linear emulator (a
-stand-in for a trained `ParrotEmulatorV2` checkpoint) and a synthetic three-band cutout, then
-fits them blind. Swap the toy emulator for `load_emulator(...)` and the synthetic arrays for
-`ObservationCube.from_fits(...)` / `PSFModel.from_fits(...)` and nothing else changes.
+## Fitting an image
 
 ```python
-import equinox as eqx
 import jax
-import jax.numpy as jnp
-import numpy as np
-from arachne import (
-    AdditiveComponentModel, ForwardModel, NSSSampler, ObservationCube, PSFModel,
-    SPSEmulator, blind_initial_theta, multistart_map,
-)
-from arachne.priors import build_component_log_prior, resolve_prior_specs
+from arachne import (AdditiveComponentModel, ForwardModel, NSSSampler, ObservationCube,
+                     PSFModel, blind_initial_theta, load_emulator, multistart_map)
 
+obs = ObservationCube.from_fits(...)                      # flux, variance, mask in nJy
+psf = PSFModel.from_fits({band: path for band, path in psf_files.items()})
+emulator = load_emulator("emulator.eqx", bands=obs.band_names)
+spec = emulator.spec
 
-class ToyEmulator(SPSEmulator, eqx.Module):
-    """flux_b proportional to 10**(log_mass - 9), reddened by Av.  Real fits: load_emulator()."""
-
-    _param_names: list[str] = eqx.field(static=True)
-    _band_names: list[str] = eqx.field(static=True)
-
-    @property
-    def param_names(self):
-        return self._param_names
-
-    @property
-    def band_names(self):
-        return self._band_names
-
-    def predict(self, params):
-        """(K, N_params) physical rows -> (K, N_bands) fluxes in nJy."""
-        mass = 10.0 ** (params[:, 0:1] - 9.0)
-        lam = jnp.array([1.15, 2.0, 2.77])                       # micron, one per band
-        redden = 10.0 ** (-0.4 * params[:, 2:3] / lam[None, :])
-        return 3e3 * mass * redden * (1.0 + 0.2 * params[:, 1:2])
-
-
-BANDS = ["JWST/NIRCam.F115W", "JWST/NIRCam.F200W", "JWST/NIRCam.F277W"]
-NAMES = ["log_mass", "log_age", "Av"]                            # emulator input order
-BOUNDS = {"log_mass": (6.0, 12.0), "log_age": (7.0, 10.1), "Av": (0.0, 4.0)}
-emulator = ToyEmulator(_param_names=NAMES, _band_names=BANDS)
-
-# Per-band PSF kernels (real work: PSFModel.from_fits({band: path})).
-yy, xx = np.mgrid[-6:7, -6:7]
-kernels = np.stack([np.exp(-(yy**2 + xx**2) / (2 * s**2)) for s in (1.0, 1.3, 1.7)])
-kernels = (kernels / kernels.sum(axis=(1, 2), keepdims=True)).astype(np.float32)
-psf = PSFModel(kernels=kernels, band_names=BANDS)
-
-H = W = 32
-spatial_model = AdditiveComponentModel(
-    n_components=2,                       # bulge + disk
-    emulator_param_names=NAMES,
-    param_bounds=BOUNDS,                  # = the emulator's training domain
-    image_shape=(H, W),
-    mass_param="log_mass",                # per-component TOTAL stellar mass
-    sps_log_prior=build_component_log_prior(
-        NAMES, resolve_prior_specs(NAMES, None, BOUNDS), BOUNDS
-    ),
-    profiles=["sersic", "gaussian"],      # compact bulge + smooth disk
-    pixel_scale=0.031,                    # arcsec/px: mu and sigma are now in arcsec
-    normalisation="analytic",             # unit flux over the whole plane
-    oversample=3,                         # cuspy Sersic needs sub-pixel sampling
-)
-
-# Synthetic data: a compact n=4 bulge plus a bigger, dustier disk.  Raw (unconstrained) theta;
-# the truth is used ONLY to make the image, never to start the fit.
-truth = jnp.array([
-    0.0, 0.0, np.log(0.08), np.log(0.07), 0.0, np.log(4.0),      # sersic shape block
-    1.0, 0.6, -1.2,                                              # its log_mass, log_age, Av
-    0.03, -0.02, np.log(0.25), np.log(0.18), 0.3,                # gaussian shape block
-    0.7, -0.4, 0.4,
-])
-def cube(flux, variance):                # real work: ObservationCube.from_fits(...)
-    flux = np.asarray(flux, np.float32)
-    return ObservationCube(flux=flux, variance=np.full(flux.shape, variance, np.float32),
-                           mask=np.ones(flux.shape, np.float32), band_names=BANDS,
-                           pixel_scale=0.031)
-
-clean = np.asarray(ForwardModel.build(obs=cube(np.zeros((3, H, W)), 1.0), psf_model=psf,
-                                      spatial_model=spatial_model,
-                                      emulator=emulator)._model_image(truth))
-sigma = 0.05 * clean.max()
-obs = cube(clean + np.random.default_rng(0).normal(0.0, sigma, clean.shape), sigma**2)
-
-# model_error_frac adds a fractional model-error floor in quadrature: a few per cent of
-# emulator systematics dominate photon noise once ~1e4 pixels are summed.
-forward_model = ForwardModel.build(
-    obs=obs, psf_model=psf, spatial_model=spatial_model, emulator=emulator,
-    model_error_frac=0.05,
-)
-
-# Blind init: image moments -> neutral SPS values -> Adam with linear mass re-solves, from a
-# few generic SPS archetypes; the best -log_posterior wins.  No truth, no zeros.
-theta0 = blind_initial_theta(spatial_model, forward_model.observation)
-map_result = multistart_map(forward_model, theta0, archetypes=[{}, {"Av": 0.3}, {"Av": 2.0}])
-print("blind MAP -log_post", float(map_result.neg_log_posterior),
-      "vs truth", float(-forward_model.log_posterior(truth)))
-
-# Nested slice sampling: live points from the prior (no starting point), equal-weight samples
-# plus the evidence, so fits with different K can be compared.  See "Samplers" for when to
-# prefer arachne.inference.laplace.run_whitened_nuts instead.
-result = NSSSampler(forward_model, num_live=100, n_samples_out=200).run(jax.random.PRNGKey(0))
-print("logZ", result.logZ, "+-", result.logZ_err, "ESS", result.ess)
-
-# Components are exchangeable: order compact-first before summarising.
-samples = jax.vmap(spatial_model.order_components_by_size)(result.samples)
-mu, size, rho, sps_phys = jax.vmap(spatial_model.component_params)(samples)
-print(np.percentile(np.asarray(sps_phys[:, :, 0]), [16, 50, 84], axis=0))  # log_mass per component
-result.to_hdf5("posterior.h5")
-```
-
-`theta` is a flat vector of length `Σ_k (n_shape_k + N_free) + N_shared`, laid out as `K`
-component blocks `[shape_k..., sps_raw_k...]` followed by the shared raws; every SPS value is
-mapped to its bounds by a sigmoid. Use `spatial_model.split_theta` / `join_theta` /
-`component_params` / `shape_raw` / `sps_raw` rather than slicing by hand.
-
-### Data Flow
-
-```
-synference HDF5 library ──▶ train_parrot_emulator_v2.py ──▶ emulator.eqx
-                                     (mass-factorised MLP, Fourier-z, arsinh SFH inputs)
-  (inference time)
-theta (n_params,)  ← BlackJAX NSS / NUTS / MCLMC, NIFTy.re geoVI/MGVI
-   │               (from blind_initial_theta → multistart_map, or a trust_region_newton mode)
-   │  split_theta → (theta_spatial, theta_nuisance)
-   ▼ SpatialModel.model_image(theta_spatial, emulator, (H, W))
-   │    AdditiveComponentModel:  K SEDs (K, N_bands) ← emulator.predict,
-   │                             × K normalised profiles (K, H, W) → Σ_k F_k ⊗ P_k
-   │    CorrelatedFieldMap:      levels + globals + white Fourier coefficients → Matérn
-   │                             field maps → softclip / copula → per-pixel emulator inputs
-   │                             (mapped + derived) → predict per pixel
-   │    FreeFormPixelMap / GMM:  decode → pixel_params (H*W, N_sps) → predict per pixel
-   ▼ PSFConvolver (FFT; nuisance sub-pixel shifts as a phase ramp) + per-band nuisance sky
-   ▼ GaussianLikelihood (model-error floor, nuisance log_noise_scale)
-   │    + SpatialModel.log_prior() + NuisanceModel.log_prior()
-log_likelihood(theta), log_prior(theta), log_posterior(theta)  ← scalar, differentiable
-   ├─▶ NSS: log_prior + log_likelihood separately, live points from sample_prior → samples + logZ
-   └─▶ NUTS / MCLMC: jax.grad(log_posterior) → leapfrog
-```
-
-### Spatial Models
-
-| Model | Parameters | Best for |
-|---|---|---|
-| `AdditiveComponentModel` (**recommended**) | `Σ_k (n_shape_k + N_free) + N_shared` | Bulge/disk and other multi-component decompositions. Light is additive: each component has its own SED at its own total mass times a normalised profile; `K` emulator calls per likelihood, independent of image size. Proper prior with `sample_prior` (works with NSS); supports `fixed_params`, `shared_param_names`, mixed profiles, arcsec coordinates and analytic normalisation. |
-| `CorrelatedFieldMap` (**recommended for resolved maps**) | `N_fields + N_global + N_hyper + N_coupling + Σ_k n_modes_k` | Per-pixel maps of the SPS parameters (stellar mass per pixel, A_V, Z, SFH) as Gaussian random fields around mean maps: Matérn priors on truncated white Fourier coefficients (a few hundred to a few thousand modes per map instead of `H × W`), free level offsets, optional fitted hyperparameters and couplings between fields, copula marginals, latent fields with derived emulator inputs. Proper prior with `sample_prior`; one emulator call per pixel. See [Correlated-field parameter maps](#correlated-field-parameter-maps). |
-| `GaussianMixtureSpatialModel` | `K × (5 + N_sps)` | **Caveat:** blends SPS *parameters* per pixel with softmax weights that sum to 1, so it has no surface-brightness profile — every pixel carries a full galaxy mass and a lone "disk" fills the whole frame at constant flux. Superseded by `CorrelatedFieldMap` for smooth parameter gradients; kept for compatibility only, never for bulge/disk work. |
-| `FreeFormPixelMap` | `H × W × N_sps` | Maximum flexibility; per-pixel emulator calls, requires GPU; L2 smoothness prior. |
-
-All models implement `decode` / `log_prior`; `model_image` (the hook `ForwardModel` calls) has
-a per-pixel default and is overridden by `AdditiveComponentModel` and `CorrelatedFieldMap`. Note that
-`AdditiveComponentModel.decode` returns a *summary* map (mass-weighted component parameters,
-with log10 stellar-mass surface density in the mass column) for plotting — the likelihood
-never uses it.
-
-### Light profiles
-
-Each component's shape is delegated to a `Profile`
-([`src/arachne/spatial/profiles.py`](src/arachne/spatial/profiles.py)), selected per component
-with `profiles="gaussian"` (one name for all) or `profiles=["sersic", "gaussian", "point"]`
-(one per component; pre-built instances such as `SersicProfile(log_n_sd=0.3)` are accepted):
-
-| Profile | Shape parameters | Notes |
-|---|---|---|
-| `"gaussian"` | 5: `mu_y, mu_x, log_sigma_y, log_sigma_x, atanh_rho` | The historical parametrisation. `sigma = exp(log_sigma)`, `rho = tanh(atanh_rho)` clipped to ±0.99. |
-| `"sersic"` | 6: the above `+ log_n` | `sigma` is the effective (half-light) radius along each axis; `n = exp(log_n)` is *softly* clamped into `n_bounds` (default `(0.3, 10)`) so it keeps a gradient at the wall; prior `Normal(log 2, 0.7)` on `log_n`. Use `oversample >= 3` — a single sample per pixel badly under-resolves `n ≳ 2`. |
-| `"point"` | 2: `mu_y, mu_x` | An AGN / nuclear source: unit flux in a fixed circular Gaussian of width `point_sigma` (0.5 px by default), so after PSF convolution the component *is* the PSF at `mu`. |
-
-Because profiles have different block lengths, `split_theta` returns a **list** of blocks for a
-mixed-profile model (and a rectangular `(K, ·)` array when every component shares a profile), and
-`order_components_by_size` only permutes components that share a profile.
-
-Two more switches change what the coordinates and the normalisation mean. `pixel_scale=None`
-(default) keeps `mu`/`sigma` in **pixel indices**, while `pixel_scale=0.031` switches to
-**arcsec offsets from the frame centre** `((H-1)/2, (W-1)/2)` — which is what lets the same
-component be rendered on another band's grid. `normalisation="frame"` (default) divides each
-profile by its sum over the model's own grid; `normalisation="analytic"` normalises the integral
-over the whole plane, so flux falling outside the cutout is correctly lost, and is **required**
-for `model_image_on` (arbitrary grids) and for multi-resolution fitting.
-
-### Initialisation
-
-`arachne.inference.initialisation` gives a deterministic, truth-free start: `image_moments`
-(centroid + rms size from the S/N-stacked image) → `blind_initial_theta` (all components at the
-centroid on a geometric size ladder, neutral SPS values, Sérsic `n=4` for the most compact
-component and `n=1` for the rest) → `find_map` / `multistart_map` (Adam on `-log_posterior`).
-It works because the `K` component masses are **linear amplitudes** — flux ∝ `10**log_mass` —
-so given every other parameter they solve a `K × K` weighted least-squares system
-(`solve_component_masses`, which also accounts for a fitted sky, shifts and noise scale).
-`find_map` re-solves them between Adam rounds, collapsing the dominant mass/size/colour
-degeneracy far faster than gradient steps, and `multistart_map` starts from a few generic SPS
-archetypes (low vs high dust) to avoid the wrong basin of the dust/age degeneracy. Components
-are ordered compact-first at the end (`order_components_by_size`) to fix the label symmetry.
-
-With nuisances attached use `blind_initial_full_theta(forward_model)` (or wrap a spatial vector
-with `forward_model.initial_theta_from_spatial`) so theta has the right length;
-`blind_initial_theta` also accepts a `MultiResolutionObservation`, where `ref_band=` picks the
-band whose moments seed the centre and size. Very close to the mode the linear mass re-solve
-maximises the *floor-free* likelihood and can therefore **raise** `-log_posterior`: polish with
-`find_map(..., resolve_masses=False)` at a low learning rate (the demo's `polish_map` anneals
-Adam, then takes a few damped Newton steps).
-
-### Priors
-
-Per-parameter physical-space priors are dict specs (`{"dist": "studentt", "df": 2, "loc": 0,
-"scale": 0.3}`) handled by [`arachne.priors.specs`](src/arachne/priors/specs.py):
-`DEFAULT_PRIORS` (Student-t on `logsfr_ratio_*` — the emulator training grid was drawn from
-it — uniform elsewhere), `resolve_prior_specs` (merge user overrides, validate against bounds),
-`build_log_prior` (catalogue fits, `(N,)` vector), `build_component_log_prior` (image fits,
-`(K, N_emulator)` matrix; shared parameters counted once, fixed ones ignored),
-`prior_config_template` and `sigmoid_log_jacobian`. Supported `dist` values: `uniform`,
-`loguniform`, `normal`, `studentt`, `halfnormal`, `exponential`, `lognormal`. The spatial models
-add their own sigmoid Jacobian (uniform in *physical* space) plus each profile's shape prior
-(Gaussians on the centre, log sizes, `atanh_rho` and `log_n`), so
-`AdditiveComponentModel.log_prior` is a proper density, `logZ` values are comparable across `K`,
-and `sample_prior` draws from exactly that density (minus the optional `sps_log_prior` term) for
-NSS's live points. `CorrelatedFieldMap` takes the same specs through `global_priors` (a density
-on a free global instead of uniform-in-bounds) and `field_marginals` (the per-pixel marginal of a
-mapped field, applied as a copula so the spatial correlation and the `N(0, I)` prior on theta are
-kept).
-
-### Correlated-field parameter maps
-
-`CorrelatedFieldMap` ([`src/arachne/spatial/correlated_field.py`](src/arachne/spatial/correlated_field.py))
-fits per-pixel SPS parameter maps of one resolved galaxy without decomposing it into components.
-Every emulator parameter plays one of four roles: a **field** (a map with a Gaussian-random-field
-prior; the mass parameter must be one, `log_mass` *per pixel*, unbounded because the emulator is
-exactly linear in mass), a **global** (one scalar for every pixel, uniform within its bounds or
-with a `global_priors` density), **fixed** (the spec-z; and at z ≈ 2 also `fesc_lya` and
-`dust_bump_amplitude`, which change the NIRCam fluxes by < 0.3 % per unit), or **derived** (a
-per-pixel linear combination of field maps, soft-clipped to its bounds, with no theta entries and
-no prior terms).
-
-Field `k` is `u_k(x) = m_k(x) + a_k + s_k g_k(x) + Σ_j c_kj d_j(x)`: a mean map `m_k`, a free
-level `a_k ~ N(0, level_sigma²)` (it replaces the DC mode), a unit-variance stationary field
-`g_k` with a Matérn spectrum (`corr_lengths` in pixels, slope `nus`) built from white Fourier
-coefficients `z ~ N(0, I)` on a zero-padded grid, and optional couplings to earlier fields (a
-resolved Σ*–A_V relation, dust following young stars: `couplings` fixed, `free_couplings`
-fitted; the *smooth* part of any relation belongs in `mean_maps`). Only the modes carrying most
-of the prior variance are kept (`variance_fraction=0.99`, or an explicit `k_max` per field, e.g.
-the wavenumber where the sharpest PSF's MTF drops below a threshold, `psf_k_max`), so a 64×64
-map costs a few hundred to ~2000 parameters rather than 4096. The physical map is
-`softclip(u_k, bounds)`, or a copula transform (`field_marginals`, e.g. the library's
-Student-t(2) on `logsfr_ratio_*`; `copula_level="gaussian"|"physical"` decides whether the
-level is added before or after it) that keeps the spatial correlation and the exact `N(0, I)`
-prior on theta. Amplitude, correlation length and ν can be fitted with log-normal `hyper_priors`
-(non-centred: the basis is fixed, the spectrum re-evaluated in-graph). `latent_fields` plus
-`derived_params` implement a reduced SFH: two latent maps whose fixed 2 × 5 basis (the top right-
-singular vectors of the fit emulator's `d ln F / d logsfr_ratio` at a neutral point, the demo's
-`sfh_basis`) derives all five `logsfr_ratio_i` per pixel. The reason is identifiability: at
-z = 2 the photometry constrains only ~2 SFH directions per pixel (≈ `r1 − r2` is unconstrained),
-and mapping more ratios, or mixing mapped ratios with free global ones, leaves a null space that
-a Laplace step fills confidently and that the stacked pixels then push to confidently wrong
-global values. The prior is proper (`sample_prior`), theta is laid out as
-`[levels, globals_raw, hyper, couplings, z_field_0, z_field_1, ...]` (use `split_theta` /
-`join_theta`), and `param_maps(theta)` returns every per-pixel emulator input (mapped fields,
-then derived ones) named by `param_map_names`; `field_maps` returns the fields themselves.
-
-```python
-from arachne import CorrelatedFieldMap, mass_map_from_image
-
-names, bounds = emulator.param_names, PARAM_BOUNDS            # the emulator's training domain
-neutral = {"slope": 0.0, "fesc_lya": 0.2, "dust_bump_amplitude": 1.0, "Av": 0.5,
-           "log10metallicity": -2.5, **{f"logsfr_ratio_{i}": 0.0 for i in range(5)}}
-B = sfh_basis(emulator)                                        # (2, 5), examples/demo_correlated_field.py
-model = CorrelatedFieldMap(
-    image_shape=(64, 64), emulator_param_names=names, param_bounds=bounds,
-    field_params=["log_mass", "Av", "log10metallicity", "sfh_a", "sfh_b"],
-    mass_param="log_mass",
-    fixed_params={"redshift": 2.0, "fesc_lya": 0.2, "dust_bump_amplitude": 1.0},
-    corr_lengths={"log_mass": 3.0, "Av": 5.0, "log10metallicity": 12.0, "sfh_a": 4.0, "sfh_b": 6.0},
-    amplitudes={"log_mass": 0.25, "Av": 0.3, "log10metallicity": 0.15, "sfh_a": 0.5, "sfh_b": 0.5},
-    level_sigmas={"log_mass": 1.0, "Av": 1.0, "log10metallicity": 0.5, "sfh_a": 1.0, "sfh_b": 1.0},
-    nus={"log_mass": 1.5, "Av": 1.0, "log10metallicity": 1.0, "sfh_a": 1.0, "sfh_b": 1.0},
-    # blind mean maps: log mass from the smoothed reddest band at neutral SPS values, constants elsewhere
-    mean_maps={"log_mass": mass_map_from_image(obs, emulator, {"redshift": 2.0, **neutral}),
-               "Av": 0.5, "log10metallicity": -2.5, "sfh_a": 0.0, "sfh_b": 0.0},
-    latent_fields={"sfh_a": (-10.0, 10.0), "sfh_b": (-10.0, 10.0)},
-    derived_params={f"logsfr_ratio_{i}": {"offset": 0.0, "weights": {"sfh_a": float(B[0, i]), "sfh_b": float(B[1, i])}}
-                    for i in range(5)},
-    pixel_scale=0.03,
+model = AdditiveComponentModel(
+    n_components=2, emulator_param_names=emulator.param_names,
+    param_bounds=spec.param_bounds, image_shape=obs.flux.shape[1:],
+    fixed_params={spec.redshift_param: 2.0}, mass_param=spec.mass_param,
+    profiles=["sersic", "gaussian"], pixel_scale=0.03, normalisation="analytic", oversample=3,
 )
 fm = ForwardModel.build(obs=obs, psf_model=psf, spatial_model=model, emulator=emulator,
                         model_error_frac=0.05)
+
+theta0 = blind_initial_theta(model, fm.observation)       # from image moments, never the truth
+best = multistart_map(fm, theta0, archetypes=[{}, {"Av": 0.3}, {"Av": 2.0}])
+result = NSSSampler(fm, num_live=100).run(jax.random.PRNGKey(0))   # samples and logZ
 ```
 
-**Inference pipeline** (what `examples/demo_correlated_field.py` does; the design note has the
-measurements behind each choice):
-
-1. **Start, truth-free.** The mass mean map comes from the smoothed reddest band converted to
-   mass at neutral SPS values (`mass_map_from_image`); `template_mass_map` (`--mass-start template`) corrects it per pixel with the best of a small grid of dust/recent-SFH templates
-   chosen from the colours, because one neutral template over-weights young clumps (toy: 0.196 →
-   0.163 dex rms). `wiener_mass_map` + `project_to_field` (`--mass-start wiener`) puts a Wiener
-   deconvolution into the mass coefficients but gave no measurable gain. Levels start at zero,
-   other means at neutral constants. `--n-starts K` adds K − 1 starts that redraw the non-mass
-   levels and the globals from the prior.
-2. **Adam MAP** (`find_map`, float32), or `block_newton` block-coordinate descent (`--block-newton`, off by default: it helped basis2 and hurt map03 on the toy).
-3. **Mode polish in float64** with `arachne.inference.newton.trust_region_newton`
-   (Steihaug-Toint truncated CG on Hessian-vector products, trust region measured in the norm
-   of the eigen-decomposed dense Hessian `|λ|`, convergence confirmed by a tight CG re-solve),
-   then a **saddle check** (`negative_curvature_step` along the negative eigenvectors of the
-   Laplace Hessian, re-polish if it lowers −log p). Adam alone stops tens of nats above the
-   mode and the old damped Newton-CG stopped early too; everything downstream expands around
-   this point. The dense Hessian is the limit, at d ~ 3 × 10⁴. `field_precond.fourier_fisher_diagonal` reproduces the Hessian diagonal matrix-free to ~2 %, but as a Newton
-   preconditioner it is *slower* than the identity (`--precond fourier`): the coefficients are
-   already prior-whitened and the stiffness is each field's level against its low-k modes,
-   which no diagonal scaling removes.
-4. **Posterior.** `--posterior laplace`: `laplace_covariance` (|λ| flooring) plus the Laplace
-   evidence, Gaussian map samples and coverage of the truth. It is the whitening for NUTS and
-   a quick look, but **not the posterior**: on a prior-draw mock it under-covers Z and the SFH
-   maps (68 % coverage 0.08–0.13 where NUTS gives 0.67–0.73). `--posterior geovi|mgvi`:
-   `arachne.inference.mgvi.run_mgvi` (NIFTy.re `optimize_kl`) in the latents of
-   `StandardisingTransform`, an exact elementwise map `theta = T(xi)` with `xi ~ N(0, I)`
-   (uniform/Normal/Student-t globals through their truncated CDFs). It is matrix-free and
-   scales past the dense-Hessian limit, but needs `model_error_frac=0` and no fitted noise
-   scale (NIFTy's Gaussian takes a fixed inverse covariance), and it is local: different seeds
-   end in different modes, so it does not replace multi-start. With several starts the kept
-   mode is the lowest −log p among converged modes with a positive-definite Hessian, never
-   the Laplace evidence, which favours unconverged modes.
-5. **Whitened NUTS** (`run_whitened_nuts`, `--nuts`) in `z = L⁻¹(θ − mode)` with a dense metric
-   adapted inside the whitened space; after VI the chains run in the standardised latents with
-   the metric seeded from the VI scale. Chains start at every mode within 10 nats of the best,
-   so R-hat exposes modes that do not mix instead of hiding them.
-
-The SFH prior of mapped ratios (`--sfh-prior`): `continuity` (default; Student-t(2, 0.3)
-copula marginals), `legacy` (a Gaussian field, no copula) or `bursty` (σ = 1, the distribution
-the emulator was trained on; it traps whole-map levels at the bounds). On the 17-band honest
-mocks `continuity` was *worse* than `legacy` for map03 (SFH coverage ≈ 0, total mass 6–13σ
-high). None of this applies to the basis2 latent fields, which are plain Gaussian fields.
-
-**What has been measured** (production `ParrotEmulatorV2`, empirical JADES PSFs, 64×64
-mocks at S/N 30 on an H100; `--honest` mocks offset the truth's means and hyperparameters from
-the fit's prior):
-
-- Whitened NUTS at d ≈ 5000 (8 bands, five maps) converges on a prior-draw mock (R-hat ≤ 1.03,
-  median ESS 3300) and is calibrated: 68 % coverage 0.67–0.83 for every map and
-  the total log M* within 0.3σ. It takes ~3 h, half of it warmup.
-- On the spiral mock (dust lanes on young arms, a radial Z gradient: the prior is wrong) the
-  posterior is **bimodal**: total mass against the oldest SFH bin (+0.25 dex of mass hidden
-  under young light), one chain in four in the second mode, R-hat 4.7 with 0.2 % of parameters
-  above 1.01. Laplace and multi-start Newton never found that mode. The A_V lanes are missed.
-- At d ≈ 12,000 (17 bands, ν = 1) NUTS had not converged after 4.3 h (R-hat 1.5, 58
-  divergences) from a mode that turned out not to be converged; this is what the Newton
-  convergence check and basis2 address.
-- MCLMC (blackjax 1.7, per-chain or shared tuning) does not work on these posteriors: R-hat
-  2.4–20, chains that do not move. Use NUTS.
-- Fitting the field hyperparameters at a joint mode overfits (a funnel); pick them by
-  evidence or sample them. Couplings bias the total mass.
-- basis2 against map03 at 32 px: χ²_red 1.02 vs 1.79 at equal Adam steps, median |Δ log M*|
-  0.077 vs 0.168 dex.
+A complete, runnable version with a toy emulator is in
+[docs/guide/image_fitting.md](docs/guide/image_fitting.md). For parameter maps instead of
+components, see [docs/guide/correlated_fields.md](docs/guide/correlated_fields.md) and try:
 
 ```bash
-python examples/demo_correlated_field.py --truth prior --quick                     # CPU, toy emulator
-python examples/demo_correlated_field.py --truth spiral --emulator emu.eqx --psf-dir psfs/ \
-    --bands medium --honest --nu 1.0 --float64 --posterior laplace --nuts           # H100, ~12k params
-python examples/demo_correlated_field.py --truth spiral --emulator emu.eqx --psf-dir psfs/ \
-    --bands medium --honest --nu 1.0 --float64 --posterior geovi                    # NIFTy.re geoVI
+python examples/demo_correlated_field.py --truth prior --quick    # CPU, toy emulator
 ```
 
-Flags: `--truth {prior,spiral}`, `--bands {wide8,medium}` (8 or 17 NIRCam bands), `--size`,
-`--snr`, `--honest`, `--nu`, `--hyper`, `--couple`, `--sfh {basis2,map03,fixed_truth,map_all,
-merge0}`, `--sfh-prior`, `--free-globals`, `--mass-start {image,template,wiener}`,
-`--k-max-mtf T`, `--n-starts K`, `--block-newton`, `--precond {dense,diag,fourier,none}`,
-`--max-newton`, `--posterior {map,laplace,geovi,mgvi}` (`--laplace`, `--n-laplace`,
-`--vi-iterations`, `--vi-samples`), `--nuts` with `--sampler {nuts,mclmc}`, `--nuts-warmup`,
-`--nuts-samples`, `--nuts-chains`, and the bundle flags below. Outputs: `metrics.json` (fit
-configuration, MAP and start statistics against the truth, per-start `modes`, `laplace`/
-`geovi` and `nuts` blocks with coverage per map and the total mass), `maps.npz`,
-`laplace.npz`, `figures/` and the results bundle `results.h5`.
+## Results
 
-### Instrumental nuisances
-
-Real imaging is never a clean realisation of the astrophysical model, and holding the
-instrumental terms fixed at the wrong value biases the inferred stellar populations, so
-`NuisanceModel` appends up to three per-band blocks to theta and marginalises over them:
-
-```python
-from arachne import NuisanceModel
-
-nuisance = NuisanceModel(
-    n_bands=len(BANDS),
-    fit_sky=True,              # residual background pedestal, nJy/pixel
-    fit_shifts=True,           # (dy, dx) astrometric registration, pixels
-    fit_noise_scale=True,      # log multiplier on the noise sigma (variance x exp(2s))
-    shift_reference_band=0,    # pin band 0's shift: see below
-)
-forward_model = ForwardModel.build(obs=obs, psf_model=psf, spatial_model=spatial_model,
-                                   emulator=emulator, model_error_frac=0.05, nuisance=nuisance)
-theta0 = blind_initial_full_theta(forward_model)
-print(nuisance.param_names(BANDS))   # sky[...], dy[...], dx[...], log_noise_scale[...]
-```
-
-The sub-vector is ordered `sky` (N), then `[dy, dx]` for each *free* band, then
-`log_noise_scale` (N), and every fitted parameter carries a normalised zero-mean Gaussian prior
-(`sky_prior_sigma=1.0` nJy, `shift_prior_sigma=0.5` px, `noise_scale_prior_sigma=0.3`);
-`nuisance.split(theta_n)` always returns all three blocks, zero-filled when disabled.
-
-**Always pass `shift_reference_band=` when fitting shifts** — a shift common to every band is
-exactly degenerate with moving every spatial component, so one band must be pinned and the free
-parameter count is `2 * (n_bands - 1)`. `forward_model.split_theta`,
-`initial_theta_from_spatial` and `sample_prior` all know about the nuisance tail, and
-`solve_component_masses` is nuisance-aware.
-
-### Multi-resolution fitting (optional)
-
-NIRCam short-wavelength mosaics are natively 0.02–0.03″/px and long-wavelength ones 0.04–0.06″,
-so a single-grid fit must drizzle everything onto a common grid — throwing away SW resolution or
-correlating the LW noise. `MultiResolutionForwardModel` avoids that: **the data are never
-resampled**. Each band keeps its own pixel grid and PSF, and the same physical components are
-rendered analytically on that band's pixel centres through its WCS. Because `GaussianLikelihood`
-is a plain sum over pixels, the joint log-likelihood is *exactly* the sum of the per-band ones.
-
-```python
-from arachne import MultiResolutionForwardModel, blind_initial_full_theta
-from arachne.data.dja import fetch_dja_native_cutout
-
-mro = fetch_dja_native_cutout(ra, dec, size_arcsec=6.0, filters=["f200w", "f444w"],
-                              psfs={"JWST/NIRCam.F200W": (kernel_f200w, 0.03),
-                                    "JWST/NIRCam.F444W": (kernel_f444w, 0.03)})
-spatial_model = AdditiveComponentModel(..., pixel_scale=0.02, normalisation="analytic")
-fm = MultiResolutionForwardModel.build(mro, spatial_model, emulator,
-                                       model_error_frac=0.05, oversample=3)
-theta0 = blind_initial_full_theta(fm)          # blind_initial_theta accepts the MRO directly
-row, col = fm.sky_to_pixel("JWST/NIRCam.F444W", dy, dx)   # overlay centres on a band's image
-```
-
-`n_params`, `split_theta`, `initial_theta_from_spatial`, `sample_prior`, `log_prior`,
-`log_likelihood` and `log_posterior` mean exactly what they do on `ForwardModel`, so the
-samplers, `find_map`/`multistart_map` and the posterior-predictive helpers work unchanged; it
-adds `model_images`, `component_images_per_band`, `band_profiles`, `chi_maps`, `chi2`, `n_data`
-and `sky_to_pixel`/`pixel_to_sky`. The band loop is a Python loop over static indices (ragged
-shapes cannot be vmapped), so it costs roughly 1.3× a single-grid fit on 9-band NIRCam; the
-emulator is still evaluated exactly `K` times per likelihood call.
-
-Two things to watch. The spatial model must be in arcsec mode *and*
-`normalisation="analytic"`, and every band needs a PSF kernel on its own grid
-(`psfs={band: (kernel, kernel_pixel_scale)}` when loading, or `PSFModel.resample`); its
-`image_shape`/`pixel_scale` no longer describe any band and only set the scale of the default
-centre and size priors, so pick the finest band's values. And this model works in the **sky
-frame**, `mu_y` towards North and `mu_x` towards East, whereas a single-grid model in arcsec
-mode uses `+y = +row`, `+x = +column` — with "North up, East left" `+column` points *West*, so
-the two frames are mirror images in `x` and the sign of `rho` flips.
-
-Use the plain `ForwardModel` whenever the bands really do share a grid — a DJA `thumb` cutout,
-where the server has already resampled every filter onto one 0.05″/px grid
-(`load_dja_cutout(...).to_observation_cube()`).
-
-### Batched fitting
-
-When a sample of cutouts shares the same bands and `(H, W)` — the usual outcome of a
-fixed-size cutout service — every fit is the *same* XLA program with different data, so
-`arachne.inference.batched` turns the sample into one vmapped program:
-
-```python
-from arachne import (BatchedForwardModel, batched_blind_initial_theta,
-                     batched_multistart_map, batched_nuts, fit_batch_nss)
-
-bfm = BatchedForwardModel.build(
-    observations=[obs_0, obs_1, ...],          # identical bands and (H, W)
-    psf_models=psf,                            # one shared PSFModel, or one per galaxy
-    spatial_model=spatial_model, emulator=emulator, model_error_frac=0.05,
-    fixed_params_per_galaxy={"redshift": z_spec},   # must already be a fixed param
-    galaxy_ids=ids,
-)
-thetas0 = batched_blind_initial_theta(bfm)
-maps = batched_multistart_map(bfm, thetas0, archetypes=[{}, {"Av": 2.0}])
-result = batched_nuts(bfm, maps.theta, jax.random.PRNGKey(0), n_chains=4)
-print(result.summary())
-result.to_hdf5("batch_posterior.h5")
-```
-
-`bfm.forward_model(i)` extracts a single-galaxy `ForwardModel` view for plotting or diagnostics,
-and per-galaxy redshifts go through `fixed_params_per_galaxy` (backed by
-`AdditiveComponentModel.with_fixed_values`), not a tight prior. NSS cannot be batched — its
-termination criterion is a per-problem Python `while` loop — so `fit_batch_nss` loops and each
-galaxy pays its own XLA compile: batch the MAP stage and reserve NSS for the galaxies that
-actually need an evidence.
-
-### Diagnostics, model comparison and posterior predictive checks
-
-```python
-from arachne import residual_summary
-from arachne.inference.model_comparison import compare_n_components, bayes_factor_table
-
-print(result.summary())                  # step size, R-hat, ESS, divergences, tree depth
-summary = residual_summary(forward_model, samples)
-print(summary["chi2_red"], summary["chi2_red_per_band"], summary["frac_chi_gt_3"])
-rows = compare_n_components(make_forward_model, ks=[1, 2, 3], rng_key=jax.random.PRNGKey(0))
-print(bayes_factor_table(rows))          # logZ, logZ_err, chi2_red, Kass & Raftery verdict
-```
-
-- `diagnostics` — `split_rhat`, `ess` (Stan/ArviZ rank-normalised bulk ESS), `chain_movement`
-  and `summarise_chains` on `(n_chains, n_samples, n_params)` arrays, JAX or numpy. Run ≥ 4
-  chains and require `rhat < 1.01` and `ess > 100` per chain before trusting quantiles;
-  `NUTSResult.summary()` prints them with explicit WARNING lines.
-- `posterior_predictive` — `model_image_samples` (PSF-convolved, with sky and shifts),
-  `component_image_samples` (unconvolved, per component), `residual_summary` (median model, chi
-  map, `chi2_red`, per-band chi², `frac_chi_gt_3`), `predictive_bands` (16/50/84 envelopes) and
-  `chi2_reduced(_samples)`, all chunked through `jax.vmap`. A `MultiResolutionForwardModel` is
-  detected automatically and its products come back as per-band **lists** rather than stacked
-  arrays (`is_multiresolution(fm)`).
-- `model_comparison` — `compare_n_components(make_forward_model, ks, rng_key, sampler_kwargs=...,
-  map_theta_fn=..., n_chi2_samples=64)` runs NSS once per `K`, returning
-  `ModelComparisonRow(n_components, logZ, logZ_err, ess, n_params, chi2_red_map,
-  chi2_red_median, runtime_s, result)`. **The caller owns prior comparability**:
-  `make_forward_model(K)` must change nothing but `K`, or the Bayes factor measures the prior
-  difference instead of the data's preference.
-
-### Results bundles, plots and the interactive viewer
-
-A fit is saved as one self-describing HDF5 **results bundle** (schema `arachne.results` 1.0):
-the data, the MAP model, thinned posterior draws of the model cubes and parameter maps, scalars,
-truth (for mocks), named regions, metrics and provenance. The static plots and the viewer read
-only the bundle, never the emulator, so they run anywhere (no GPU, no checkpoint).
-
-#### Bundles
-
-```python
-from arachne import write_bundle, load_bundle, region_sed, total_sed, Region
-
-# after a fit: thins `samples` to n_draws, evaluates every product on the same draws
-write_bundle("results.h5", forward_model, theta_map=theta_map, samples=samples,
-             posterior_source="nuts",        # or laplace, nss, mclmc, geovi, mgvi, map
-             n_draws=200, n_chains=4, truth=None,
-             regions={"core": core_mask}, metrics=metrics, title="my galaxy")
-
-b = load_bundle("results.h5")            # draws are read lazily on first use
-b.band_image(3, "chi")                   # data/model/intrinsic/residual/chi/truth_*, (H, W)
-b.param_map("Av", "std")                 # map/p16/p50/p84/mean/std/truth/diff/z/information
-sed = region_sed(b, Region.circle(b.image_shape, 31.5, 31.5, 4.0))
-sed.model_percentiles(), sed.chi(), sed.frac_residual()
-```
-
-- **Contents.** `/observation` (flux, variance, mask, pivots), `/model/{convolved,intrinsic}`
-  (`map`, `draws (S,B,H,W)`, p16/p50/p84/mean/std), `/params` (maps and their draws, prior std,
-  information `1 - (std/prior_std)^2`, scalars), `/components` for additive models (SEDs,
-  profiles, convolved components without sky), `/truth`, `/posterior` (theta, draw index,
-  chain id, diagnostics), `/regions`, `/metrics/json`, `/extra`.
-- **Adapters.** `CorrelatedFieldMap`: maps = `param_maps` (every per-pixel emulator input:
-  mapped fields, then derived ones; latent SFH fields are left out), or `field_maps` for a
-  model without derived parameters; scalars = free globals, fitted
-  hyperparameters as `amplitude[Av]` / `corr_length[Av]`, couplings `c[Av<-log_mass]`, and
-  `total_log_mass`. `AdditiveComponentModel`: no maps; components ordered compact-first; scalar
-  `total_log_mass`. Anything else: `decode` reshaped into maps (best effort, with a warning).
-  `MultiResolutionForwardModel` is not supported yet (`grid="per_band"` is reserved).
-- **Size.** Lossless float32, gzip + shuffle: ~106 MiB for 64x64 x 17 bands, S=200, five maps.
-  `mantissa_bits=12` (draws only, ~1e-4 relative error) brings that to ~66 MiB; fewer draws
-  scale it linearly.
-- **Regions.** `Region.pixel/box/circle/polygon/from_mask` (pixel-centre membership, geometry
-  kept). The writer adds `all` and `segment` (`detection_region`: inverse-variance S/N image,
-  smoothed, 3 sigma, largest component). `region_sed` sums the data and every model draw over
-  the same valid pixels; `region_param_summary` gives region mass (log-sum) and mass-weighted
-  means per draw.
-- **No draws (MAP only, or degraded bundles converted from old runs).** p50/p16/p84/mean fall
-  back to the MAP and set `bundle.last_fallback`; `std` raises `KeyError`. Use
-  `available_param_stats()` to see what a bundle really holds.
-- **In memory and tests.** `ResultsBundle.from_content(BundleContent(...))` behaves exactly
-  like a loaded file; `arachne.results.testing.make_synthetic_bundle(path, "field" |
-  "additive" | "degraded")` builds small fixtures without JAX.
-- **CLI.** `python -m arachne.results info results.h5 [--json]` and
-  `python -m arachne.results validate *.h5` (also `arachne-bundle` when installed).
-- **Demo and old runs.** `examples/demo_correlated_field.py` writes `results.h5`
-  (`--bundle-draws`, `--bundle-mantissa-bits`, `--bundle-no-intrinsic`, `--bundle-all`
-  for `results_laplace.h5` / `results_geovi.h5` next to the NUTS bundle, `--bundle-plots`,
-  `--no-bundle`).
-  `scripts/convert_correlated_field_run.py RUN_DIR [--emulator CKPT|toy]` turns old 4-field
-  run directories into degraded bundles (`results_degraded.h5`).
-
-#### Static plots
-
-`arachne.viz` draws publication-style matplotlib figures from a bundle (matplotlib only, no
-JAX). Every function takes a `ResultsBundle` or a path and returns a `Figure` built without
-pyplot: call `fig.savefig(...)` in scripts; Jupyter displays it.
-
-```python
-from arachne import viz
-from arachne.results import load_bundle, region_sed
-
-b = load_bundle("results.h5")
-viz.plot_total_sed(b).savefig("sed.pdf")              # total SED + sigma and % residuals
-viz.plot_sed(region_sed(b, b.regions["core"]), show_intrinsic=True)
-viz.plot_region_seds(b, ["core", "segment"])          # or layout="overlay"
-viz.save_all(b, "figs", fmt="png")                    # every standard figure
-```
+Every fit can be saved as one self-describing HDF5 bundle: data, model, thinned posterior
+draws, parameter maps and provenance. The plots and the browser viewer read only the bundle, so
+they run anywhere, with no GPU and no checkpoint.
 
 ```bash
-python -m arachne.viz results.h5 --outdir figs [--format png|pdf|svg] [--regions core,segment]
-arachne-plots results.h5 --outdir figs                # same, once installed
+python -m arachne.results info results.h5
+arachne-plots results.h5 --outdir figs
+arachne-gui results.h5
 ```
 
-- **SEDs.** `plot_sed` shows the observed aperture fluxes (±1σ) against the PSF-convolved
-  model over the same pixels: median line, 16–84% band, MAP as open diamonds, truth as
-  crosses. The intrinsic (unconvolved) model is optional, dashed and labelled
-  "not aperture-comparable". The x axis is log micron with band names on a top axis. The
-  residual panels are χ (exactly `RegionSED.chi()`, with ±1/±3 guides) and
-  (obs − model)/model in %. `plot_component_seds` gives the per-component SEDs of additive
-  models: intrinsic, and observed frame over the total region.
-- **Maps and images.**
-  - `plot_param_maps`: rows are parameters; the columns are truth, median, σ,
-    (median − truth)/σ and information, whichever are available.
-  - `plot_band_mosaic`: data, model, residual and χ per band. Data and model share an asinh
-    stretch with the colourbar in nJy; χ is fixed to [−4, 4].
-  - `plot_rgb`: data, model and residual on one shared asinh scale. The residual image is
-    grey where the fit is perfect.
-  - `plot_regions`: region outlines drawn on the data.
-- **Diagnostics.** `plot_chi_histograms` shows per-pixel χ per band against N(0, 1).
-  `plot_chi2_per_band` shows reduced χ² against wavelength, with and without the model floor.
-  `plot_summary_page` puts it all on one page.
-- **Missing pieces.** Each band keeps one colour (blue to red by wavelength) in every
-  figure. Figures leave out what a bundle lacks:
-  - no draws: no 16–84% bands, and the model is labelled MAP;
-  - no truth, intrinsic model or components: those panels are omitted.
+More in [docs/guide/results.md](docs/guide/results.md).
 
-  `save_all` skips `component_seds` and `param_maps` when they do not apply.
+## Things to know before trusting a fit
 
-#### Interactive viewer
+- Use a fractional model-error floor (`model_error_frac`, about 0.05) on every resolved fit.
+  Summed over thousands of pixels, photon noise alone is far below the emulator's accuracy.
+- Keep a fit inside the emulator's training domain: take bounds from `emulator.spec`.
+- Run at least four chains and check R-hat and ESS. Resolved posteriors can have more than one
+  mode.
+- For parameter maps, quote results from NUTS draws. The Laplace approximation under-covers.
+- Run float64 fits on datacentre GPUs (A100/H100).
 
-`arachne.gui` is a browser viewer for a bundle: plain bokeh with Python callbacks, served by a
-bokeh server (bokeh only, so it runs on the GPU nodes), or shown inline in JupyterLab through
-Panel. Install with `pip install 'arachne[gui]'` (`'arachne[gui-jupyter]'` adds Panel).
+The full list, with the measurements behind each rule, is in [AGENTS.md](AGENTS.md) and
+[docs/guide/samplers.md](docs/guide/samplers.md).
 
-```bash
-arachne-gui results.h5                     # opens a browser tab at http://127.0.0.1:5006/
-python -m arachne.gui results.h5 --port 5099 --no-browser   # same without the entry point
-arachne-gui results.h5 --compare results_laplace.h5         # overlay a second posterior
-```
+## Documentation
 
-```python
-from arachne.gui import view
-v = view("results.h5")   # ArachneViewer
-v.show()                 # in Jupyter: a panel.pane.Bokeh (falls back to bokeh.io.show)
-```
-
-- **Remote use.** On the node, run `arachne-gui results.h5 --no-browser --port 5006`. On your
-  laptop, run `ssh -L 5006:localhost:5006 <node>` (add `-J <gateway>` through a jump host) and
-  open `http://localhost:5006/`. If the local port differs from the remote one, also pass
-  `--allow-websocket-origin localhost:<local port>`. The CLI prints this recipe. It sets
-  `JAX_PLATFORMS=cpu` and `XLA_PYTHON_CLIENT_PREALLOCATE=false` before importing arachne, so
-  the viewer never takes GPU memory.
-- **Images.** Three panels share pan and zoom: two band panels (data, model, intrinsic,
-  residual, χ, truth model and truth residual, with a model statistic) and a parameter map
-  with a statistic menu built from `available_param_stats()`. Additive bundles show each
-  component's fraction of the model instead. Controls cover the stretch (linear, asinh, log,
-  sqrt), percentile range and colormap. Residual and χ use a symmetric diverging scale. A
-  toggle switches the χ model floor; another blanks the image outside `segment`. Hovering
-  reads out the raw pixel value.
-- **Selections.** Tap a pixel, tap a circle of adjustable radius, drag a box or lasso, draw a
-  polygon (the box, lasso and polygon tools are in each image toolbar), or pick a named
-  region. The SED panel then shows the observed fluxes (±1σ) against the convolved model
-  summed over the same pixels: median line, 16–84% band, MAP markers, and optionally the
-  intrinsic model and truth. The grey reference is the total SED. The σ and fractional
-  residual panels match `RegionSED.chi()` and `frac_residual()`. Posterior histograms show
-  region mass (log-sum) and mass-weighted means from `region_param_summary`, plus the global
-  scalars, with truth marked. "Keep as overlay" pins up to five selections in colour.
-  "Export regions" writes them to `<bundle>.regions.json`; the bundle itself is never
-  modified.
-- **Additive models.** A component selector restricts the model images, the SED component
-  curves (convolved components over the selected pixels) and the histograms (that
-  component's parameters) to one component.
-- **MAP-only and degraded bundles.** A banner explains what is missing. SEDs use the MAP
-  model, and the uncertainty bands and histograms are hidden.
-- **Scripting.** The callbacks call public methods, which you can also use directly:
-  `set_band`, `set_image_kind`, `set_param`, `select_pixel`, `select_circle`,
-  `select_indices`, `select_region`, `set_component`, `keep_selection`, `current_seds()`.
-  The numpy-only logic is in `arachne.gui.state`.
-
-### Real data: JADES + DJA
-
-`arachne.data` has clients for the two public products this pipeline was built against.
-
-**Cutouts (DJA).** `fetch_dja_cutout(ra, dec, size_arcsec, filters, output="fits_weight",
-cache_dir=...)` hits the grizli thumbnail service and caches a multi-extension FITS;
-`load_dja_cutout` turns it into a `MultiResolutionObservation`. `size_arcsec` is the **full**
-width (the service's own `size` is a half-width), so 6″ gives 120×120 at 0.05″/px — about 6 s
-and 1.5 MB for nine filters. The thumbnail server resamples every filter onto that one grid, so
-`.to_observation_cube()` is the right follow-up. For native resolution (SW 0.020″/px, LW
-0.040″/px) `fetch_dja_native_cutout` downloads and caches the ~35 MB association sub-mosaics and
-cuts them locally, returning a multi-resolution observation directly.
-
-**Units caveats.** DJA pixels carry an authoritative `BUNIT = '10.0*nanoJansky'`
-(`PHOTFNU = 1e-8`) *and* a `ZP` card that is **not** consistent with it (it is the original
-mosaic's zeropoint from before the server rescaled the pixels, off by ≈ 2.29×); the loaders
-prefer BUNIT and fall back to `ZP` only when no usable BUNIT is present. More importantly the
-`WHT` maps are inverse variance **with no source Poisson term**, so a bright galaxy comes out
-at S/N 10³–10⁴ per aperture: always fit with `model_error_frac ≈ 0.05–0.1`. Cutouts use
-`Cutout2D(mode="partial", fill_value=0)`, so check the `mask`, not the `flux`, for coverage.
-
-**Targets and redshifts (JADES).** `download_jades_dr4_specz()` / `load_jades_dr4_specz()` fetch
-and standardise the JADES NIRSpec DR4 combined catalogue (5190 rows) into columns `id, ra, dec,
-z_spec, z_flag, field, z_phot, nirspec_id, ...` (`z_flag` A/B highly robust, C secure, D
-tentative); `select_targets(table, field=..., z_min=..., z_max=..., quality="best", n=...,
-seed=...)` picks a sample. Empirical JADES PSFs (133×133) live outside this repo and their
-headers carry **no pixel scale** — assume 0.03″/px and pass it explicitly, as
-`PSFModel.resample(kernel, from_scale=0.03, to_scale=...)` or `psfs={band: (kernel, 0.03)}`.
-
-```python
-targets = select_targets(load_jades_dr4_specz(), field="GOODS-S", z_min=1.5, z_max=3.0, n=5)
-ra, dec = targets["ra"][0], targets["dec"][0]
-path = fetch_dja_cutout(ra, dec, size_arcsec=6.0, filters=["f115w", "f200w", "f444w"])
-obs = load_dja_cutout(path, ref_ra=ra, ref_dec=dec).to_observation_cube()
-```
-
-[`examples/fit_jades_dja.py`](examples/fit_jades_dja.py) (with
-[`examples/real_data_utils.py`](examples/real_data_utils.py)) is the worked end-to-end driver
-*(flags checked against the script on 2026-11-01; under active development)*: 9-band NIRCam DJA
-cutouts, a JADES DR4 spec-z held fixed, empirical JADES DR3 PSFs, Sérsic (optionally
-point-source) components with per-band sky nuisances, fitted blind with NSS or NUTS. The
-catalogue photometry never enters the fit and is only used afterwards, in
-`photometry_comparison.csv`.
-
-```bash
-python examples/fit_jades_dja.py --list-targets                       # the vetted GOODS-S sample
-python examples/fit_jades_dja.py --target goods-s-mediumhst_12281 --quick
-python examples/fit_jades_dja.py --target goods-s-mediumhst_12281 --k 1 2   # evidence over K
-python examples/fit_jades_dja.py --ra 53.14104 --dec -27.76680 --z 1.8989
-```
-
-Useful flag groups: source isolation (`--mask-neighbours`, `--mask-clump-nsigma`,
-`--mask-plume`, `--mask-radius`), noise (`--model-err-frac`, `--poisson-floor`,
-`--fit-noise-scale`), geometry (`--profiles`, `--point`, `--n-bounds`, `--max-re-arcsec`),
-`--multires` to fit the native DJA mosaics instead of the 0.05″/px thumbnails, and `--map-only`
-for fast checks. Outputs land in `outputs/real_data/<target_id>/K<k>/`. It needs network access
-and a GPU node.
-
-### Resolved demo
-
-[`examples/demo_resolved_sed_fitting.py`](examples/demo_resolved_sed_fitting.py) is the
-end-to-end reference for the *component* pipeline *(flags checked against the script on
-2026-11-01; it is under active development, so check `--help` before trusting a flag)*; the
-correlated-field counterpart is `examples/demo_correlated_field.py` above.
-It renders a two-component mock — a compact, old, quenched Sérsic bulge plus an extended,
-young, dusty Sérsic disk at a common fixed z = 2 — as a 10-band JWST/NIRCam image with the real
-trained `ParrotEmulatorV2` checkpoint and real JADES empirical PSFs, contaminates it with
-per-band sky pedestals, per-band sub-pixel shifts and Gaussian noise, and fits it back
-**blind**: 34 spatial + 28 nuisance = **62 free parameters**, with the injected truth used only
-to generate the data and grade the answer. F200W is the astrometric reference band, so the
-fitted shifts are relative registrations.
-
-The pipeline is `blind_initial_theta` → `multistart_map` → a MAP polish (annealed Adam with the
-mass re-solve off, then modified-Newton steps) → `--sampler auto`, which means 4-chain NUTS in
-whitened coordinates with a dense metric for the 62-parameter model and NSS (with `logZ`) for
-the 34-parameter `--no-nuisance` model. It runs in float64 and needs a GPU node, the checkpoint
-under `scripts/outputs/` and the JADES PSF directory on the cluster.
-
-```bash
-ssh mad06                                                     # a GPU node with fast fp64
-python examples/demo_resolved_sed_fitting.py --quick          # smoke run, ~20 min on an A100
-python examples/demo_resolved_sed_fitting.py                  # NUTS, 4 chains, ~1-3 h
-python examples/demo_resolved_sed_fitting.py --no-nuisance    # 34 params, NSS + logZ
-python examples/demo_resolved_sed_fitting.py --compare-k --quick
-python examples/demo_resolved_sed_fitting.py --help           # the full, current flag list
-```
-
-Several flags exist to *reproduce* documented failure modes: `--no-whiten` (raw theta with an
-identity metric: R-hat ~ 4000), `--diagonal-metric`, `--float32`, `--all-band-shifts` (the
-exactly degenerate shift parameterisation). Outputs go to `--outdir` (default
-`outputs/demo/resolved_sed_fitting/`): `truth.json`, `map.json`, `posterior.hdf5`,
-`sampler_summary.txt`, `bayes_factors.txt` (with `--compare-k`) and `figures/` — per-band
-truth/data/model and chi mosaics, SPS-parameter maps, bulge/disk SEDs, 1-D posteriors, sampler
-diagnostics and component radial profiles. Read its module docstring for the assumptions and
-known limitations.
-
-## Samplers
-
-| Sampler | Best for |
+| Where | What |
 |---|---|
-| `NSSSampler` (`blackjax.nss`) | Image models with a proper prior and **≲ 40 parameters**: gradient-free, live points drawn from `sample_prior` (no starting point), handles label/size/mass multimodality by construction, returns equal-weight samples plus `logZ`, `logZ_err`, ESS — the tool for comparing different `K`. Many more likelihood evaluations than NUTS; use a GPU. Checkpoints and resumes bit-exactly. |
-| `NUTSSampler` / `fit_catalogue.py --sampler nuts` | GPU-batched catalogue fitting; image models above ~40 parameters, started from the polished blind MAP and sampled in **whitened** coordinates (see below) |
-| `arachne.inference.laplace.run_whitened_nuts` | The practical way to run NUTS on a resolved fit: builds the Laplace covariance at the MAP, samples `theta = MAP + L z` with a dense metric adapted inside the whitened space, and returns a `NUTSResult` in `theta` coordinates. The reference sampler for `CorrelatedFieldMap` fits (d ≈ 5k–12k; ~3 h at 5k on an H100), started from a `trust_region_newton` mode, not an Adam stop |
-| `arachne.inference.mgvi.run_mgvi` | geoVI / MGVI through NIFTy.re for `CorrelatedFieldMap` fits: matrix-free, so it scales past the dense Laplace Hessian (d ≳ 3 × 10⁴); needs `model_error_frac=0` and no fitted noise scale; local (does not replace multi-start). Toy: mean within 0.3 nats of the Newton mode, sample sd / Laplace sd median ratio 1.03; not yet validated at production size |
-| `batched_nuts` | Many equal-shape cutouts at once: vmapped warmup + sampling over (galaxy, chain), with per-galaxy diagnostics |
-| `MCLMCSampler` | Designed for `FreeFormPixelMap` (high-d, ~45k–67k params; O(1) gradient evals per effective sample vs NUTS's O(d^{1/4})). **Did not converge on a 5k-parameter `CorrelatedFieldMap` posterior** with either per-chain or shared tuning (`tune()`, blackjax 1.7: R-hat > 2, tuned step sizes unstable from start to start); use whitened NUTS there |
-| `fit_catalogue.py --sampler nss` (`blackjax.nss`) | Catalogue fits: multimodal posteriors, per-galaxy log-evidence (`logZ`); sequential, not GPU-batched |
-
-`ForwardModel` exposes `log_likelihood`, `log_prior` and `log_posterior` separately; NSS uses
-the first two, the gradient samplers the third. `run_pathfinder` provides a fast L-BFGS
-warm-start (MAP position + diagonal inverse-mass-matrix estimate) that can be passed to
-either gradient-based sampler to skip expensive warmup.
-
-Two hard-won rules, measured on the 62-parameter demo in September 2026. **NSS from the prior
-is impractical above ~40 parameters**: at 62 an outer step took over 3 s and the run was still
-~1.5e6 nats below the MAP after 50 steps; below that threshold NSS is the best tool, because it
-also gives `logZ`. And **NUTS needs a dense metric here**: the curvature eigenvalues at the mode
-span 1e-1 to 4e7 and the stiff directions are correlated, so a diagonal mass matrix collapses
-the warmup step size to ~1e-7, every trajectory saturates the tree-depth cap and R-hat reaches
-the thousands. Sampling whitened coordinates `theta = MAP + L z`, with `L` the Cholesky factor
-of the Laplace covariance at a properly polished MAP, lifts the step size by four orders of
-magnitude, and a dense metric adapted *inside* the whitened space mops up the residual
-mass-exchange ridge the Laplace approximation misses.
-`arachne.inference.laplace` packages all of that — `hessian_neg_log_post`,
-`laplace_covariance`, `WhitenedLogDensity`, `laplace_whitening` and the one-call
-`run_whitened_nuts(fm, theta_map, key, n_chains=4, dense_mass_matrix=True)`, whose result comes
-back in `theta` coordinates with R-hat and ESS recomputed there. Check them on every run.
-
-At 10³–10⁴ parameters (`CorrelatedFieldMap`) three more rules, measured in October–November
-2026 on the production emulator. **Polish the mode before whitening**: Adam stops tens of nats
-above it, and a Laplace covariance or whitening built there is wrong
-(`arachne.inference.newton.trust_region_newton` + the saddle check). **The Laplace
-approximation under-covers the non-mass maps** (coverage ~0.1 for Z and the SFH where NUTS gives
-~0.7), so quote maps from NUTS draws. And **expect several modes**: total mass trades against the
-oldest SFH bin, and Laplace, multi-start Newton and geoVI are all local, so run ≥ 4 chains from
-several starts and treat a large R-hat with good within-chain ESS as a second mode, not as a
-tuning problem. Never pick a mode by its Laplace evidence; it prefers unconverged ones.
-
-## Gotchas
-
-- **`pip install`ing anything that touches `jax`/`jaxlib` can silently break GPU support.**
-  JAX requires the CUDA plugin (`jax-cuda12-plugin`, `jax-cuda12-pjrt`) to match `jaxlib`'s
-  version *exactly*; if a resolver bumps `jaxlib` without bumping the plugin, JAX does not
-  error — it silently falls back to CPU. After any such install, verify on an actual GPU node
-  (`jax.devices()` on a login node proves nothing — there's no GPU there to detect):
-  ```bash
-  ssh gn004   # or any node from the GPU table in CLAUDE.md
-  python -c "import jax; print(jax.devices())"   # must show CudaDevice, not CpuDevice
-  ```
-- **Never upgrade a shared/multi-project venv without checking who else depends on it.** A
-  `blackjax`/`jax` upgrade drags `numpy` along and breaks any package with a tighter pin
-  (astropy, numba, ...); `pip check`'s static comparison misses runtime breaks that declare no
-  strict upper bound (astropy did not, but still broke on `numpy.in1d` removal), so actually
-  `import` what you care about. Pin known-good versions in `pyproject.toml`.
-- **Data S/N above the emulator's accuracy makes a resolved fit over-confident.** A resolved
-  fit sums tens of thousands of pixels; with photon noise alone the posterior is far narrower
-  than the emulator's few-per-cent systematics. Use `model_error_frac` (a `GaussianLikelihood`
-  fractional floor added in quadrature, with the `log var` term) on every resolved fit — and
-  note that DJA weight maps carry no source Poisson term at all.
-- **Fitting a shift in every band is exactly degenerate** with moving every component. Pass
-  `NuisanceModel(..., shift_reference_band=i)`.
-- **Frame normalisation is not a surface brightness.** `normalisation="frame"` is defined only
-  on the model's own grid and `model_image_on` will refuse anything else; build the model with
-  `normalisation="analytic"` for multi-resolution work.
-- **`run_mgvi` refuses a model-error floor and a fitted noise scale.** NIFTy's Gaussian
-  likelihood takes a fixed inverse covariance, so geoVI/MGVI only equal arachne's likelihood at
-  `model_error_frac=0`; use Laplace + whitened NUTS when the floor matters (it does on real data).
-- **Do not fit correlated-field hyperparameters at a joint mode.** Amplitude and correlation
-  length at a Laplace mode overfit (a funnel). Fix them, choose them by evidence, or sample them.
-- **`float32` gradients are noisy near the mode.** The demo enables
-  `jax.config.update("jax_enable_x64", True)` at import time, at no measurable cost on
-  A100/H100 — but fp64 is slow or absent on consumer-class cards, so keep float64 jobs on the
-  datacentre GPUs.
+| [docs/guide/](docs/guide/README.md) | Topic guides: emulators, catalogue fits, image fits, correlated fields, samplers, results, real data |
+| [AGENTS.md](AGENTS.md) | Module map, design rules, gotchas and data facts, written for AI coding agents and useful to anyone changing the code |
+| [docs/design/](docs/design/) | Design notes and what was measured |
+| `docs/source/` | Sphinx API reference: `pip install -e ".[docs]" && cd docs && make html` |
+| `examples/`, `scripts/` | Worked drivers: mock recovery, real JADES/DJA galaxies, catalogue fitting, emulator training |
 
 ## License
 
-GPLv3 — see [LICENSE.md](LICENSE.md).
+GPLv3. See [LICENSE.md](LICENSE.md).

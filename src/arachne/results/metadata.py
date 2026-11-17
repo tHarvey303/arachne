@@ -11,6 +11,8 @@ from collections.abc import Sequence
 
 import numpy as np
 
+from arachne.emulator.spec import KNOWN_PARAMS
+
 _NIRCAM = {
     # values shared with examples/demo_correlated_field.py (NIRCAM_PIVOT_UM)
     "F070W": 0.704, "F090W": 0.902, "F115W": 1.154, "F150W": 1.501, "F162M": 1.627,
@@ -57,14 +59,10 @@ for _inst, _table in _INSTRUMENTS:
         _BY_SHORT.setdefault(_filt.upper(), _value)
 
 DEFAULT_LABELS: dict[str, str] = {
-    "log_mass": r"$\log M_*$",
+    # every known emulator input (and its aliases), from the parameter registry
+    **{n: info.label for info in KNOWN_PARAMS for n in (info.name, *info.aliases)},
     "total_log_mass": r"$\log M_{*,\rm tot}$",
-    "Av": r"$A_V$",
-    "log10metallicity": r"$\log Z$",
-    "redshift": r"$z$",
     "slope": "slope",
-    "fesc_lya": r"$f_{\rm esc}^{\rm Ly\alpha}$",
-    "dust_bump_amplitude": "dust bump",
     **{f"logsfr_ratio_{i}": f"logsfr_ratio_{i}" for i in range(5)},
     "mu_y": r"$\mu_y$",
     "mu_x": r"$\mu_x$",

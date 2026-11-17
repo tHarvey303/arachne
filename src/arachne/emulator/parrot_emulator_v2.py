@@ -19,6 +19,13 @@ Improvements over :class:`~arachne.emulator.parrot_emulator.ParrotEmulator`
 The public API matches ParrotEmulator: ``predict(params) -> nJy`` where
 ``params`` has the full library parameter vector (including ``log_mass``),
 plus self-contained ``save``/``load``.
+
+Nothing here depends on a particular parameter list.  The checkpoint records
+the input names, which input is the mass and which the redshift, and (for
+checkpoints trained or annotated since 2026-11) the training domain, units and
+library of every input; ``emulator.spec`` returns them.  Use
+:func:`arachne.emulator.load_emulator` to load a checkpoint and, if wanted, to
+present it under a different parameter list.
 """
 
 from __future__ import annotations
@@ -34,13 +41,14 @@ import jax.numpy as jnp
 import numpy as np
 
 from arachne.emulator.base import SPSEmulator
+from arachne.emulator.spec import EmulatorSpec
 from arachne.utils.logging import setup_named_logger
 
 logger = setup_named_logger(__name__)
 
 _ASINH_A: float = 2.5 * np.log10(np.e)  # ≈ 1.0857
 DEFAULT_FLUX_FLOOR: float = 1e-4  # nJy (per 1e9 Msun in unit-flux space)
-_Z_SCALE: float = 14.0  # redshift normalisation for Fourier features
+_Z_SCALE: float = 14.0  # Fourier redshift normalisation of checkpoints without "z_scale"
 
 
 def _mu0_from_floor(floor: float) -> float:
@@ -175,6 +183,63 @@ class ParrotEmulatorV2(SPSEmulator):
         """Ordered output band names."""
         return self._band_names
 
+    @property
+    def spec(self) -> EmulatorSpec:
+        """Inputs, training domain and roles, from the checkpoint configuration.
+
+        ``param_bounds`` is the recorded training domain where the checkpoint has
+        one (``spec.meta["bounds_source"] == "checkpoint"``); otherwise the
+        fallback fit bounds of the known library parameters.
+        """
+        cfg = self.cfg
+        names = self._param_names
+        return EmulatorSpec.from_names(
+            names,
+            self._band_names,
+            param_bounds=cfg.get("param_bounds"),
+            defaults=cfg.get("param_defaults"),
+            priors=cfg.get("param_priors"),
+            units=cfg.get("param_units"),
+            mass_param=names[cfg["i_mass"]] if cfg.get("i_mass", -1) >= 0 else None,
+            redshift_param=names[cfg["i_z"]] if cfg.get("i_z", -1) >= 0 else None,
+            meta={k: cfg[k] for k in ("library", "trained") if k in cfg},
+        )
+
+    def with_metadata(self, **metadata) -> "ParrotEmulatorV2":
+        """Return a copy with descriptive checkpoint metadata set (weights unchanged).
+
+        Args:
+            **metadata: Any of ``param_bounds`` (``{name: (lo, hi)}``),
+                ``param_defaults``, ``param_priors``, ``param_units`` (dicts keyed
+                by parameter name) and ``library`` / ``trained`` (strings).
+
+        Returns:
+            The same emulator with the entries merged into its configuration.
+            ``save`` then writes them into the checkpoint.
+
+        Raises:
+            ValueError: On an unknown key or a name that is not an input.
+        """
+        allowed = ("param_bounds", "param_defaults", "param_priors", "param_units")
+        cfg = self.cfg
+        for key, value in metadata.items():
+            if key in allowed:
+                unknown = [p for p in value if p not in self._param_names]
+                if unknown:
+                    raise ValueError(f"{key}: not emulator parameters: {unknown}")
+                if key == "param_bounds":
+                    value = {p: [float(v[0]), float(v[1])] for p, v in value.items()}
+                cfg[key] = {**cfg.get(key, {}), **dict(value)}
+            elif key in ("library", "trained"):
+                cfg[key] = str(value)
+            else:
+                raise ValueError(f"unknown metadata key {key!r}; use {allowed + ('library',)}")
+        new = object.__new__(type(self))
+        for name in self.__dataclass_fields__:
+            object.__setattr__(new, name, getattr(self, name))
+        object.__setattr__(new, "_cfg", json.dumps(cfg, sort_keys=True))
+        return new
+
     # Compatibility with validate/diagnose scripts written for V1: metrics are
     # computed in absolute-flux asinh space with the standard floor.
     @property
@@ -197,7 +262,7 @@ class ParrotEmulatorV2(SPSEmulator):
         feats = [x]
         k, kmax = 1, cfg["fourier_k"]
         if kmax > 0:
-            zn = params[:, cfg["i_z"] : cfg["i_z"] + 1] / _Z_SCALE
+            zn = params[:, cfg["i_z"] : cfg["i_z"] + 1] / cfg.get("z_scale", _Z_SCALE)
             while k <= kmax:
                 feats.append(jnp.sin(2 * jnp.pi * k * zn))
                 feats.append(jnp.cos(2 * jnp.pi * k * zn))
@@ -278,6 +343,10 @@ class ParrotEmulatorV2(SPSEmulator):
         keep_mass_input: bool = False,
         sfr_arsinh: bool = True,
         fourier_k: int = 16,
+        z_scale: float | None = None,
+        mass_param: str = "log_mass",
+        redshift_param: str = "redshift",
+        sfr_ratio_prefix: str = "logsfr_ratio",
         flux_floor: float = DEFAULT_FLUX_FLOOR,
         n_epochs: int = 1500,
         batch_size: int = 2048,
@@ -297,6 +366,14 @@ class ParrotEmulatorV2(SPSEmulator):
         ``lax.scan`` over shuffled mini-batches; the best-validation-loss
         weights are returned.  ``exclude_rows`` (library row indices) lets a
         caller hold out an external test set.
+
+        Any synference library works: ``param_names="all"`` takes the library's
+        own parameter list.  ``mass_param`` names the input photometry is linear
+        in, ``redshift_param`` the input that gets Fourier features (period
+        ``z_scale``; default: the library's maximum redshift rounded up) and
+        ``sfr_ratio_prefix`` the inputs that are arsinh-compressed.  The
+        min/max of every input over the usable rows, the library's units and
+        its file name are stored in the checkpoint (see :attr:`spec`).
         """
         import h5py
         import optax
@@ -306,6 +383,7 @@ class ParrotEmulatorV2(SPSEmulator):
         with h5py.File(library_path, "r") as f:
             lib_p = [str(x) for x in f.attrs["ParameterNames"]]
             lib_b = [str(x) for x in f.attrs["FilterCodes"]]
+            lib_u = [str(x) for x in f.attrs.get("ParameterUnits", [])]
             P = f["Grid/Parameters"][()]
             F = f["Grid/Photometry"][()]
         if param_names == "all":
@@ -325,10 +403,22 @@ class ParrotEmulatorV2(SPSEmulator):
             f"{len(param_names)} params, {len(band_names)} bands"
         )
 
-        i_mass = param_names.index("log_mass") if "log_mass" in param_names else -1
-        i_z = param_names.index("redshift")
+        param_names = list(param_names)
+        i_mass = param_names.index(mass_param) if mass_param in param_names else -1
+        i_z = param_names.index(redshift_param) if redshift_param in param_names else -1
         if mass_norm and i_mass < 0:
-            raise ValueError("mass_norm=True requires a 'log_mass' parameter")
+            raise ValueError(f"mass_norm=True requires the mass parameter {mass_param!r}")
+        if fourier_k > 0 and i_z < 0:
+            raise ValueError(f"fourier_k > 0 requires the redshift parameter {redshift_param!r}")
+        if z_scale is None:
+            z_scale = float(np.ceil(params_raw[:, i_z].max())) if i_z >= 0 else _Z_SCALE
+        param_bounds = {
+            n: [float(params_raw[:, i].min()), float(params_raw[:, i].max())]
+            for i, n in enumerate(param_names)
+        }
+        param_units = (
+            {n: lib_u[lib_p.index(n)] for n in param_names} if len(lib_u) == len(lib_p) else {}
+        )
 
         # targets
         if mass_norm:
@@ -351,7 +441,7 @@ class ParrotEmulatorV2(SPSEmulator):
             [
                 keep_idx.index(i)
                 for i, n in enumerate(param_names)
-                if n.startswith("logsfr_ratio") and i in keep_idx
+                if n.startswith(sfr_ratio_prefix) and i in keep_idx
             ]
             if sfr_arsinh
             else []
@@ -366,8 +456,12 @@ class ParrotEmulatorV2(SPSEmulator):
             keep_mass_input=keep_mass_input,
             sfr_arsinh=sfr_arsinh,
             fourier_k=fourier_k,
+            z_scale=float(z_scale),
             flux_floor=flux_floor,
             mu0_train=mu0_train,
+            param_bounds=param_bounds,
+            param_units=param_units,
+            library=Path(library_path).name,
             i_mass=i_mass,
             i_z=i_z,
             keep_idx=keep_idx,
@@ -480,12 +574,8 @@ class ParrotEmulatorV2(SPSEmulator):
         return eqx.tree_at(lambda m: m.net, model, eqx.combine(best_np, net_static))
 
 
-def load_emulator(path: str | Path):
-    """Load a Parrot checkpoint of either generation (V2 or V1)."""
-    with np.load(str(path), allow_pickle=False) as raw:
-        is_v2 = "v2_config" in raw
-    if is_v2:
-        return ParrotEmulatorV2.load(path)
-    from arachne.emulator.parrot_emulator import ParrotEmulator
+def load_emulator(path: str | Path, **kwargs):
+    """Load a checkpoint of any registered format; see :func:`arachne.emulator.io.load_emulator`."""
+    from arachne.emulator.io import load_emulator as _load
 
-    return ParrotEmulator.load(path)
+    return _load(path, **kwargs)

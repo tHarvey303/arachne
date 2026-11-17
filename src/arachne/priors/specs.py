@@ -45,6 +45,7 @@ __all__ = [
     "SUPPORTED_DISTS",
     "build_component_log_prior",
     "build_log_prior",
+    "default_prior",
     "log_prior_1d",
     "prior_config_template",
     "resolve_prior_specs",
@@ -66,7 +67,8 @@ SUPPORTED_DISTS: frozenset[str] = frozenset(
     }
 )
 
-# Default priors for the ParrotEmulator parameter set.  The SPS grid used to
+# Default priors for the v6-library parameter set (other known parameters: see
+# arachne.emulator.spec.KNOWN_PARAMS, used by default_prior).  The SPS grid used to
 # train the emulator drew logsfr_ratio_* from Student-t(df=2, scale=0.3); a
 # flat prior on them is both wrong and pushes the emulator out of domain.
 DEFAULT_PRIORS: dict[str, dict] = {
@@ -85,6 +87,22 @@ DEFAULT_PRIORS: dict[str, dict] = {
 }
 
 _UNIFORM: dict = {"dist": "uniform"}
+
+
+def default_prior(name: str, defaults: dict[str, dict] | None = None) -> dict:
+    """Default prior spec for parameter ``name`` (a copy).
+
+    Looked up in ``defaults`` (e.g. ``emulator.spec.priors``), then
+    :data:`DEFAULT_PRIORS`, then the registry of known library parameters
+    (:func:`arachne.emulator.spec.param_info`); uniform if none has it.
+    """
+    if defaults and name in defaults:
+        return dict(defaults[name])
+    if name in DEFAULT_PRIORS:
+        return dict(DEFAULT_PRIORS[name])
+    from arachne.emulator.spec import param_info
+
+    return dict(param_info(name).prior or _UNIFORM)
 
 
 # ---------------------------------------------------------------------------
@@ -128,16 +146,20 @@ def resolve_prior_specs(
     param_names: Sequence[str],
     user_priors: dict[str, dict] | None,
     bounds: dict[str, tuple[float, float]],
+    defaults: dict[str, dict] | None = None,
 ) -> dict[str, dict]:
-    """Merge user prior overrides over :data:`DEFAULT_PRIORS` for ``param_names``.
+    """Merge user prior overrides over the default priors for ``param_names``.
 
-    Parameters without an entry in :data:`DEFAULT_PRIORS` default to uniform.
+    Defaults come from :func:`default_prior` (``defaults``, then
+    :data:`DEFAULT_PRIORS`, then the known-parameter registry, else uniform).
     Every resolved spec is validated against ``bounds[name]``.
 
     Args:
         param_names: Parameters to resolve, in order.
         user_priors: ``{name: spec}`` overrides (e.g. ``config["priors"]``), or None.
         bounds: ``{name: (lo, hi)}`` for every name in ``param_names``.
+        defaults: ``{name: spec}`` default priors that take precedence over the
+            built-in ones, e.g. ``emulator.spec.priors``.
 
     Returns:
         ``{name: spec}`` with one (copied) spec per parameter, in ``param_names`` order.
@@ -147,7 +169,7 @@ def resolve_prior_specs(
             or any resolved spec fails :func:`validate_prior_spec`.
     """
     names = list(param_names)
-    priors: dict[str, dict] = {p: dict(DEFAULT_PRIORS.get(p, _UNIFORM)) for p in names}
+    priors: dict[str, dict] = {p: default_prior(p, defaults) for p in names}
     user = user_priors or {}
     for k, v in user.items():
         if k not in names:
@@ -171,7 +193,7 @@ def prior_config_template(
     Returns:
         ``{name: spec}`` with the default spec (uniform if none is registered).
     """
-    template = {p: dict(DEFAULT_PRIORS.get(p, _UNIFORM)) for p in param_names}
+    template = {p: default_prior(p) for p in param_names}
     if bounds is not None:
         for p, spec in template.items():
             validate_prior_spec(p, spec, bounds[p])

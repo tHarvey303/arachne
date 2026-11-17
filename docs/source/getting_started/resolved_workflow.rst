@@ -4,8 +4,8 @@ The resolved workflow
 :doc:`quickstart` fits a two-component galaxy on a single pixel grid with no instrumental
 nuisances.  This page adds the three pieces a real fit usually needs — light profiles,
 instrumental nuisances and multi-resolution data — and then the checks that decide whether
-the answer can be believed.  The README section "Image-Level Forward Modelling" carries the
-same material with more prose.
+the answer can be believed.  ``docs/guide/image_fitting.md`` carries the same material with
+more prose.
 
 Choosing light profiles
 -----------------------

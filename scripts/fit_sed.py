@@ -116,8 +116,8 @@ def load_emulator_and_band_indices(
     """Load a self-contained ParrotEmulator and compute JADES band indices.
 
     The ParrotEmulator checkpoint stores its own param/band name lists, so no
-    external metadata is needed at load time.  After loading we verify that the
-    checkpoint's parameter names match ``SPS_PARAM_NAMES`` and resolve the
+    external metadata is needed at load time.  The checkpoint is presented under
+    ``SPS_PARAM_NAMES`` (see ``arachne.emulator.load_emulator``) and we resolve the
     integer indices of ``JADES_BANDS`` within the emulator's full output vector.
 
     Args:
@@ -130,18 +130,21 @@ def load_emulator_and_band_indices(
                      JADES bands in the order defined by ``JADES_BANDS``.
 
     Raises:
-        ValueError: If the checkpoint's param names differ from ``SPS_PARAM_NAMES``,
-                    or if any JADES band is absent from the emulator's band list.
+        ValueError: If the checkpoint cannot be presented under ``SPS_PARAM_NAMES``, if
+                    ``PARAM_BOUNDS`` exceed its training domain, or if any JADES band
+                    is absent from the emulator's band list.
     """
-    from arachne.emulator.parrot_emulator_v2 import load_emulator
+    from arachne.emulator import load_emulator
 
-    emulator = load_emulator(emulator_path)
-    print(f"Loaded ParrotEmulator from {emulator_path}")
+    emu = emulator = load_emulator(emulator_path, params=SPS_PARAM_NAMES)
+    print(f"Loaded emulator from {emulator_path}")
     print(f"  {len(emulator.param_names)} params, {len(emulator.band_names)} bands")
-
-    if emulator.param_names != SPS_PARAM_NAMES:
+    clipped = emu.spec.clip_bounds(PARAM_BOUNDS, names=list(PARAM_BOUNDS))
+    outside = {p: clipped[p] for p in clipped if tuple(clipped[p]) != tuple(PARAM_BOUNDS[p])}
+    if outside:
         raise ValueError(
-            f"Emulator param names {emulator.param_names} don't match expected {SPS_PARAM_NAMES}"
+            f"PARAM_BOUNDS exceed this emulator's training domain for {outside}; "
+            "edit PARAM_BOUNDS in this script"
         )
 
     all_bands = emulator.band_names

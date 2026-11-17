@@ -238,7 +238,7 @@ import real_data_utils as rdu  # noqa: E402
 from fit_catalogue import PARAM_BOUNDS, SPS_PARAM_NAMES  # noqa: E402
 
 from arachne.data.observation import ObservationCube  # noqa: E402
-from arachne.emulator.parrot_emulator_v2 import load_emulator  # noqa: E402
+from arachne.emulator import EmulatorView, load_emulator  # noqa: E402
 from arachne.forward_model.multires import MultiResolutionForwardModel  # noqa: E402
 from arachne.forward_model.nuisance import NuisanceModel  # noqa: E402
 from arachne.forward_model.pipeline import ForwardModel  # noqa: E402
@@ -1903,8 +1903,8 @@ def main(argv=None) -> None:
     if dropped:
         print(f"  dropping bands missing from the emulator or the PSF directory: {dropped}")
     args.bands = have_psf
-    emulator = rdu.BandSubsetEmulator(inner, args.bands)
-    assert list(emulator.param_names) == SPS_PARAM_NAMES
+    emulator = EmulatorView(inner, params=SPS_PARAM_NAMES, bands=args.bands)
+    PARAM_BOUNDS.update(emulator.spec.clip_bounds(PARAM_BOUNDS, names=list(PARAM_BOUNDS)))
     print(f"  {len(emulator.param_names)} parameters, {len(emulator.band_names)} bands used")
 
     t0 = time.perf_counter()

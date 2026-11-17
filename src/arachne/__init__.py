@@ -10,7 +10,10 @@ from arachne.emulator.base import SPSEmulator
 from arachne.emulator.jax_emulator import JAXFlowEmulator
 from arachne.emulator.jax_mlp_emulator import SPSMLPEmulator
 from arachne.emulator.parrot_emulator import ParrotEmulator
-from arachne.emulator.parrot_emulator_v2 import ParrotEmulatorV2, load_emulator
+from arachne.emulator.io import load_emulator, register_emulator_format
+from arachne.emulator.parrot_emulator_v2 import ParrotEmulatorV2
+from arachne.emulator.spec import EmulatorSpec
+from arachne.emulator.view import EmulatorView
 from arachne.forward_model.multires import MultiResolutionForwardModel
 from arachne.forward_model.nuisance import NuisanceModel
 from arachne.forward_model.pipeline import ForwardModel
@@ -109,7 +112,10 @@ __all__ = [
     "SPSMLPEmulator",
     "ParrotEmulator",
     "ParrotEmulatorV2",
+    "EmulatorSpec",
+    "EmulatorView",
     "load_emulator",
+    "register_emulator_format",
     "JAXFlowEmulator",
     "ForwardModel",
     "MultiResolutionForwardModel",

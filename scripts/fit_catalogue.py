@@ -27,9 +27,9 @@ Key features (both samplers)
 
 Transform / prior contract (NUTS)
 ----------------------------------
-The NUTS sampling domain for every parameter is fixed to the emulator's training
-bounds (PARAM_BOUNDS) via a sigmoid transform.  This guarantees emulator
-inputs are always in-domain.  The chosen prior is a density shape applied
+The NUTS sampling domain for every parameter is PARAM_BOUNDS, narrowed to the loaded
+emulator's training domain (``emulator.spec.param_bounds``), via a sigmoid transform.
+This guarantees emulator inputs are always in-domain.  The chosen prior is a density shape applied
 over that domain; priors with support beyond the bounds are implicitly
 truncated (truncation normalisation is dropped -- within-galaxy inference
 is exact; absolute log-density / ELBO values are unnormalised constants).
@@ -385,12 +385,20 @@ def load_catalogue(catalogue_path: Path, config: dict) -> tuple[np.ndarray, np.n
 
 def load_emulator_and_band_indices(emulator_path: Path, band_names: list[str]) -> tuple:
     """Load the emulator and return (emulator, band_idx) for the requested bands."""
-    from arachne.emulator.parrot_emulator_v2 import load_emulator
+    from arachne.emulator import load_emulator
 
-    emu = load_emulator(emulator_path)
-    print(f"\nLoaded ParrotEmulator: {len(emu.param_names)} params, {len(emu.band_names)} bands")
-    if emu.param_names != SPS_PARAM_NAMES:
-        raise ValueError(f"Emulator params {emu.param_names} != expected {SPS_PARAM_NAMES}")
+    # Any checkpoint works: it is presented under SPS_PARAM_NAMES (aliases matched, inputs
+    # this script does not fit held at the emulator's defaults), and PARAM_BOUNDS is
+    # narrowed in place to the emulator's training domain.
+    emu = load_emulator(emulator_path, params=SPS_PARAM_NAMES)
+    print(f"\nLoaded emulator: {len(emu.param_names)} params, {len(emu.band_names)} bands")
+    if emu.spec.meta.get("fixed"):
+        print(f"  emulator inputs held fixed: {emu.spec.meta['fixed']}")
+    clipped = emu.spec.clip_bounds(PARAM_BOUNDS, names=list(PARAM_BOUNDS))
+    narrowed = {p: clipped[p] for p in clipped if tuple(clipped[p]) != tuple(PARAM_BOUNDS[p])}
+    PARAM_BOUNDS.update(clipped)
+    if narrowed:
+        print(f"  fit bounds narrowed to the emulator domain: {narrowed}")
     all_bands = emu.band_names
     missing = [b for b in band_names if b not in all_bands]
     if missing:

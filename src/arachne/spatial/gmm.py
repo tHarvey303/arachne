@@ -95,8 +95,8 @@ class GaussianMixtureSpatialModel(SpatialModel):
 
         H, W = image_shape
         # Pre-compute pixel coordinate grid (y, x) — static
-        ys = jnp.arange(H, dtype=jnp.float32)
-        xs = jnp.arange(W, dtype=jnp.float32)
+        ys = jnp.arange(H, dtype=float)
+        xs = jnp.arange(W, dtype=float)
         yy, xx = jnp.meshgrid(ys, xs, indexing="ij")
         self.pixel_coords = jnp.stack([yy.ravel(), xx.ravel()], axis=-1)  # (H*W, 2)
 
@@ -105,8 +105,8 @@ class GaussianMixtureSpatialModel(SpatialModel):
         self._n_params_per_component = 5 + N
         self._n_params = n_components * (5 + N)
 
-        lows = jnp.array([param_bounds[p][0] for p in sps_param_names], dtype=jnp.float32)
-        highs = jnp.array([param_bounds[p][1] for p in sps_param_names], dtype=jnp.float32)
+        lows = jnp.array([float(param_bounds[p][0]) for p in sps_param_names])
+        highs = jnp.array([float(param_bounds[p][1]) for p in sps_param_names])
         self._lows = lows
         self._highs = highs
 

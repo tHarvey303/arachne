@@ -46,6 +46,14 @@ def parse_args(argv=None):
     p.add_argument("--depth", type=int, default=5, help="hidden layers (mlp)")
     p.add_argument("--blocks", type=int, default=4, help="residual blocks (resmlp)")
     p.add_argument("--fourier-k", type=int, default=16)
+    p.add_argument(
+        "--z-scale",
+        type=float,
+        default=None,
+        help="Fourier redshift period (default: the library's maximum redshift, rounded up)",
+    )
+    p.add_argument("--mass-param", default="log_mass", help="input photometry is linear in")
+    p.add_argument("--redshift-param", default="redshift", help="input given Fourier features")
     p.add_argument("--no-mass-norm", action="store_true")
     p.add_argument("--keep-mass-input", action="store_true")
     p.add_argument("--no-sfr-arsinh", action="store_true")
@@ -94,6 +102,9 @@ def main(argv=None):
         keep_mass_input=args.keep_mass_input,
         sfr_arsinh=not args.no_sfr_arsinh,
         fourier_k=args.fourier_k,
+        z_scale=args.z_scale,
+        mass_param=args.mass_param,
+        redshift_param=args.redshift_param,
         flux_floor=args.flux_floor,
         n_epochs=args.epochs,
         batch_size=args.batch,
@@ -105,6 +116,7 @@ def main(argv=None):
         checkpoint_path=checkpoint,
     )
     emulator.save(args.output)
+    print(emulator.spec.describe())
     print(f"Saved trained V2 emulator to {args.output}")
     return 0
 

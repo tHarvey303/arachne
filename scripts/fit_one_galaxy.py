@@ -281,11 +281,16 @@ def make_mock(emulator, band_idx, seed=0):
 
 def load_emulator(emulator_path, band_names):
     """Load the emulator and return (emulator, band_idx) for the requested bands."""
-    from arachne.emulator.parrot_emulator_v2 import load_emulator as _load_any
+    from arachne.emulator import load_emulator as _load_any
 
-    emu = _load_any(emulator_path)
-    if emu.param_names != SPS_PARAM_NAMES:
-        raise ValueError(f"Emulator params {emu.param_names} != {SPS_PARAM_NAMES}")
+    emu = _load_any(emulator_path, params=SPS_PARAM_NAMES)
+    clipped = emu.spec.clip_bounds(PARAM_BOUNDS, names=list(PARAM_BOUNDS))
+    outside = {p: clipped[p] for p in clipped if tuple(clipped[p]) != tuple(PARAM_BOUNDS[p])}
+    if outside:
+        raise ValueError(
+            f"PARAM_BOUNDS exceed this emulator's training domain for {outside}; "
+            "edit PARAM_BOUNDS in this script"
+        )
     missing = [b for b in band_names if b not in emu.band_names]
     if missing:
         raise ValueError(f"Bands not in emulator: {missing}")

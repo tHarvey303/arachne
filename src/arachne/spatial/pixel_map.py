@@ -67,19 +67,16 @@ class FreeFormPixelMap(SpatialModel):
         self._n_params = H * W * N
 
         # Pre-compute bounds arrays for vectorised sigmoid transform
-        lows = jnp.array([param_bounds[p][0] for p in sps_param_names], dtype=jnp.float32)
-        highs = jnp.array([param_bounds[p][1] for p in sps_param_names], dtype=jnp.float32)
+        lows = jnp.array([float(param_bounds[p][0]) for p in sps_param_names])
+        highs = jnp.array([float(param_bounds[p][1]) for p in sps_param_names])
         self._lows = lows  # (N,)
         self._highs = highs  # (N,)
 
         # Pre-compute smoothness strengths
         if isinstance(smoothness_strength, dict):
-            lambdas = jnp.array(
-                [smoothness_strength.get(p, 1.0) for p in sps_param_names],
-                dtype=jnp.float32,
-            )
+            lambdas = jnp.array([float(smoothness_strength.get(p, 1.0)) for p in sps_param_names])
         else:
-            lambdas = jnp.full((N,), smoothness_strength, dtype=jnp.float32)
+            lambdas = jnp.full((N,), float(smoothness_strength))
         self._lambdas = lambdas  # (N,)
 
     @property
