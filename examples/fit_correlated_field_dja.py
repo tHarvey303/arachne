@@ -12,8 +12,8 @@ the detection segments, the central ``--size-px`` box kept, pixels of other segm
 Variance is the DJA inverse-variance map, which carries no source Poisson term, so the
 model-error floor is mandatory: per band ``f_b = sqrt(f_model^2 + f_emu,b^2)``, with
 ``--model-err-frac`` the physics/model term and ``f_emu,b`` the emulator's own fractional
-error per band from ``--emulator-err-json`` (``perband_fractional_error.json`` from
-``scripts/validate_parrot_emulator.py`` residuals; ~0.4 % at z ~ 2).
+error per band at the target's redshift (~0.4 % at z ~ 2), read from the table in the
+checkpoint (``emulator.spec.band_error``); ``--emulator-err-json`` substitutes another table.
 
 PSFs.  ``--psf-dir`` must hold ``{FILTER}_psf_norm.fits`` kernels **on the thumbnail grid**
 (0.05"/px).  The DJA SW mosaics are broader than the JADES DR3 mosaics (EE(0.2") 0.67 vs
@@ -273,9 +273,13 @@ def main():
     ap.add_argument(
         "--emulator-err-json",
         default=None,
-        help="per-band emulator error JSON (validate_parrot_emulator residuals)",
+        help="per-band emulator error table to use instead of the one in the checkpoint",
     )
-    ap.add_argument("--emulator-err-key", default="z1.8-2.5", help="redshift bin in the JSON")
+    ap.add_argument(
+        "--emulator-err-key",
+        default=None,
+        help="redshift bin of the error table (default: chosen from the target's redshift)",
+    )
     ap.add_argument("--sfh", choices=demo.SFH_SETUPS, default="basis2")
     ap.add_argument("--sfh-prior", choices=sorted(demo.SFH_PRIOR_SCALES), default="continuity")
     ap.add_argument("--free-globals", action="store_true")
@@ -364,15 +368,6 @@ def main():
             f"peak S/N {bi['peak_snr']:.0f}, flux {bi['target_flux_nJy'] / 1e3:.2f} uJy"
         )
 
-    # model-error floor per band
-    emu_err = np.zeros(len(filters))
-    if args.emulator_err_json:
-        tab = json.load(open(args.emulator_err_json))["bands"]
-        emu_err = np.array([tab[f"JWST/NIRCam.{f}"][args.emulator_err_key]["mad"] for f in filters])
-    model_err = parse_model_err(args.model_err_frac, filters)
-    frac = np.sqrt(model_err**2 + emu_err**2)
-    print("model_error_frac per band:", np.array2string(frac, precision=4))
-
     if args.z_prior:
         z_mean, z_sigma = (float(x) for x in args.z_prior.split(","))
         demo.NEUTRAL["log10metallicity"] = z_mean
@@ -384,6 +379,35 @@ def main():
     demo.PARAM_BOUNDS.update(
         emulator.spec.clip_bounds(demo.PARAM_BOUNDS, names=list(demo.PARAM_BOUNDS))
     )
+
+    # Model-error floor per band: the model-inadequacy term plus, in quadrature, the
+    # emulator's own error at this redshift.  The emulator term comes from the table in
+    # the checkpoint unless --emulator-err-json gives another one.
+    emu_err, emu_err_source = np.zeros(len(filters)), "none"
+    if args.emulator_err_json:
+        from arachne.emulator.validation import select_band_errors
+
+        emu_err, z_bin = select_band_errors(
+            json.load(open(args.emulator_err_json)),
+            demo.BANDS,
+            redshift=demo.REDSHIFT,
+            z_bin=args.emulator_err_key,
+        )
+        emu_err_source = f"{args.emulator_err_json} [{z_bin}]"
+    elif emulator.spec.band_errors is not None:
+        emu_err, z_bin = emulator.spec.band_error(
+            demo.REDSHIFT, z_bin=args.emulator_err_key, return_bin=True
+        )
+        emu_err_source = f"checkpoint [{z_bin}]"
+    else:
+        print(
+            "WARNING: the emulator checkpoint carries no band-error table and no "
+            "--emulator-err-json was given: the emulator error term is zero"
+        )
+    model_err = parse_model_err(args.model_err_frac, filters)
+    frac = np.sqrt(model_err**2 + emu_err**2)
+    print(f"emulator error per band ({emu_err_source}):", np.array2string(emu_err, precision=4))
+    print("model_error_frac per band:", np.array2string(frac, precision=4))
     psf = PSFModel.from_fits({b: psf_dir / f"{b.split('.')[-1]}_psf_norm.fits" for b in demo.BANDS})
     basis_info = None
     if any(k in demo.LATENT_SFH for k in demo.FIELDS):
@@ -502,6 +526,7 @@ def main():
         "frame_arcsec": args.frame_arcsec,
         "model_err_frac": model_err.tolist(),
         "emulator_err_frac": emu_err.tolist(),
+        "emulator_err_source": emu_err_source,
         "model_error_frac_per_band": frac.tolist(),
         "sfh": args.sfh,
         "sfh_prior": args.sfh_prior,

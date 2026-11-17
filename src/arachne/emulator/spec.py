@@ -168,6 +168,10 @@ class EmulatorSpec:
         sfh_ratio_params: The SFH log-ratio inputs, in order.
         meta: Free-form provenance: ``bounds_source`` (``"checkpoint"`` or
             ``"fallback"``), ``library``, and for views ``fixed`` / ``renamed``.
+        band_errors: The emulator's per-band fractional flux error in redshift
+            bins, measured on held-out library rows (see
+            :mod:`arachne.emulator.validation`), or ``None`` if the checkpoint
+            carries none.  Read it with :meth:`band_error`.
     """
 
     param_names: tuple[str, ...]
@@ -181,6 +185,7 @@ class EmulatorSpec:
     redshift_param: str | None
     sfh_ratio_params: tuple[str, ...]
     meta: dict = field(default_factory=dict)
+    band_errors: dict | None = None
 
     # -- construction ----------------------------------------------------------
     @classmethod
@@ -196,6 +201,7 @@ class EmulatorSpec:
         mass_param: str | None = None,
         redshift_param: str | None = None,
         meta: Mapping | None = None,
+        band_errors: Mapping | None = None,
     ) -> "EmulatorSpec":
         """Build a spec from names, filling every gap from :data:`KNOWN_PARAMS`.
 
@@ -209,6 +215,7 @@ class EmulatorSpec:
             mass_param: Mass input; default: the input with role ``"mass"``.
             redshift_param: Redshift input; default: the input with role ``"redshift"``.
             meta: Provenance entries.
+            band_errors: Per-band error table (:mod:`arachne.emulator.validation`).
 
         Returns:
             The completed spec.  A parameter with neither recorded nor known
@@ -252,6 +259,7 @@ class EmulatorSpec:
             redshift_param=(redshift_param if redshift_param is not None else by_role("redshift")),
             sfh_ratio_params=tuple(p for p in names if infos[p].role == "sfh_ratio"),
             meta={"bounds_source": source, **dict(meta or {})},
+            band_errors=dict(band_errors) if band_errors else None,
         )
 
     # -- queries -----------------------------------------------------------------
@@ -267,6 +275,49 @@ class EmulatorSpec:
                 "record them in the checkpoint (python -m arachne.emulator annotate)."
             )
         return self.param_bounds[name]
+
+    def band_error(
+        self,
+        redshift: float | None = None,
+        stat: str = "mad",
+        z_bin: str | None = None,
+        return_bin: bool = False,
+    ):
+        """The emulator's fractional flux error per band, in ``band_names`` order.
+
+        Add it in quadrature to a fit's model-error floor.  The value comes from
+        the narrowest well-populated redshift bin containing ``redshift``
+        (``"all"`` if none, or if ``redshift`` is ``None``).
+
+        The table was measured over the whole library.  If this spec belongs to
+        a view that holds inputs fixed (``meta["fixed"]``), the error on that
+        slice of parameter space can differ.
+
+        Args:
+            redshift: Redshift of the object being fitted.
+            stat: ``"mad"`` (robust scatter, default), ``"std"``, ``"p95"`` or ``"bias"``.
+            z_bin: Use this bin of the table instead of choosing by redshift.
+            return_bin: Also return the name of the bin used.
+
+        Returns:
+            Array of shape ``(n_bands,)``, or ``(array, bin_name)`` with ``return_bin``.
+
+        Raises:
+            ValueError: If the checkpoint carries no table (``band_errors is
+                None``) or the table lacks one of this spec's bands.
+        """
+        if self.band_errors is None:
+            raise ValueError(
+                "this emulator carries no band-error table; measure one with "
+                "scripts/validate_parrot_emulator.py --embed or attach one with "
+                "python -m arachne.emulator annotate CKPT --band-errors FILE.json"
+            )
+        from arachne.emulator.validation import select_band_errors
+
+        values, name = select_band_errors(
+            self.band_errors, self.band_names, redshift=redshift, stat=stat, z_bin=z_bin
+        )
+        return (values, name) if return_bin else values
 
     def clip_bounds(
         self, bounds: Mapping[str, Iterable[float]], names: Sequence[str] | None = None
@@ -362,6 +413,15 @@ class EmulatorSpec:
         for key in ("fixed", "renamed"):
             if self.meta.get(key):
                 lines.append(f"{key}: {self.meta[key]}")
+        if self.band_errors is None:
+            lines.append("band errors: none recorded")
+        else:
+            table = self.band_errors["bands"]
+            bins = list(next(iter(table.values())))
+            lines.append(
+                f"band errors: {len(table)} bands, {len(bins)} redshift bins "
+                f"({self.band_errors.get('source', '') or 'no source recorded'})"
+            )
         for p in self.param_names:
             b = self.param_bounds.get(p)
             bounds = f"[{b[0]:g}, {b[1]:g}]" if b else "?"

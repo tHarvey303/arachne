@@ -5,10 +5,11 @@ Usage::
     python -m arachne.emulator describe CKPT
     python -m arachne.emulator annotate CKPT --library LIB.hdf5 [-o OUT]
     python -m arachne.emulator annotate CKPT --bounds bounds.json [-o OUT]
+    python -m arachne.emulator annotate CKPT --band-errors perband_fractional_error.json
 
-``annotate`` records the training domain of every input in a
-``ParrotEmulatorV2`` checkpoint that was trained before checkpoints stored it.
-The weights are not changed.
+``annotate`` records, in a ``ParrotEmulatorV2`` checkpoint that lacks them, the
+training domain of every input (``--library`` or ``--bounds``) and the per-band
+emulator error table (``--band-errors``).  The weights are not changed.
 """
 
 from __future__ import annotations
@@ -49,9 +50,14 @@ def main(argv=None) -> int:
     describe.add_argument("--bands", action="store_true", help="also list the band names")
     annotate = sub.add_parser("annotate", help="record the training domain in a V2 checkpoint")
     annotate.add_argument("checkpoint", type=Path)
-    source = annotate.add_mutually_exclusive_group(required=True)
+    source = annotate.add_mutually_exclusive_group()
     source.add_argument("--library", type=Path, help="synference HDF5 library it was trained on")
     source.add_argument("--bounds", type=Path, help='JSON file {"name": [lo, hi], ...}')
+    annotate.add_argument(
+        "--band-errors",
+        type=Path,
+        help="per-band emulator error table (JSON from validate_parrot_emulator.py)",
+    )
     annotate.add_argument("-o", "--output", type=Path, help="default: overwrite the checkpoint")
     args = parser.parse_args(argv)
 
@@ -67,10 +73,15 @@ def main(argv=None) -> int:
 
     if not hasattr(emulator, "with_metadata"):
         raise SystemExit(f"{type(emulator).__name__} checkpoints cannot be annotated")
+    if not (args.library or args.bounds or args.band_errors):
+        parser.error("annotate needs --library, --bounds or --band-errors")
+    metadata = {}
     if args.library:
         metadata = _library_metadata(args.library, list(emulator.param_names))
-    else:
+    elif args.bounds:
         metadata = {"param_bounds": json.loads(args.bounds.read_text())}
+    if args.band_errors:
+        metadata["band_errors"] = json.loads(args.band_errors.read_text())
     annotated = emulator.with_metadata(**metadata)
     annotated.save(args.output or args.checkpoint)
     print(annotated.spec.describe())

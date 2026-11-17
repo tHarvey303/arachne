@@ -10,6 +10,12 @@ import pytest
 from arachne.emulator import EmulatorSpec, EmulatorView, load_emulator, param_info
 from arachne.emulator.fixed_param_wrapper import FixedParamEmulator
 from arachne.emulator.parrot_emulator_v2 import ParrotEmulatorV2
+from arachne.emulator.validation import (
+    band_error_table,
+    select_band_errors,
+    select_z_bin,
+    table_z_bins,
+)
 from arachne.priors.specs import resolve_prior_specs
 
 NAMES = ["redshift", "log_mass", "dust_slope", "fesc", "Av", "logsfr_ratio_0"]
@@ -196,3 +202,74 @@ def test_base_spec_and_prior_defaults(mock_emulator):
         defaults={"logsfr_ratio_6": {"dist": "uniform"}},
     )
     assert over["logsfr_ratio_6"]["dist"] == "uniform"
+
+
+def _table(n=4000, seed=0):
+    """Band-error table for three bands with known scatter: 1 %, 2 %, and 5 % above z = 3."""
+    rng = np.random.default_rng(seed)
+    z = rng.uniform(0.0, 6.0, n)
+    true = np.full((n, 3), 100.0)
+    true[: n // 10, 2] = 0.5  # undetected rows in b3 are ignored
+    scatter = np.stack([np.full(n, 0.01), np.full(n, 0.02), np.where(z > 3.0, 0.05, 0.01)], axis=1)
+    pred = true * (1.0 + scatter * rng.standard_normal((n, 3)))
+    return band_error_table(pred, true, z, ["b1", "b2", "b3"], source="test")
+
+
+def test_band_error_table_values_and_bins():
+    """The table recovers the injected scatter per band and per redshift bin."""
+    table = _table()
+    assert table["z_bins"]["all"] is None and table["z_bins"]["z2-3"] == [2.0, 3.0]
+    assert "z8-10" not in table["z_bins"]  # bins stop at the largest redshift
+    all_ = {b: table["bands"][b]["all"] for b in ("b1", "b2", "b3")}
+    assert all_["b1"]["mad"] == pytest.approx(0.01, rel=0.1)
+    assert all_["b2"]["mad"] == pytest.approx(0.02, rel=0.1)
+    assert all_["b3"]["n"] == 3600
+    assert table["bands"]["b3"]["z4-6"]["mad"] == pytest.approx(0.05, rel=0.15)
+    assert table["bands"]["b3"]["z1-1.5"]["mad"] == pytest.approx(0.01, rel=0.2)
+    assert abs(all_["b1"]["bias"]) < 0.002
+
+
+def test_select_bin_and_errors():
+    """Bin choice: narrowest populated bin containing z, else the widest."""
+    table = _table()
+    assert select_z_bin(table, 2.1) == "z1.8-2.5"
+    assert select_z_bin(table, 5.0) == "z4-6"
+    assert select_z_bin(table, None) == "all"
+    assert select_z_bin(table, 30.0) == "all"
+    assert select_z_bin(table, 5.0, min_rows=10**6) == "all"
+    values, name = select_band_errors(table, ["b3", "b1"], redshift=5.0)
+    assert name == "z4-6" and values.shape == (2,)
+    assert values[0] > 3 * values[1]
+    assert select_band_errors(table, ["b1"], redshift=5.0, z_bin="all")[1] == "all"
+    with pytest.raises(ValueError, match="no entry"):
+        select_band_errors(table, ["nope"])
+    legacy = {"bands": {"b1": {"z1.8-2.5": {"mad": 0.004, "n": 500}, "all": {"mad": 0.01}}}}
+    assert table_z_bins(legacy) == {"z1.8-2.5": (1.8, 2.5), "all": None}
+    assert select_band_errors(legacy, ["b1"], redshift=2.0)[0][0] == 0.004
+    assert select_band_errors(legacy, ["b1"], redshift=4.0)[0][0] == 0.01
+
+
+def test_band_errors_in_checkpoint(tmp_path):
+    """The table survives save/load, follows a view's band order, and is validated."""
+    emu = _tiny()
+    assert emu.spec.band_errors is None
+    with pytest.raises(ValueError, match="no band-error table"):
+        emu.spec.band_error(2.0)
+    table = _table()
+    path = tmp_path / "tiny.eqx"
+    emu.with_metadata(band_errors=table).save(path)
+    loaded = load_emulator(path)
+    np.testing.assert_array_equal(
+        np.asarray(loaded.predict(jnp.asarray(FULL))), np.asarray(emu.predict(jnp.asarray(FULL)))
+    )
+    errs = loaded.spec.band_error(5.0)
+    assert errs.shape == (3,) and errs[2] == pytest.approx(0.05, rel=0.15)
+    view = load_emulator(path, fixed={"redshift": 5.0}, bands=["b3", "b1"])
+    v, name = view.spec.band_error(5.0, return_bin=True)
+    assert name == "z4-6"
+    np.testing.assert_allclose(v, errs[[2, 0]])
+    assert "band errors: 3 bands" in loaded.spec.describe()
+    with pytest.raises(ValueError, match="not an emulator band"):
+        emu.with_metadata(band_errors={"bands": {"zzz": {"all": {"mad": 0.1}}}})
+    with pytest.raises(ValueError, match="bands"):
+        emu.with_metadata(band_errors={"nope": 1})

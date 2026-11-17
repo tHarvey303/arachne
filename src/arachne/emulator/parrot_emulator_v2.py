@@ -203,6 +203,7 @@ class ParrotEmulatorV2(SPSEmulator):
             mass_param=names[cfg["i_mass"]] if cfg.get("i_mass", -1) >= 0 else None,
             redshift_param=names[cfg["i_z"]] if cfg.get("i_z", -1) >= 0 else None,
             meta={k: cfg[k] for k in ("library", "trained") if k in cfg},
+            band_errors=cfg.get("band_errors"),
         )
 
     def with_metadata(self, **metadata) -> "ParrotEmulatorV2":
@@ -211,7 +212,9 @@ class ParrotEmulatorV2(SPSEmulator):
         Args:
             **metadata: Any of ``param_bounds`` (``{name: (lo, hi)}``),
                 ``param_defaults``, ``param_priors``, ``param_units`` (dicts keyed
-                by parameter name) and ``library`` / ``trained`` (strings).
+                by parameter name), ``library`` / ``trained`` (strings) and
+                ``band_errors`` (a per-band error table, see
+                :mod:`arachne.emulator.validation`; it replaces any existing one).
 
         Returns:
             The same emulator with the entries merged into its configuration.
@@ -230,10 +233,16 @@ class ParrotEmulatorV2(SPSEmulator):
                 if key == "param_bounds":
                     value = {p: [float(v[0]), float(v[1])] for p, v in value.items()}
                 cfg[key] = {**cfg.get(key, {}), **dict(value)}
+            elif key == "band_errors":
+                from arachne.emulator.validation import check_band_error_table
+
+                check_band_error_table(value, self._band_names)
+                cfg[key] = json.loads(json.dumps(value))
             elif key in ("library", "trained"):
                 cfg[key] = str(value)
             else:
-                raise ValueError(f"unknown metadata key {key!r}; use {allowed + ('library',)}")
+                known = allowed + ("band_errors", "library", "trained")
+                raise ValueError(f"unknown metadata key {key!r}; use {known}")
         new = object.__new__(type(self))
         for name in self.__dataclass_fields__:
             object.__setattr__(new, name, getattr(self, name))

@@ -80,6 +80,13 @@ Full description: [docs/guide/emulators.md](docs/guide/emulators.md).
   intersects them: `spec.clip_bounds(my_bounds)`. Check `spec.meta["bounds_source"]`:
   `"fallback"` means the checkpoint recorded no domain and the bounds are the v6 fit bounds,
   which are wrong for other libraries. Fix it once with `python -m arachne.emulator annotate`.
+- **The emulator's per-band error comes from the checkpoint**:
+  `emulator.spec.band_error(redshift)`, added in quadrature to the model-error floor. Do not
+  read a stand-alone `perband_fractional_error.json` for a checkpoint that carries a table (a
+  v2 file used with a v3 emulator is the mistake this prevents). `spec.band_errors is None`
+  means no table: measure one (`validate_parrot_emulator.py --embed`) or attach one
+  (`python -m arachne.emulator annotate CKPT --band-errors FILE`). The tables on the two
+  existing checkpoints only resolve z ≈ 2; elsewhere they return the all-redshift value.
 - **Known parameter sets.** v6 library (checkpoint `parrot_emulator_v2.eqx`, production): 12
   inputs `redshift, log_mass, slope, fesc_lya, dust_bump_amplitude, log10metallicity, Av,
   logsfr_ratio_0..4`; z ≤ 14. v7 library (`parrot_emulator_v3.eqx`, candidate): 17 inputs,
@@ -107,9 +114,10 @@ Full description: [docs/guide/emulators.md](docs/guide/emulators.md).
 | `data/multires.py` | `BandImage` (one band on its own grid: flux/variance/mask, `pixel_scale`, `affine`, `ref_pixel`, `psf`, `sky_coords()`), `MultiResolutionObservation` (`from_fits`, `from_dja_fits`, `to_observation_cube`, `to_jax`), `canonical_band_name`, `tangent_plane_affine` |
 | `data/dja.py` | DAWN JWST Archive client: `fetch_dja_cutout` / `load_dja_cutout` (thumb service), `fetch_dja_native_cutout` (assoc_mosaic), `dja_filter_names`, `server_reachable` |
 | `data/jades.py` | JADES NIRSpec DR4 spec-z catalogue: `download_jades_dr4_specz`, `load_jades_dr4_specz`, `select_targets` |
-| `emulator/base.py`, `emulator/spec.py` | `SPSEmulator` ABC (`param_names`, `band_names`, `predict`, `spec`, `param_bounds`); `EmulatorSpec` (bounds, defaults, priors, units, labels, roles, `clip_bounds`, `subset`, `describe`), `KNOWN_PARAMS` / `param_info` (registry of library parameters and aliases; pure Python) |
-| `emulator/io.py`, `emulator/view.py`, `emulator/__main__.py` | `load_emulator(path, params=, fixed=, bands=, rename=)`, `register_emulator_format`; `EmulatorView` (fix / rename / reorder inputs, select bands); `python -m arachne.emulator describe\|annotate` |
-| `emulator/parrot_emulator_v2.py` | `ParrotEmulatorV2` — **primary emulator class**: analytic mass factorisation (flux exactly ∝ 10**log_mass), Fourier-z features (period `z_scale` from the checkpoint), arsinh SFH-ratio inputs; the checkpoint records names, roles, training domain, units, library; `with_metadata`, `from_synference_library` |
+| `emulator/base.py`, `emulator/spec.py` | `SPSEmulator` ABC (`param_names`, `band_names`, `predict`, `spec`, `param_bounds`); `EmulatorSpec` (bounds, defaults, priors, units, labels, roles, `band_errors` / `band_error(z)`, `clip_bounds`, `subset`, `describe`), `KNOWN_PARAMS` / `param_info` (registry of library parameters and aliases; pure Python) |
+| `emulator/io.py`, `emulator/view.py`, `emulator/__main__.py` | `load_emulator(path, params=, fixed=, bands=, rename=)`, `register_emulator_format`; `EmulatorView` (fix / rename / reorder inputs, select bands); `python -m arachne.emulator describe\|annotate` (`--library`, `--bounds`, `--band-errors`) |
+| `emulator/validation.py` | `band_error_table(pred, true, z, bands)`, `select_band_errors`, `select_z_bin`, `table_z_bins`, `check_band_error_table` — per-band fractional-error tables in redshift bins (numpy only) |
+| `emulator/parrot_emulator_v2.py` | `ParrotEmulatorV2` — **primary emulator class**: analytic mass factorisation (flux exactly ∝ 10**log_mass), Fourier-z features (period `z_scale` from the checkpoint), arsinh SFH-ratio inputs; the checkpoint records names, roles, training domain, units, library; `with_metadata` (domain, units, `band_errors`), `from_synference_library` |
 | `emulator/parrot_emulator.py`, `jax_mlp_emulator.py`, `jax_emulator.py` | `ParrotEmulator` (v1, legacy), `SPSMLPEmulator` (Speculator), `JAXFlowEmulator` (legacy flow export) |
 | `emulator/fixed_param_wrapper.py` | `FixedParamEmulator` — pins one input; kept for existing code, `EmulatorView` is the general form |
 | `spatial/base.py` | `SpatialModel` ABC: `n_params`, `decode`, `log_prior`; optional `model_image` hook and `sample_prior` |

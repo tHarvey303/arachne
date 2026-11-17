@@ -7,6 +7,9 @@ Produces:
 - PNG figure: per-band violin plots of residuals (saved to ``--output-dir``).
 - PNG figure: predicted vs true scatter plot for a random subset.
 - HDF5 residuals file for downstream analysis (saved to ``--output-dir``).
+- ``perband_fractional_error.json``: fractional flux error per band in redshift
+  bins.  ``--embed`` also stores it in the checkpoint, where fits read it with
+  ``emulator.spec.band_error(redshift)``.
 
 Usage
 -----
@@ -65,6 +68,12 @@ def parse_args(argv=None):
         type=int,
         default=5_000,
         help="Number of points for per-band scatter plots.",
+    )
+    p.add_argument(
+        "--embed",
+        action="store_true",
+        help="Store the per-band error table in the checkpoint (rewrites --emulator; "
+        "weights unchanged).",
     )
     return p.parse_args(argv)
 
@@ -182,6 +191,34 @@ def main(argv=None):  # noqa: C901
         fout.attrs["scatter"] = scatter.astype(np.float32)
         fout.attrs["p95_abs_err"] = p95.astype(np.float32)
     print(f"\nResiduals saved to {resid_path}")
+
+    # ------------------------------------------------------------------
+    # Per-band fractional flux error in redshift bins (the table fits use)
+    # ------------------------------------------------------------------
+    z_name = emulator.spec.redshift_param
+    if z_name in params:
+        import json
+
+        from arachne.emulator.validation import band_error_table
+
+        table = band_error_table(
+            pred_flux,
+            phot_val,
+            params_val[:, list(params).index(z_name)],
+            bands,
+            source=f"validate_parrot_emulator.py on {Path(args.library).name}: {n} random "
+            f"library rows (seed {args.seed}); these can include training rows",
+        )
+        table_path = output_dir / "perband_fractional_error.json"
+        table_path.write_text(json.dumps(table, indent=1))
+        print(f"Per-band fractional error table saved to {table_path}")
+        if args.embed:
+            if not hasattr(emulator, "with_metadata"):
+                raise SystemExit(f"{type(emulator).__name__} checkpoints cannot carry the table")
+            emulator.with_metadata(band_errors=table).save(args.emulator)
+            print(f"Table embedded in {args.emulator}")
+    else:
+        print("No redshift input among the validated parameters: no per-band error table.")
 
     # ------------------------------------------------------------------
     # Plots (optional: skip gracefully if matplotlib not installed)

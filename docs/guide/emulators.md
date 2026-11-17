@@ -38,6 +38,7 @@ format writes.
 | `units`, `labels` | For tables and plots |
 | `mass_param`, `redshift_param`, `sfh_ratio_params` | The inputs with special roles |
 | `meta` | `bounds_source` (`"checkpoint"` or `"fallback"`), `library`, and for views `fixed` / `renamed` |
+| `band_errors`, `band_error(redshift)` | The emulator's own fractional flux error per band; see [below](#emulator-error-per-band) |
 
 Checkpoints trained since November 2026 record the min/max of every input over the training
 library, its units and the library file name. An older checkpoint has none of this, so its
@@ -63,6 +64,37 @@ model = AdditiveComponentModel(..., emulator_param_names=emulator.param_names,
                                param_bounds=bounds, mass_param=spec.mass_param,
                                fixed_params={spec.redshift_param: z_spec})
 ```
+
+## Emulator error per band
+
+A checkpoint carries its own accuracy: the fractional flux error per band
+(`pred/true − 1` on held-out library rows with true flux above 1 nJy), in redshift bins. A
+resolved fit adds it in quadrature to its model-error floor, and because the table travels
+with the checkpoint, a fit cannot pick up another emulator's numbers.
+
+```python
+err = emulator.spec.band_error(redshift=2.13)             # (n_bands,), robust scatter ("mad")
+err, z_bin = emulator.spec.band_error(2.13, return_bin=True)
+floor = np.sqrt(model_err**2 + err**2)                    # per band, for model_error_frac
+```
+
+- The bin is the narrowest one containing the redshift with at least 100 rows in every
+  requested band; otherwise `"all"`. `z_bin=` forces one; `stat=` selects `mad`, `std`, `p95`
+  or `bias`.
+- `emulator.spec.band_errors` is `None` when the checkpoint has no table, and `band_error`
+  then raises. `examples/fit_correlated_field_dja.py` uses the checkpoint's table by default,
+  warns and uses zero if there is none, and takes `--emulator-err-json` as an override.
+- Making a table: `scripts/validate_parrot_emulator.py --emulator CKPT --library LIB --embed`
+  measures it and stores it (on a random library subset, which can include training rows);
+  `scripts/experiments/emulator_lab_v3.py --save-checkpoint` embeds the held-out one;
+  `python -m arachne.emulator annotate CKPT --band-errors table.json` attaches an existing
+  file. `arachne.emulator.validation.band_error_table(pred, true, z, bands)` is the function
+  behind all three.
+- **The table is measured over the whole library.** A view that holds inputs fixed sees one
+  slice of parameter space, where the error can differ. The tables attached to the two
+  existing checkpoints only have bins near z ≈ 2 (`z1.8-2.5`, `z1.5-3.0`) and `all`; at other
+  redshifts they return the all-redshift value, which includes Lyman-break dropouts and is
+  larger. Newly made tables have bins across the whole redshift range.
 
 ## Swapping emulators: `EmulatorView`
 
@@ -129,8 +161,11 @@ The module docstring of
 
 | Checkpoint | Library | Inputs | Notes |
 |---|---|---|---|
-| `parrot_emulator_v2.eqx` | v6 (1M rows, z ≤ 14, Calzetti) | 12 | Production; every measured result so far. No recorded domain (fallback bounds) |
-| `parrot_emulator_v3.eqx` | v7 (10M rows, z ≤ 20, BimodalPacman + Casey12) | 17 | Candidate (`BW4_k128_full`): NIRCam error at z ≈ 2 0.34 % against 0.41 %, detected-band scatter 4× lower. Domain recorded. Not yet used for a science fit |
+| `parrot_emulator_v2.eqx` | v6 (1M rows, z ≤ 14, Calzetti) | 12 | Production; every measured result so far. No recorded domain (fallback bounds). Error table: 20 NIRCam bands |
+| `parrot_emulator_v3.eqx` | v7 (10M rows, z ≤ 20, BimodalPacman + Casey12) | 17 | Candidate (`BW4_k128_full`): NIRCam error at z ≈ 2 0.34 % against 0.41 %, detected-band scatter 4× lower. Domain recorded. Error table: all 54 bands. Not yet used for a science fit |
+
+The copies with the domain and error table attached are the annotated ones (2026-11-18);
+copies made before that lack them, which `python -m arachne.emulator describe` shows.
 
 ## Experiments / training harness
 

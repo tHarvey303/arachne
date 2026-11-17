@@ -37,7 +37,6 @@ SPLIT_SEED = 123
 FLUX_FLOOR = 1e-4  # nJy (or nJy per 1e9 Msun in mass-normalised space)
 ASINH_A = 1.0857362047581294  # 2.5 log10(e)
 MU0 = ASINH_A * float(np.log(2.0 / FLUX_FLOOR))
-Z_WINDOWS = {"z1.8-2.5": (1.8, 2.5), "z1.5-3.0": (1.5, 3.0), "all": (-1.0, 1e9)}
 
 
 def parse_args(argv=None):
@@ -366,7 +365,7 @@ def main(argv=None):  # noqa: C901
     if not args.save_checkpoint:
         ck_path.unlink()
     np.save(out_dir / f"{args.name}_history.npy", np.array(history))
-    report(
+    table = report(
         args,
         out_dir,
         band_names,
@@ -377,6 +376,9 @@ def main(argv=None):  # noqa: C901
         train_s,
         extra={"best_val_mse": best_val, "n_train": int(n_train), "steps": len(history) * chunk},
     )
+    if args.save_checkpoint:
+        # the held-out error table travels with the checkpoint (emulator.spec.band_error)
+        emu.with_metadata(band_errors=table).save(ck_path)
     return 0
 
 
@@ -425,33 +427,21 @@ def report(args, out_dir, band_names, z_te, flux_true, pred_flux, n_params, trai
         for i, b in enumerate(band_names)
     }
 
-    # Fractional flux errors per band (format of perband_fractional_error.json),
-    # for detected rows (true flux > 1 nJy).
-    frac = {}
-    for i, b in enumerate(band_names):
-        frac[b] = {}
-        for wname, (lo, hi) in Z_WINDOWS.items():
-            m = (z_te >= lo) & (z_te <= hi) & (flux_true[:, i] > 1.0)
-            e = pred_flux[m, i] / flux_true[m, i] - 1.0
-            frac[b][wname] = {
-                "bias": float(np.median(e)) if m.any() else None,
-                "mad": float(1.4826 * np.median(np.abs(e - np.median(e)))) if m.any() else None,
-                "std": float(e.std()) if m.any() else None,
-                "p95": float(np.percentile(np.abs(e), 95)) if m.any() else None,
-                "n": int(m.sum()),
-            }
+    # Fractional flux errors per band in redshift bins, for detected rows (true flux
+    # > 1 nJy): the table a checkpoint carries (arachne.emulator.validation).
+    from arachne.emulator.validation import band_error_table
+
+    table = band_error_table(
+        pred_flux,
+        flux_true,
+        z_te,
+        band_names,
+        source=f"emulator_lab_v3.py {args.name} on {Path(args.library).name}, "
+        f"{len(z_te)} held-out rows (split seed {SPLIT_SEED})",
+    )
+    frac = table["bands"]
     with open(out_dir / f"{args.name}_perband_fractional_error.json", "w") as fh:
-        json.dump(
-            {
-                "source": f"emulator_lab_v3.py {args.name} on {Path(args.library).name}, "
-                f"{len(z_te)} held-out rows (split seed {SPLIT_SEED})",
-                "definition": "fractional flux error pred/true - 1 for true flux > 1 nJy; "
-                "bias = median, mad = 1.4826*MAD",
-                "bands": frac,
-            },
-            fh,
-            indent=1,
-        )
+        json.dump(table, fh, indent=1)
     nircam = [b for b in band_names if "NIRCam" in b]
     res["nircam_z2_mad_median"] = float(np.median([frac[b]["z1.8-2.5"]["mad"] for b in nircam]))
     res["nircam_z2_mad_max"] = float(np.max([frac[b]["z1.8-2.5"]["mad"] for b in nircam]))
@@ -463,6 +453,7 @@ def report(args, out_dir, band_names, z_te, flux_true, pred_flux, n_params, trai
         if k not in ("config", "per_band"):
             print(f"  {k:22s}: {v}")
     print(f"saved -> {out_dir / (args.name + '.json')}")
+    return table
 
 
 if __name__ == "__main__":
