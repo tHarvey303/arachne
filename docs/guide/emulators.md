@@ -78,8 +78,8 @@ err, z_bin = emulator.spec.band_error(2.13, return_bin=True)
 floor = np.sqrt(model_err**2 + err**2)                    # per band, for model_error_frac
 ```
 
-- The bin is the narrowest one containing the redshift with at least 100 rows in every
-  requested band; otherwise `"all"`. `z_bin=` forces one; `stat=` selects `mad`, `std`, `p95`
+- Each band uses the narrowest bin containing the redshift in which it has at least 100
+  rows; otherwise `"all"`. The returned label names the commonest bin and any fallbacks. `z_bin=` forces one; `stat=` selects `mad`, `std`, `p95`
   or `bias`.
 - `emulator.spec.band_errors` is `None` when the checkpoint has no table, and `band_error`
   then raises. `examples/fit_correlated_field_dja.py` uses the checkpoint's table by default,
@@ -92,9 +92,14 @@ floor = np.sqrt(model_err**2 + err**2)                    # per band, for model_
   behind all three.
 - **The table is measured over the whole library.** A view that holds inputs fixed sees one
   slice of parameter space, where the error can differ. The tables attached to the two
-  existing checkpoints only have bins near z ≈ 2 (`z1.8-2.5`, `z1.5-3.0`) and `all`; at other
-  redshifts they return the all-redshift value, which includes Lyman-break dropouts and is
-  larger. Newly made tables have bins across the whole redshift range.
+  v2 checkpoint only has bins near z ≈ 2 (`z1.8-2.5`, `z1.5-3.0`) and `all`; at other
+  redshifts it returns the all-redshift value. The v3 table (re-measured 2026-11-18 on its
+  100,000 held-out rows) and any newly made table have bins across the whole redshift range.
+  Above the redshift where a band drops out there are no detected rows, so that band falls
+  back to a wider bin.
+- **Measure in full precision.** On A100/H100 the default float32 matmul (TF32) inflates the
+  measured scatter by about 4 % (up to 9 %); `emulator_lab_v3.py` sets
+  `jax_default_matmul_precision = "highest"` when scoring.
 
 ## Swapping emulators: `EmulatorView`
 
@@ -162,7 +167,7 @@ The module docstring of
 | Checkpoint | Library | Inputs | Notes |
 |---|---|---|---|
 | `parrot_emulator_v2.eqx` | v6 (1M rows, z ≤ 14, Calzetti) | 12 | Production; every measured result so far. No recorded domain (fallback bounds). Error table: 20 NIRCam bands |
-| `parrot_emulator_v3.eqx` | v7 (10M rows, z ≤ 20, BimodalPacman + Casey12) | 17 | Candidate (`BW4_k128_full`): NIRCam error at z ≈ 2 0.34 % against 0.41 %, detected-band scatter 4× lower. Domain recorded. Error table: all 54 bands. Not yet used for a science fit |
+| `parrot_emulator_v3.eqx` | v7 (10M rows, z ≤ 20, BimodalPacman + Casey12) | 17 | Candidate (`BW4_k128_full`): NIRCam error at z ≈ 2 0.34 % against 0.41 %, detected-band scatter 4× lower. Domain recorded. Error table: all 54 bands, 14 redshift bins. Not yet used for a science fit |
 
 The copies with the domain and error table attached are the annotated ones (2026-11-18);
 copies made before that lack them, which `python -m arachne.emulator describe` shows.

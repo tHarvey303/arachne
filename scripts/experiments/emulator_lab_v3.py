@@ -125,8 +125,16 @@ def mag_to_flux(m, mu0=MU0):
 
 
 def predict_checkpoint(path, params, chunk=65536):
-    """Predict nJy fluxes with a saved ParrotEmulatorV2 checkpoint."""
+    """Predict nJy fluxes with a saved ParrotEmulatorV2 checkpoint.
+
+    Full matmul precision is set here so that scoring an existing checkpoint
+    (``--eval-checkpoint``) and scoring a freshly trained one agree: with the GPU default
+    (TF32 on A100/H100) float32 predictions carry an extra ~0.1 % flux error.
+    """
+    import jax
     import jax.numpy as jnp
+
+    jax.config.update("jax_default_matmul_precision", "highest")
 
     from arachne.emulator.parrot_emulator_v2 import load_emulator
 

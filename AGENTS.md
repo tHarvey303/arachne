@@ -363,6 +363,10 @@ Details and numbers: [docs/guide/correlated_fields.md](docs/guide/correlated_fie
   fits need `normalisation="analytic"`.
 - **`float32` gradients are noisy near the mode.** Polish and sample in float64 on datacentre
   GPUs. Checkpoints hold float32 weights and load under x64 (they promote).
+- **Float32 predictions on A100/H100 use TF32 matmul unless told otherwise**, which adds about
+  0.1 % flux error (the per-band scatter at z ≈ 2 rises by 4 % in the median, up to 9 %).
+  Float64 fits are unaffected. When scoring an emulator in float32 set
+  `jax.config.update("jax_default_matmul_precision", "highest")` (the lab and the trainer do).
 - **Checkpoints without a recorded domain get fallback bounds** (see "Emulators: rules").
 - **`EmulatorView` logs the inputs it holds at defaults.** Read that line: a silently fixed
   `fesc` or `f_birth` changes the SED.

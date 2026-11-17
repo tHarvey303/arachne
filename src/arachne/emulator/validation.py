@@ -224,13 +224,15 @@ def select_band_errors(
     Args:
         table: Band-error table.
         band_names: Bands wanted, in order.
-        redshift: Target redshift; picks the bin (see :func:`select_z_bin`).
+        redshift: Target redshift; picks each band's bin (see :func:`select_z_bin`).
         stat: ``"mad"`` (default), ``"std"``, ``"p95"`` or ``"bias"``.
         z_bin: Use this bin instead of choosing one from ``redshift``.
         min_rows: Minimum rows per band when choosing a bin.
 
     Returns:
-        ``(values, bin_name)`` with ``values`` of shape ``(len(band_names),)``.
+        ``(values, bin_label)`` with ``values`` of shape ``(len(band_names),)``.
+        The bin is chosen band by band; ``bin_label`` names the commonest one and,
+        if some bands fell back to another, says how many and to which.
 
     Raises:
         ValueError: If a band is not in the table, ``z_bin`` is unknown, or the
@@ -239,13 +241,23 @@ def select_band_errors(
     missing = [b for b in band_names if b not in table["bands"]]
     if missing:
         raise ValueError(f"the band-error table has no entry for {missing}")
-    name = z_bin or select_z_bin(table, redshift, band_names, stat, min_rows)
-    values = []
+    values, used = [], []
     for band in band_names:
+        name = z_bin or select_z_bin(table, redshift, [band], stat, min_rows)
         stats = table["bands"][band].get(name)
         if stats is None:
             raise ValueError(f"the band-error table has no bin {name!r} for {band!r}")
         if stats.get(stat) is None:
             raise ValueError(f"the band-error table has no {stat!r} for {band!r} in bin {name!r}")
         values.append(float(stats[stat]))
-    return np.asarray(values, dtype=np.float64), name
+        used.append(name)
+    # Bins are chosen per band: above the redshift where a band drops out it has no
+    # detected rows in the narrow bin and falls back to a wider one.
+    main = max(set(used), key=used.count)
+    others = sorted({u for u in used if u != main})
+    label = (
+        main
+        if not others
+        else f"{main} ({len(used) - used.count(main)} bands: {', '.join(others)})"
+    )
+    return np.asarray(values, dtype=np.float64), label

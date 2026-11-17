@@ -241,6 +241,12 @@ def test_select_bin_and_errors():
     assert name == "z4-6" and values.shape == (2,)
     assert values[0] > 3 * values[1]
     assert select_band_errors(table, ["b1"], redshift=5.0, z_bin="all")[1] == "all"
+    sparse = _table()
+    sparse["bands"]["b2"]["z4-6"] = {"bias": None, "mad": None, "std": None, "p95": None, "n": 0}
+    values, label = select_band_errors(sparse, ["b1", "b2", "b3"], redshift=5.0)
+    assert label == "z4-6 (1 bands: all)"  # the dropped-out band falls back on its own
+    assert values[1] == sparse["bands"]["b2"]["all"]["mad"]
+    assert values[2] == sparse["bands"]["b3"]["z4-6"]["mad"]
     with pytest.raises(ValueError, match="no entry"):
         select_band_errors(table, ["nope"])
     legacy = {"bands": {"b1": {"z1.8-2.5": {"mad": 0.004, "n": 500}, "all": {"mad": 0.01}}}}
