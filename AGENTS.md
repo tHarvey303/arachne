@@ -85,8 +85,9 @@ Full description: [docs/guide/emulators.md](docs/guide/emulators.md).
   read a stand-alone `perband_fractional_error.json` for a checkpoint that carries a table (a
   v2 file used with a v3 emulator is the mistake this prevents). `spec.band_errors is None`
   means no table: measure one (`validate_parrot_emulator.py --embed`) or attach one
-  (`python -m arachne.emulator annotate CKPT --band-errors FILE`). The tables on the two
-  existing checkpoints only resolve z ≈ 2; elsewhere they return the all-redshift value.
+  (`python -m arachne.emulator annotate CKPT --band-errors FILE`). The v2 and v3 checkpoints
+  annotated on 2026-11-18 carry held-out tables for all 54 bands across the full redshift
+  range; older copies of the files carry none.
 - **Known parameter sets.** v6 library (checkpoint `parrot_emulator_v2.eqx`, production): 12
   inputs `redshift, log_mass, slope, fesc_lya, dust_bump_amplitude, log10metallicity, Av,
   logsfr_ratio_0..4`; z ≤ 14. v7 library (`parrot_emulator_v3.eqx`, candidate): 17 inputs,

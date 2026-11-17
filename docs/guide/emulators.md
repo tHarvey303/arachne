@@ -91,10 +91,9 @@ floor = np.sqrt(model_err**2 + err**2)                    # per band, for model_
   file. `arachne.emulator.validation.band_error_table(pred, true, z, bands)` is the function
   behind all three.
 - **The table is measured over the whole library.** A view that holds inputs fixed sees one
-  slice of parameter space, where the error can differ. The tables attached to the two
-  v2 checkpoint only has bins near z ≈ 2 (`z1.8-2.5`, `z1.5-3.0`) and `all`; at other
-  redshifts it returns the all-redshift value. The v3 table (re-measured 2026-11-18 on its
-  100,000 held-out rows) and any newly made table have bins across the whole redshift range.
+  slice of parameter space, where the error can differ. Both production tables were
+  re-measured on 2026-11-18 on held-out rows (v2: 50,000 of the v6 library; v3: 100,000 of
+  the v7 library) with bins across the whole redshift range, as any newly made table has.
   Above the redshift where a band drops out there are no detected rows, so that band falls
   back to a wider bin.
 - **Measure in full precision.** On A100/H100 the default float32 matmul (TF32) inflates the
@@ -166,7 +165,7 @@ The module docstring of
 
 | Checkpoint | Library | Inputs | Notes |
 |---|---|---|---|
-| `parrot_emulator_v2.eqx` | v6 (1M rows, z ≤ 14, Calzetti) | 12 | Production; every measured result so far. No recorded domain (fallback bounds). Error table: 20 NIRCam bands |
+| `parrot_emulator_v2.eqx` | v6 (1M rows, z ≤ 14, Calzetti) | 12 | Production; every measured result so far. No recorded domain (fallback bounds). Error table: all 54 bands, 13 redshift bins (NIRCam at z ≈ 2: 0.40 %) |
 | `parrot_emulator_v3.eqx` | v7 (10M rows, z ≤ 20, BimodalPacman + Casey12) | 17 | Candidate (`BW4_k128_full`): NIRCam error at z ≈ 2 0.34 % against 0.41 %, detected-band scatter 4× lower. Domain recorded. Error table: all 54 bands, 14 redshift bins. Not yet used for a science fit |
 
 The copies with the domain and error table attached are the annotated ones (2026-11-18);
