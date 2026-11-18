@@ -44,6 +44,11 @@ INPUTS = {
     k: Path(os.environ.get(f"ARACHNE_FRONTPAGE_{k.upper()}", v)) for k, v in _DEFAULTS.items()
 }
 
+# Wall-clock times on one NVIDIA H100, from the run logs (not stored in the inputs):
+# (a) median per galaxy, nested sampling with 500 live points; (b) mode search 304 s plus
+# nested sampling 2952 s; (c) Newton mode 1003 s, Hessian 145 s, four NUTS chains 6187 s.
+TIMINGS = {"catalogue": "7 s per galaxy", "components": "54 min", "fields": "2.0 h"}
+
 # ---- house style (Tom's matplotlib style: Charter, boxed frame, printed-ink colours) ----
 INK, INK2, MUTED = "#111111", "#333333", "#8a8a8a"
 INDIGO, CELADON, OXBLOOD, SKY, MUSTARD = "#2f3b73", "#7fa08a", "#7a1f2b", "#7fb3d5", "#c9a84c"
@@ -358,7 +363,8 @@ def panel_catalogue(fig, spec):
     ax.set_xlabel("Redshift, COSMOS2020 (LePhare)")
     ax.set_ylabel("Redshift, arachne")
     ax.text(0.05, 0.95, f"{ok.sum()} galaxies, {n_bands} bands\n"
-            rf"$\sigma_{{\rm NMAD}}$ = {nmad:.3f}" f"\noutliers {100 * outliers:.1f}%",
+            rf"$\sigma_{{\rm NMAD}}$ = {nmad:.3f}" f"\noutliers {100 * outliers:.1f}%"
+            f"\n{TIMINGS['catalogue']} (H100)",
             transform=ax.transAxes, ha="left", va="top", fontsize=7.5, color=INK2,
             linespacing=1.4)  # fmt: skip
     info = {"n": int(ok.sum()), "bands": n_bands, "nmad": float(nmad), "outliers": float(outliers),
@@ -385,7 +391,7 @@ def main(output):
     fig.text(
         axes_c[-1].get_position().x1, box.y1 + 0.013,
         f"{info_c['id']}, z = {info_c['z']:.2f}: {info_c['bands']} bands, "
-        f"{info_c['n_params']:,} parameters, sampled with whitened NUTS",
+        f"{info_c['n_params']:,} parameters, whitened NUTS, {TIMINGS['fields']} on an H100",
         fontsize=7.5, ha="right", va="bottom", color=INK2,
     )  # fmt: skip
     box = axes_b[0].get_position()
@@ -393,8 +399,8 @@ def main(output):
              ha="left", va="bottom", color=INK)  # fmt: skip
     fig.text(
         axes_b[-1].get_position().x1, box.y1 + 0.013,
-        f"{info_b['id']}, z = {info_b['z']:.2f}: two S\u00e9rsic components, "
-        f"{info_b['bands']} bands, nested sampling",
+        f"{info_b['id']}, z = {info_b['z']:.2f}: "
+        f"{info_b['bands']} bands, nested sampling, {TIMINGS['components']} on an H100",
         fontsize=7.5, ha="right", va="bottom", color=INK2,
     )  # fmt: skip
     fig.canvas.draw()
@@ -404,7 +410,7 @@ def main(output):
     box_a = ax_a.get_position()
     fig.text(box_a.x0, box.y1 + 0.012, "(a)  Catalogues", fontweight="bold", fontsize=9,
              ha="left", va="bottom", color=INK)  # fmt: skip
-    cax = fig.add_axes([box_a.x0 + 0.055 * box_a.width, box_a.y0 + 0.685 * box_a.height,
+    cax = fig.add_axes([box_a.x0 + 0.055 * box_a.width, box_a.y0 + 0.625 * box_a.height,
                         0.36 * box_a.width, 0.011])  # fmt: skip
     cb = fig.colorbar(sc_a, cax=cax, orientation="horizontal", ticks=[8, 9, 10, 11])
     cb.outline.set_linewidth(0.4)
