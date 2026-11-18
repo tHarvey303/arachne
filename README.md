@@ -7,6 +7,14 @@ them for GPU-accelerated Bayesian inference: one integrated SED, a catalogue of 
 galaxies, or a spatially resolved multi-band image with PSF convolution. The pipeline is pure
 JAX/Equinox, so it is differentiable end to end, JIT-compiled, and needs no PyTorch.
 
+![Three ways arachne fits galaxies: a catalogue, light components, and parameter maps](docs/figures/arachne_frontpage.png)
+
+*(a) Photometric redshifts of 400 COSMOS2020 galaxies from 12-band photometry, against the
+survey's LePhare values. (b) A JWST/NIRCam galaxy from JADES fitted as two Sérsic components,
+each with its own SED. (c) Maps of stellar mass, dust and age for a JADES spiral at z = 2.1,
+fitted with correlated-field priors. Made by
+[docs/figures/make_frontpage.py](docs/figures/make_frontpage.py).*
+
 Status: alpha (v0.1.0), under active development. Example command-line flags change; check
 `--help`.
 

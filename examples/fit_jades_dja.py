@@ -1411,6 +1411,53 @@ def safe_figure(fn, *fn_args, **fn_kwargs):
         return None
 
 
+def save_figure_products(fm, data, emulator, samples, dec, median_model, outdir) -> None:
+    """Write ``figure_products.npz``: the arrays a decomposition figure needs.
+
+    Single-grid fits only.  Holds the data cube, variance and mask, the posterior-median
+    model cube, the PSF-convolved image of every component (median over up to 48 draws,
+    without sky) and the decoded per-draw component SEDs and parameters, so a figure can be
+    made without the emulator or a GPU.
+    """
+    if is_multiresolution(fm):
+        return
+    model = fm.spatial_model
+    n_spatial = model.n_params
+    has_nuisance = fm.nuisance is not None and fm.nuisance.n_params > 0
+
+    def convolved_components(theta):
+        comps = model.component_images(theta[:n_spatial], emulator)  # (K, B, H, W)
+        shifts = fm.nuisance.split(theta[n_spatial:])["shifts"] if has_nuisance else None
+        return jax.vmap(lambda im: fm.convolver(im, shifts=shifts))(comps)
+
+    step = max(1, int(samples.shape[0]) // 48)
+    draws = samples[::step][:48]
+    conv = np.median(np.asarray(jax.lax.map(jax.jit(convolved_components), draws)), axis=0)
+    obs_flux, obs_var, obs_mask = observed_bands(fm)
+    np.savez_compressed(
+        outdir / "figure_products.npz",
+        target=str(data.target.id),
+        redshift=float(data.target.z),
+        bands=np.array(list(data.bands)),
+        pixel_scale=float(fm.observation.pixel_scale),
+        flux=np.stack(obs_flux),
+        variance=np.stack(obs_var),
+        mask=np.stack(obs_mask),
+        model_median=np.stack(median_model),
+        components_convolved=conv,
+        component_seds=dec["seds"],
+        in_frame_frac=dec["in_frame_frac"],
+        mu=dec["mu"],
+        sigma=dec["sigma"],
+        rho=dec["rho"],
+        sersic_n=dec["n_sersic"],
+        sps=dec["sps"],
+        sps_names=np.array(list(model.sps_param_names)),
+        sky=dec.get("sky", np.zeros((1, len(data.bands)))),
+    )
+    print(f"   saved {outdir / 'figure_products.npz'}")
+
+
 def make_products(
     fm: ForwardModel,
     data: Dataset,
@@ -1462,6 +1509,7 @@ def make_products(
     dec = decode_samples(fm, samples, emulator)
     kpc = kpc_per_arcsec(data.target.z)
     K = model.n_components
+    safe_figure(save_figure_products, fm, data, emulator, samples, dec, median_model, outdir)
 
     # Total stellar mass: components add in linear mass.
     mass_col = model.sps_param_names.index("log_mass")
