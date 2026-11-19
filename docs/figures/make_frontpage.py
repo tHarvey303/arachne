@@ -11,6 +11,11 @@ and the outputs of ``scripts/fit_catalogue.py --sampler nss``, ``examples/fit_ja
 Set ``ARACHNE_FRONTPAGE_CATALOGUE``, ``ARACHNE_FRONTPAGE_CATALOGUE_FIT``,
 ``ARACHNE_FRONTPAGE_COMPONENTS`` and ``ARACHNE_FRONTPAGE_FIELDS`` to their paths.
 
+The bulge and disk spectra in (b) come from ``arachne.postprocess``: the Synthesizer model of
+the emulator's library, evaluated on posterior draws.  That needs the emulator checkpoint with
+its simulator recipe (``ARACHNE_FRONTPAGE_EMULATOR``) and the SPS grid
+(``ARACHNE_SPS_GRID_DIR``); without them the panel shows the photometry alone.
+
 Usage:  python make_frontpage.py [OUTPUT.png]
 """
 
@@ -39,6 +44,7 @@ _DEFAULTS = {
     "catalogue_fit": "catalogue/fits_nss.h5",
     "components": "components/figure_products.npz",
     "fields": "fields/results.h5",
+    "emulator": "emulator/parrot_emulator_v2.eqx",
 }
 INPUTS = {
     k: Path(os.environ.get(f"ARACHNE_FRONTPAGE_{k.upper()}", v)) for k, v in _DEFAULTS.items()
@@ -234,6 +240,42 @@ def panel_fields(fig, spec):
 # ---------------------------------------------------------------------------------------
 
 
+def component_spectra(d, n_draws=80):
+    """Observed-frame spectra of each component from the simulator, or ``None`` if unavailable.
+
+    Returns:
+        ``(wavelength_um (L,), spectra (S, K, L) in uJy)`` for ``n_draws`` evenly spaced
+        posterior draws: the Synthesizer model of the emulator's library at each component's
+        SPS parameters.
+    """
+    from arachne.postprocess import recipe_from_checkpoint
+
+    if not INPUTS["emulator"].exists():
+        return None
+    recipe = recipe_from_checkpoint(INPUTS["emulator"])
+    if recipe is None:
+        return None
+    from arachne.postprocess.simulator import Simulator
+
+    try:
+        sim = Simulator(recipe)
+    except FileNotFoundError as err:
+        print(f"no component spectra: {err}")
+        return None
+    names = [str(x) for x in d["sps_names"]]
+    draws = np.linspace(0, len(d["sps"]) - 1, n_draws).round().astype(int)
+    out, lam = [], None
+    for s in draws:
+        row = []
+        for k in range(d["sps"].shape[1]):
+            params = dict(zip(names, d["sps"][s, k]), redshift=float(d["redshift"]))
+            res = sim.evaluate(params, derived=False)
+            lam = res["wavelength_um"]
+            row.append(res["spectrum"] / 1e3)
+        out.append(row)
+    return lam, np.array(out)
+
+
 def panel_components(fig, spec):
     """Data, model, the two PSF-convolved components, residual, and the component SEDs."""
     d = np.load(INPUTS["components"])
@@ -277,12 +319,28 @@ def panel_components(fig, spec):
     lam = np.array([PIVOT_UM[b] for b in bands])
     seds = d["component_seds"] / 1e3  # (S, K, B) in uJy
     styles = [("bulge", OXBLOOD, "-"), ("disk", INDIGO, "--")]
-    for k, (name, color, ls) in enumerate(styles):
-        lo, med, hi_ = np.percentile(seds[:, k], [16, 50, 84], axis=0)
-        ax.fill_between(lam, lo, hi_, color=color, alpha=0.25, lw=0)
-        ax.plot(lam, med, color=color, ls=ls, marker="o", ms=3, label=name)
+    spectra = component_spectra(d)
     total = np.median(seds.sum(1), axis=0)
-    ax.plot(lam, total, color=INK, lw=1.2, label="bulge + disk")
+    if spectra is None:  # photometry only, joined by lines
+        for k, (name, color, ls) in enumerate(styles):
+            lo, med, hi_ = np.percentile(seds[:, k], [16, 50, 84], axis=0)
+            ax.fill_between(lam, lo, hi_, color=color, alpha=0.25, lw=0)
+            ax.plot(lam, med, color=color, ls=ls, marker="o", ms=3, label=name)
+        ax.plot(lam, total, color=INK, lw=1.2, label="bulge + disk")
+    else:  # full spectra of each component, with the fitted photometry as points
+        wav, spec_draws = spectra
+        keep = (wav > 0.8) & (wav < 4.9)
+        wav, spec_draws = wav[keep], spec_draws[:, :, keep]
+        ax.plot(wav, np.median(spec_draws.sum(1), axis=0), color=MUTED, lw=0.6, zorder=1,
+                label="bulge + disk")  # fmt: skip
+        for k, (name, color, _) in enumerate(styles):
+            lo, med, hi_ = np.percentile(spec_draws[:, k], [16, 50, 84], axis=0)
+            ax.fill_between(wav, lo, hi_, color=color, alpha=0.25, lw=0, zorder=2)
+            ax.plot(wav, med, color=color, lw=0.8, zorder=3)
+            ax.plot(lam, np.median(seds[:, k], axis=0), ls="none", marker="o", ms=3.6,
+                    mfc=color, mec="white", mew=0.5, zorder=4)  # fmt: skip
+            ax.plot([], [], color=color, lw=0.9, marker="o", ms=3.6, mec="white", mew=0.5,
+                    label=name)  # fmt: skip
     valid = d["mask"] > 0
     obs = np.array([data[i][valid[i]].sum() for i in range(len(bands))]) / 1e3
     mod = np.array([model[i][valid[i]].sum() for i in range(len(bands))]) / 1e3
@@ -290,9 +348,14 @@ def panel_components(fig, spec):
             label="data (same pixels)", zorder=5)  # fmt: skip
     ax.set_xscale("log")
     ax.set_yscale("log")
-    ax.set_ylim(0.7, 14)
-    ax.set_yticks([1, 2, 5, 10])
-    ax.set_yticklabels(["1", "2", "5", "10"])
+    if spectra is None:
+        ax.set_ylim(0.7, 14)
+        ticks = [1, 2, 5, 10]
+    else:  # room for the emission lines above and the legend below
+        ax.set_ylim(0.4, 36)
+        ticks = [0.5, 1, 2, 5, 10, 20]
+    ax.set_yticks(ticks)
+    ax.set_yticklabels([f"{t:g}" for t in ticks])
     ax.yaxis.set_minor_formatter(matplotlib.ticker.NullFormatter())
     ax.set_xticks([1, 1.5, 2, 3, 4])
     ax.set_xticklabels(["1", "1.5", "2", "3", "4"])
@@ -300,7 +363,10 @@ def panel_components(fig, spec):
     ax.set_xlim(0.85, 4.75)
     ax.set_xlabel(r"observed wavelength  [$\mu$m]")
     ax.set_ylabel(r"flux density  [$\mu$Jy]")
-    ax.legend(loc="lower right", ncol=2, handlelength=2.2, columnspacing=1.2)
+    leg = ax.legend(loc="lower right", ncol=2, handlelength=2.2, columnspacing=1.2,
+                    frameon=spectra is not None, framealpha=0.85, edgecolor="none",
+                    borderpad=0.3)  # fmt: skip
+    leg.set_zorder(6)
     med = lambda x: np.median(x, axis=0)  # noqa: E731
     r_e = med(np.sqrt(d["sigma"][:, :, 0] * d["sigma"][:, :, 1]))
     kpc = Planck18.kpc_proper_per_arcmin(float(d["redshift"])).value / 60.0
@@ -312,7 +378,8 @@ def panel_components(fig, spec):
         for k, (name, _, _) in enumerate(styles)
     )
     ax.text(0.025, 0.93, txt, transform=ax.transAxes, ha="left", va="top", fontsize=7.5, color=INK2,
-            linespacing=1.5)  # fmt: skip
+            linespacing=1.5, zorder=6,
+            bbox=dict(fc="white", ec="none", alpha=0.85, pad=2.0))  # fmt: skip
     info = {"id": "JADES 47870", "z": float(d["redshift"]), "bands": len(bands),
             "n_params": 43, "chi_im": im}  # fmt: skip
     return axes, ax, info
