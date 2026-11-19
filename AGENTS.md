@@ -33,6 +33,7 @@ is JAX: differentiable, jit-able, no PyTorch.
 | `arachne.results`, `arachne.viz`, `arachne.gui` | [docs/guide/results.md](docs/guide/results.md), [docs/design/results_bundle_gui_spec.md](docs/design/results_bundle_gui_spec.md) |
 | DJA / JADES data, real-galaxy drivers | [docs/guide/real_data.md](docs/guide/real_data.md), "Data layer facts" below |
 | Catalogue scripts | [docs/guide/catalogue_fitting.md](docs/guide/catalogue_fitting.md) |
+| Spectra, surviving mass, SFR or ages from a fit; the simulator recipe | [docs/guide/postprocessing.md](docs/guide/postprocessing.md) |
 
 ## Commands
 
@@ -152,6 +153,7 @@ Full description: [docs/guide/emulators.md](docs/guide/emulators.md).
 | `results/reader.py` | `load_bundle`, `ResultsBundle` (`band_image(b, kind, stat)`, `cube`, `band_draws`, `model_draws`, `param_map(name, stat)`, `available_param_stats`, `pixel_param_draws`, `scalar_draws`, `chi2_red_per_band`, `noise_scale`, `last_fallback`), `ComponentsView`; draws lazy, MAP fallback without draws |
 | `results/regions.py`, `results/display.py` | `Region` (pixel/box/circle/polygon/from_mask, geometry), `RegionSED` (`model_percentiles`, `chi`, `frac_residual`), `region_sed`, `total_sed`, `pixel_sed`, `component_seds`, `component_region_seds`, `region_param_summary`, `detection_region`; `percentile_limits`, `stretch`, `rgb_composite` |
 | `results/metadata.py`, `results/provenance.py`, `results/testing.py`, `results/cli.py` | `PIVOT_UM`, `pivot_um`, `DEFAULT_LABELS`, `short_band_name`; `collect_provenance`; `make_synthetic_content/bundle("field"\|"additive"\|"degraded")`; `python -m arachne.results info\|validate` |
+| `postprocess/recipe.py`, `postprocess/simulator.py`, `postprocess/bundle.py` | Optional, no JAX. Simulator recipe (JSON in the checkpoint, `emulator.spec.simulator`; `recipe_from_library`, `PRESETS`, `continuity_agebins`); `Simulator` (Synthesizer model of the training library: spectrum, photometry, derived quantities) and `check_recipe` (reference library rows); `postprocess_bundle` / `load_postprocess` / `PostprocessResult` (`postprocess` group in a bundle). All Synthesizer API use is in `simulator.py`. See `docs/guide/postprocessing.md` |
 | `viz/` (`sed`, `maps`, `images`, `diagnostics`, `summary`, `style`, `cli`) | Matplotlib figures from a bundle, no JAX: `plot_sed`, `plot_total_sed`, `plot_region_seds`, `plot_component_seds`, `plot_param_maps`, `plot_band_mosaic`, `plot_rgb`, `plot_chi_histograms`, `plot_chi2_per_band`, `plot_summary_page`, `save_all`; `python -m arachne.viz` / `arachne-plots` |
 | `gui/` (`app`, `panels`, `state`, `cli`) | Bokeh viewer for a bundle, no JAX: `view`, `ArachneViewer`; numpy-only logic in `gui/state.py`; `python -m arachne.gui` / `arachne-gui` |
 | `priors/specs.py`, `priors/spatial.py`, `priors/physical.py` | `DEFAULT_PRIORS`, `default_prior`, `resolve_prior_specs(..., defaults=)`, `build_log_prior`, `build_component_log_prior`, `prior_config_template`, `sigmoid_log_jacobian`; spatial and physical prior helpers |
@@ -350,6 +352,12 @@ Details and numbers: [docs/guide/correlated_fields.md](docs/guide/correlated_fie
 
 ## Gotchas
 
+- **`log_mass` is the stellar mass formed, not the surviving mass.** The libraries are
+  generated with `initial_mass`, so every fitted mass (maps, `total_log_mass`) is formed mass;
+  the surviving mass is ~0.25 dex lower at z ≈ 2 and comes from `arachne.postprocess`.
+- **The simulator needs the exact SPS grid file of the library.** Another build of the same
+  grid changes nebular fluxes by ~1 % and surviving masses by up to 0.02 dex. Run
+  `python -m arachne.emulator check-simulator CKPT` before trusting post-processed output.
 - **`pip install`ing anything that touches `jax`/`jaxlib` can silently break GPU support.** The
   CUDA plugin (`jax-cuda12-plugin`, `jax-cuda12-pjrt`) must match `jaxlib` exactly; on a
   mismatch JAX does not error, it falls back to CPU. Verify on a GPU node with

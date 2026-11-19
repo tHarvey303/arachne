@@ -12,6 +12,7 @@ from . import style
 from .diagnostics import plot_chi2_per_band, plot_chi_histograms
 from .images import plot_band_mosaic, plot_rgb
 from .maps import plot_param_maps, plot_regions
+from .postprocess import plot_postprocess
 from .sed import plot_component_seds, plot_region_seds, plot_sed, plot_total_sed
 from .style import band_colors, region_color
 from .summary import plot_summary_page, save_all
@@ -23,6 +24,7 @@ __all__ = [
     "plot_component_seds",
     "plot_param_maps",
     "plot_regions",
+    "plot_postprocess",
     "plot_band_mosaic",
     "plot_rgb",
     "plot_chi_histograms",

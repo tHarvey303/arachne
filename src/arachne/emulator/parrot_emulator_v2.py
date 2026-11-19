@@ -204,6 +204,7 @@ class ParrotEmulatorV2(SPSEmulator):
             redshift_param=names[cfg["i_z"]] if cfg.get("i_z", -1) >= 0 else None,
             meta={k: cfg[k] for k in ("library", "trained") if k in cfg},
             band_errors=cfg.get("band_errors"),
+            simulator=cfg.get("simulator"),
         )
 
     def with_metadata(self, **metadata) -> "ParrotEmulatorV2":
@@ -214,7 +215,9 @@ class ParrotEmulatorV2(SPSEmulator):
                 ``param_defaults``, ``param_priors``, ``param_units`` (dicts keyed
                 by parameter name), ``library`` / ``trained`` (strings) and
                 ``band_errors`` (a per-band error table, see
-                :mod:`arachne.emulator.validation`; it replaces any existing one).
+                :mod:`arachne.emulator.validation`; it replaces any existing one)
+                and ``simulator`` (the recipe of the SPS model behind the library,
+                see :mod:`arachne.postprocess.recipe`; it replaces any existing one).
 
         Returns:
             The same emulator with the entries merged into its configuration.
@@ -238,10 +241,18 @@ class ParrotEmulatorV2(SPSEmulator):
 
                 check_band_error_table(value, self._band_names)
                 cfg[key] = json.loads(json.dumps(value))
+            elif key == "simulator":
+                from arachne.postprocess.recipe import check_recipe_structure
+
+                check_recipe_structure(value)
+                missing = [p for p in self._param_names if p not in value["param_names"]]
+                if missing:
+                    raise ValueError(f"simulator recipe lacks the emulator inputs {missing}")
+                cfg[key] = json.loads(json.dumps(value))
             elif key in ("library", "trained"):
                 cfg[key] = str(value)
             else:
-                known = allowed + ("band_errors", "library", "trained")
+                known = allowed + ("band_errors", "simulator", "library", "trained")
                 raise ValueError(f"unknown metadata key {key!r}; use {known}")
         new = object.__new__(type(self))
         for name in self.__dataclass_fields__:

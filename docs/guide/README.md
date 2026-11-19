@@ -11,6 +11,7 @@ introduction; [AGENTS.md](../../AGENTS.md) has the module map, design rules and 
 | [correlated_fields.md](correlated_fields.md) | Per-pixel parameter maps (`CorrelatedFieldMap`): model, inference pipeline, measured results, demo flags |
 | [samplers.md](samplers.md) | Which sampler when; whitening, mode polish, multimodality |
 | [results.md](results.md) | Results bundles (HDF5), static plots (`arachne.viz`), browser viewer (`arachne.gui`) |
+| [postprocessing.md](postprocessing.md) | Rebuilding the SPS model behind an emulator (simulator recipe in the checkpoint): spectra, surviving mass, SFR, ages from a fitted bundle |
 | [real_data.md](real_data.md) | DJA cutouts, JADES redshifts and PSFs, the real-data and resolved-demo drivers |
 
 Design notes with the measurements behind the choices: [`../design/`](../design/).

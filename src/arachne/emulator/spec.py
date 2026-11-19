@@ -172,6 +172,10 @@ class EmulatorSpec:
             bins, measured on held-out library rows (see
             :mod:`arachne.emulator.validation`), or ``None`` if the checkpoint
             carries none.  Read it with :meth:`band_error`.
+        simulator: Recipe of the SPS model the training library was generated
+            with (see :mod:`arachne.postprocess.recipe`), or ``None``.  It lets
+            :mod:`arachne.postprocess` rebuild spectra and derived quantities
+            from a fit.  The recipe uses the library's own parameter names.
     """
 
     param_names: tuple[str, ...]
@@ -186,6 +190,7 @@ class EmulatorSpec:
     sfh_ratio_params: tuple[str, ...]
     meta: dict = field(default_factory=dict)
     band_errors: dict | None = None
+    simulator: dict | None = None
 
     # -- construction ----------------------------------------------------------
     @classmethod
@@ -202,6 +207,7 @@ class EmulatorSpec:
         redshift_param: str | None = None,
         meta: Mapping | None = None,
         band_errors: Mapping | None = None,
+        simulator: Mapping | None = None,
     ) -> "EmulatorSpec":
         """Build a spec from names, filling every gap from :data:`KNOWN_PARAMS`.
 
@@ -216,6 +222,7 @@ class EmulatorSpec:
             redshift_param: Redshift input; default: the input with role ``"redshift"``.
             meta: Provenance entries.
             band_errors: Per-band error table (:mod:`arachne.emulator.validation`).
+            simulator: Simulator recipe (:mod:`arachne.postprocess.recipe`).
 
         Returns:
             The completed spec.  A parameter with neither recorded nor known
@@ -260,6 +267,7 @@ class EmulatorSpec:
             sfh_ratio_params=tuple(p for p in names if infos[p].role == "sfh_ratio"),
             meta={"bounds_source": source, **dict(meta or {})},
             band_errors=dict(band_errors) if band_errors else None,
+            simulator=dict(simulator) if simulator else None,
         )
 
     # -- queries -----------------------------------------------------------------
@@ -421,6 +429,14 @@ class EmulatorSpec:
             lines.append(
                 f"band errors: {len(table)} bands, {len(bins)} redshift bins "
                 f"({self.band_errors.get('source', '') or 'no source recorded'})"
+            )
+        if self.simulator is None:
+            lines.append("simulator: none recorded")
+        else:
+            sim = self.simulator
+            lines.append(
+                f"simulator: {sim.get('engine', '?')} recipe, grid {sim.get('grid_name', '?')}, "
+                f"{len(sim.get('reference', {}).get('params', []))} reference rows"
             )
         for p in self.param_names:
             b = self.param_bounds.get(p)
