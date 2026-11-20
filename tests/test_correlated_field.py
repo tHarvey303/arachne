@@ -11,8 +11,10 @@ import pytest
 from arachne.data.observation import ObservationCube
 from arachne.data.psf import PSFModel
 from arachne.emulator.base import SPSEmulator
+from arachne.forward_model.nuisance import NuisanceModel
 from arachne.forward_model.pipeline import ForwardModel
 from arachne.inference.initialisation import find_map
+from arachne.inference.laplace import make_hessian_fn
 from arachne.spatial.correlated_field import (
     CorrelatedFieldMap,
     gaussian_from_marginal,
@@ -267,6 +269,31 @@ def _disk(H, W, peak=8.0, rd=5.0):
 
 class TestForwardModel:
     """Integration with ForwardModel, the mass start and blind MAP recovery."""
+
+    def test_cached_hessian_with_nuisance_and_model_error(self, emulator):
+        """The factored Hessian includes off-mode curvature and nuisance cross terms."""
+        with jax.enable_x64(True):
+            model = make_model(H=5, W=7, mean_maps={"log_mass": 6.0})
+            _, obs, psf = _mock(emulator, model, H=5, W=7)
+            nuis = NuisanceModel(
+                len(BANDS), fit_shifts=True, fit_noise_scale=True, shift_reference_band=0
+            )
+            fm = ForwardModel.build(
+                obs,
+                psf,
+                model,
+                emulator,
+                model_error_frac=np.linspace(0.03, 0.06, len(BANDS)),
+                nuisance=nuis,
+            )
+            theta = fm.initial_theta_from_spatial(model.initial_theta())
+            chunked = make_hessian_fn(fm, chunk_size=16)
+            direct = make_hessian_fn(fm)
+            offset = 0.1 * jax.random.normal(jax.random.key(1), theta.shape)
+            for position in (theta, theta + offset):
+                np.testing.assert_allclose(
+                    chunked(position), direct(position), rtol=1e-9, atol=1e-8
+                )
 
     def test_log_posterior_finite_gradient(self, emulator):
         """Log posterior finite gradient."""

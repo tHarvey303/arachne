@@ -702,7 +702,9 @@ def plot_images(obs, model_img, sigma, path, show=("F090W", "F200W", "F444W")):
 # ---------------------------------------------------------------------------
 
 
-def polish_mode(fm, theta, chunk, precond="dense", max_iter=100, tol=1e-2, key=None, M0=None):
+def polish_mode(
+    fm, theta, chunk, precond="dense", max_iter=100, tol=1e-2, key=None, M0=None, hess_fn=None
+):
     """Trust-region Newton (``arachne.inference.newton``) from an Adam MAP to a local mode.
 
     ``precond``: ``dense`` builds ``M = V |Lambda| V^T`` from the full Hessian at the start
@@ -710,7 +712,8 @@ def polish_mode(fm, theta, chunk, precond="dense", max_iter=100, tol=1e-2, key=N
     its cap; ``diag`` uses a Hutchinson diagonal; ``fourier`` the diagonal Fisher of the
     field basis (``arachne.inference.field_precond.fisher_preconditioner``; experimental,
     measured slower than the identity on the toy); ``none`` the identity.  ``M0`` is a
-    ready-made initial preconditioner (skips the first build).
+    ready-made initial preconditioner (skips the first build). ``hess_fn`` can be reused
+    for the saddle check and Laplace covariance.
     """
     from arachne.inference.laplace import make_hessian_fn
     from arachne.inference.newton import (
@@ -724,7 +727,8 @@ def polish_mode(fm, theta, chunk, precond="dense", max_iter=100, tol=1e-2, key=N
 
     refresh = None
     if precond == "dense":
-        hess_fn = make_hessian_fn(fm, chunk_size=chunk)
+        if hess_fn is None:
+            hess_fn = make_hessian_fn(fm, chunk_size=chunk)
 
         def refresh(t):
             t0 = time.time()
@@ -858,7 +862,7 @@ def laplace_posterior(fm, model, theta_map, n_samples, chunk, key, max_newton=30
         Dict with the polished theta, ``param_maps`` samples (S, N, H, W), the
         Laplace evidence and diagnostics.
     """
-    from arachne.inference.laplace import laplace_covariance, make_hessian_fn
+    from arachne.inference.laplace import laplace_covariance_from_eigh, make_hessian_fn
     from arachne.inference.newton import Preconditioner, negative_curvature_step
 
     dtype = jnp.zeros(()).dtype
@@ -868,7 +872,9 @@ def laplace_posterior(fm, model, theta_map, n_samples, chunk, key, max_newton=30
     t_newton = t_hess = 0.0
     for attempt in range(max_escapes + 1):
         t0 = time.time()
-        newton = polish_mode(fm, theta, chunk, precond=precond, max_iter=max_newton, M0=M0)
+        newton = polish_mode(
+            fm, theta, chunk, precond=precond, max_iter=max_newton, M0=M0, hess_fn=hess_fn
+        )
         theta = newton.theta
         history += newton.history
         t_newton += time.time() - t0
@@ -876,7 +882,8 @@ def laplace_posterior(fm, model, theta_map, n_samples, chunk, key, max_newton=30
         hess = hess_fn(theta)
         t_hess += time.time() - t0
         # Saddle check: CG stopping on an interior step never sees weak negative curvature.
-        evals, evecs = jnp.linalg.eigh(0.5 * (jnp.asarray(hess) + jnp.asarray(hess).T))
+        evals, evecs = np.linalg.eigh(hess)
+        del hess
         if attempt == max_escapes or float(evals[0]) >= 0.0:
             break
         cand, gain, n_neg = negative_curvature_step(neg_lp, theta, evals, evecs)
@@ -886,10 +893,14 @@ def laplace_posterior(fm, model, theta_map, n_samples, chunk, key, max_newton=30
         if gain < 1e-2:
             break
         lam = jnp.abs(evals)
-        M0 = Preconditioner("dense", jnp.maximum(lam, jnp.maximum(1e-8 * lam.max(), 1e-6)), evecs)
+        M0 = Preconditioner(
+            "dense",
+            jnp.maximum(lam, jnp.maximum(1e-8 * lam.max(), 1e-6)),
+            jnp.asarray(evecs, dtype),
+        )
         theta = cand
-    del evals, evecs
-    cov, chol, info = laplace_covariance(hess, return_info=True)
+    cov, chol, info = laplace_covariance_from_eigh(evals, evecs, return_info=True)
+    del cov, evecs
     # Laplace evidence: log Z ~ log p(d, theta*) + d/2 log 2pi - 1/2 log det H.  The
     # Gaussian likelihood omits its data-only normalisation, so compare log Z only
     # between models fitted to the same data (e.g. different ell / nu).

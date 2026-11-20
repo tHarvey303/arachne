@@ -80,6 +80,7 @@ __all__ = [
     "make_hessian_fn",
     "hessian_neg_log_post",
     "laplace_covariance",
+    "laplace_covariance_from_eigh",
     "WhitenedLogDensity",
     "laplace_whitening",
     "posterior_whitening",
@@ -110,7 +111,8 @@ def make_hessian_fn(fm: Any, chunk_size: int | None = None) -> Callable[[Any], n
     :class:`~arachne.spatial.correlated_field.CorrelatedFieldMap` with
     thousands of parameters and a per-pixel emulator).  With ``chunk_size``
     set, the Hessian is assembled ``chunk_size`` rows at a time from vmapped
-    Hessian-vector products (forward-over-reverse), at the same total cost.
+    Hessian-vector products. Correlated-field fits reuse the emulator derivatives
+    at the evaluation point across all chunks.
 
     Args:
         fm: Object exposing ``log_posterior(theta) -> scalar`` (a
@@ -134,8 +136,16 @@ def make_hessian_fn(fm: Any, chunk_size: int | None = None) -> Callable[[Any], n
         return hessian_at
 
     chunk = int(chunk_size)
-    grad_fn = jax.grad(lambda t: -fm.log_posterior(t))
-    hvp_rows = jax.jit(jax.vmap(lambda t, v: jax.jvp(grad_fn, (t,), (v,))[1], in_axes=(None, 0)))
+    from arachne.inference.field_curvature import field_hvp_builder
+
+    build_hvp = field_hvp_builder(fm)
+    if build_hvp is None:
+        grad_fn = jax.grad(lambda t: -fm.log_posterior(t))
+        hvp_rows = jax.jit(
+            jax.vmap(lambda t, v: jax.jvp(grad_fn, (t,), (v,))[1], in_axes=(None, 0))
+        )
+    else:
+        hvp_rows = jax.jit(lambda hvp, basis: jax.vmap(hvp)(basis))
 
     def hessian_at_chunked(theta) -> np.ndarray:
         dtype = _model_dtype(fm)
@@ -144,6 +154,7 @@ def make_hessian_fn(fm: Any, chunk_size: int | None = None) -> Callable[[Any], n
         h = np.empty((d, d), dtype=np.float64)
         n_chunks = -(-d // chunk)
         t_start = time.time()
+        hvp_arg = theta if build_hvp is None else build_hvp(theta)
         for i_chunk, start in enumerate(range(0, d, chunk)):
             if i_chunk and (i_chunk % max(1, n_chunks // 10) == 0):
                 elapsed = time.time() - t_start
@@ -155,7 +166,7 @@ def make_hessian_fn(fm: Any, chunk_size: int | None = None) -> Callable[[Any], n
             basis = np.zeros((chunk, d))
             valid = rows < d
             basis[np.flatnonzero(valid), rows[valid]] = 1.0  # last batch zero-padded
-            block = np.asarray(hvp_rows(theta, jnp.asarray(basis, dtype)), dtype=np.float64)
+            block = np.asarray(hvp_rows(hvp_arg, jnp.asarray(basis, dtype)), dtype=np.float64)
             h[rows[valid]] = block[valid]
         return 0.5 * (h + h.T)
 
@@ -235,8 +246,34 @@ def laplace_covariance(
     hess = np.asarray(hess, dtype=np.float64)
     if hess.ndim != 2 or hess.shape[0] != hess.shape[1]:
         raise ValueError(f"hess must be a square 2-D array; got shape {hess.shape}")
-    d = hess.shape[0]
     evals, evecs = np.linalg.eigh(0.5 * (hess + hess.T))
+    return laplace_covariance_from_eigh(
+        evals,
+        evecs,
+        max_variance=max_variance,
+        rel_floor=rel_floor,
+        use_abs_eigenvalues=use_abs_eigenvalues,
+        jitter=jitter,
+        return_info=return_info,
+    )
+
+
+def laplace_covariance_from_eigh(
+    evals: np.ndarray,
+    evecs: np.ndarray,
+    *,
+    max_variance: float = DEFAULT_MAX_VARIANCE,
+    rel_floor: float = 1e-8,
+    use_abs_eigenvalues: bool = True,
+    jitter: float = 1e-10,
+    return_info: bool = False,
+):
+    """Build the Laplace covariance from the float64 eigensystem of its Hessian.
+
+    Eigenvectors are columns, as returned by ``numpy.linalg.eigh``. Options
+    and outputs are the same as in :func:`laplace_covariance`.
+    """
+    d = evals.size
 
     floor = max(float(np.abs(evals).max()) * rel_floor, 1.0 / max_variance)
     modified = np.maximum(np.abs(evals), floor) if use_abs_eigenvalues else np.clip(
@@ -246,7 +283,9 @@ def laplace_covariance(
 
     cov = (evecs / modified) @ evecs.T
     cov = 0.5 * (cov + cov.T)
-    chol = np.linalg.cholesky(cov + jitter * np.eye(d) * np.trace(cov) / d)
+    chol_input = cov.copy()
+    chol_input.flat[:: d + 1] += jitter * np.trace(cov) / d
+    chol = np.linalg.cholesky(chol_input)
     sd = np.sqrt(np.clip(np.diag(cov), 1e-30, None))
     n_negative = int((evals < 0).sum())
     logger.info(
