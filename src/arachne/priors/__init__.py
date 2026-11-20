@@ -2,7 +2,7 @@
 
 * :mod:`arachne.priors.specs` -- dict-based per-parameter prior specifications
   (``{"dist": "studentt", "df": 2, ...}``), their defaults, validation and the
-  JAX log-prior builders used by the catalogue scripts and spatial models.
+  log-prior and bounded sampler builders used by the catalogue scripts.
 * :mod:`arachne.priors.physical` -- simple vector priors on physical parameters.
 * :mod:`arachne.priors.spatial` -- smoothness priors on parameter maps.
 """
@@ -14,6 +14,7 @@ from arachne.priors.specs import (
     SUPPORTED_DISTS,
     build_component_log_prior,
     build_log_prior,
+    build_prior_sampler,
     log_prior_1d,
     prior_config_template,
     resolve_prior_specs,
@@ -30,6 +31,7 @@ __all__ = [
     "TotalVariationPrior",
     "build_component_log_prior",
     "build_log_prior",
+    "build_prior_sampler",
     "log_prior_1d",
     "prior_config_template",
     "resolve_prior_specs",

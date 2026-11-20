@@ -14,6 +14,8 @@ from pathlib import Path
 import jax
 import numpy as np
 
+from arachne.priors.specs import build_prior_sampler
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import blackjax
@@ -49,6 +51,7 @@ band_names = [
 emu, band_idx = load_emulator_and_band_indices(EMULATOR, band_names)
 
 log_prior_fn = make_log_prior_fn(DEFAULT_PRIORS)
+sample_prior = build_prior_sampler(SPS_PARAM_NAMES, DEFAULT_PRIORS, PARAM_BOUNDS)
 log_like_fn = make_log_likelihood_physical(emu, band_idx, min_frac_err=0.1)
 
 # Mock observation at a fiducial parameter point (middle of bounds).
@@ -86,6 +89,7 @@ samples, logz, logz_err, ess, n_steps, n_dead, elapsed = run_nss_galaxy(
     termination=-3.0,
     n_samples_out=500,
     verbose=True,
+    sample_prior=sample_prior,
 )
 compile_and_run = time.perf_counter() - t0
 

@@ -37,6 +37,7 @@ is exact; absolute log-density / ELBO values are unnormalised constants).
 NSS operates directly in physical space x ∈ [lo, hi].  Out-of-bound
 proposals return loglikelihood=-inf so the HRSS sampler shrinks back
 inside the domain without querying the emulator out-of-domain.
+Initial live points are drawn from the configured priors restricted to these bounds.
 
 Band config JSON
 ----------------
@@ -124,7 +125,8 @@ NSS output HDF5 layout
     /nss_rhat           (N, P)      split-R-hat on resampled posterior
     attrs: param_names, band_names, param_bounds_lo, param_bounds_hi,
            prior_spec, emulator_path, run_timestamp, n_galaxies, sampler,
-           num_live, num_inner_steps, num_delete, termination, n_samples_nss
+           num_live, num_inner_steps, num_delete, termination, n_samples_nss,
+           nss_live_point_prior
 """
 
 from __future__ import annotations
@@ -154,6 +156,7 @@ from arachne.priors.specs import (
     DEFAULT_PRIORS,  # noqa: F401  (re-exported for downstream scripts)
     SUPPORTED_DISTS,
     build_log_prior,
+    build_prior_sampler,
     prior_config_template,
     resolve_prior_specs,
     sigmoid_log_jacobian,
@@ -689,26 +692,19 @@ def run_nss_galaxy(
     num_live: int,
     termination: float,
     n_samples_out: int,
+    *,
+    sample_prior,
 ) -> tuple:
     """Run NSS on one galaxy.
 
     Returns:
         Tuple of (samples_phys, logz, logz_err, ess, n_steps, n_dead, elapsed).
     """
-    lows_np = np.array([PARAM_BOUNDS[p][0] for p in SPS_PARAM_NAMES], dtype=np.float32)
-    highs_np = np.array([PARAM_BOUNDS[p][1] for p in SPS_PARAM_NAMES], dtype=np.float32)
-    P = len(SPS_PARAM_NAMES)
-
     obs_jax = jnp.asarray(obs_flux_i, dtype=jnp.float32)
     err_jax = jnp.asarray(flux_err_i, dtype=jnp.float32)
 
     rng_key, init_key = jax.random.split(rng_key)
-    initial_samples = jax.random.uniform(
-        init_key,
-        (num_live, P),
-        minval=jnp.asarray(lows_np),
-        maxval=jnp.asarray(highs_np),
-    )
+    initial_samples = sample_prior(init_key, num_live)
 
     state = nss_init_fn(initial_samples, obs_jax, err_jax)
     jax.block_until_ready(state)
@@ -1054,6 +1050,7 @@ def create_output_file_nss(
 
     _write_common_attrs(f, N, prior_specs, emulator_path, band_names)
     f.attrs["sampler"] = "nss"
+    f.attrs["nss_live_point_prior"] = "configured"
     f.attrs["num_live"] = num_live
     f.attrs["num_inner_steps"] = num_inner_steps
     f.attrs["num_delete"] = num_delete
@@ -1449,10 +1446,7 @@ def run_catalogue_nss(
         raise RuntimeError("blackjax.ns not available — cannot run NSS.")
 
     N = len(galaxy_ids)
-    P = len(SPS_PARAM_NAMES)
     band_names = [emulator.band_names[int(i)] for i in band_idx]
-    lows_np = np.array([PARAM_BOUNDS[p][0] for p in SPS_PARAM_NAMES], dtype=np.float32)
-    highs_np = np.array([PARAM_BOUNDS[p][1] for p in SPS_PARAM_NAMES], dtype=np.float32)
 
     print(f"\nNSS catalogue fit: {N} galaxies", flush=True)
     print(
@@ -1467,6 +1461,7 @@ def run_catalogue_nss(
         flush=True,
     )
 
+    sample_prior = build_prior_sampler(SPS_PARAM_NAMES, prior_specs, PARAM_BOUNDS)
     log_prior_fn = make_log_prior_fn(prior_specs)
     log_like_fn = make_log_likelihood_physical(emulator, band_idx, min_frac_err)
     nss_init_fn, nss_step_fn = build_nss_fns(log_prior_fn, log_like_fn, num_inner_steps, num_delete)
@@ -1491,9 +1486,7 @@ def run_catalogue_nss(
     rng, k0 = jax.random.split(rng)
     obs0 = jnp.asarray(obs_flux[0], dtype=jnp.float32)
     err0 = jnp.asarray(flux_err[0], dtype=jnp.float32)
-    live0 = jax.random.uniform(
-        k0, (num_live, P), minval=jnp.asarray(lows_np), maxval=jnp.asarray(highs_np)
-    )
+    live0 = sample_prior(k0, num_live)
     t_warmup = time.perf_counter()
     _st = nss_init_fn(live0, obs0, err0)
     rng, _k = jax.random.split(rng)
@@ -1526,6 +1519,7 @@ def run_catalogue_nss(
             num_live,
             termination,
             n_samples_out,
+            sample_prior=sample_prior,
         )
 
         # R-hat on physical-space NS samples (treat resampled set as single split chain)

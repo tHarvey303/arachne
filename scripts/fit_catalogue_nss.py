@@ -12,6 +12,7 @@ Key design choices
 * Physical space: NSS operates directly on x ∈ [lo, hi].  Out-of-bound
   proposals return loglikelihood = -inf, forcing the HRSS sampler to shrink
   back inside the domain without touching the emulator.
+* Initial live points are drawn from the configured priors within these bounds.
 * Single compiled kernel: nss_init and nss_step are @jax.jit with obs_flux
   and flux_err as explicit traced arguments.  This compiles once for the
   (n_bands, n_params) shape and reuses the XLA binary across all galaxies.
@@ -50,7 +51,7 @@ Output HDF5 layout
     attrs: param_names, band_names, param_bounds_lo, param_bounds_hi,
            prior_spec, emulator_path, run_timestamp, n_galaxies,
            num_live, num_inner_steps, num_delete, termination,
-           n_samples_nss, sampler=nss
+           n_samples_nss, sampler=nss, nss_live_point_prior
 """
 
 from __future__ import annotations
@@ -72,6 +73,8 @@ import h5py
 import jax
 import jax.numpy as jnp
 import numpy as np
+
+from arachne.priors.specs import build_prior_sampler
 
 try:
     import blackjax
@@ -221,6 +224,8 @@ def run_nss_galaxy(
     termination: float,
     n_samples_out: int,
     verbose: bool = False,
+    *,
+    sample_prior,
 ):
     """Run NSS on one galaxy.
 
@@ -241,19 +246,11 @@ def run_nss_galaxy(
     elapsed : float
         Wall seconds (sampling loop only, excluding compilation).
     """
-    lows_np = np.array([PARAM_BOUNDS[p][0] for p in SPS_PARAM_NAMES], dtype=np.float32)
-    highs_np = np.array([PARAM_BOUNDS[p][1] for p in SPS_PARAM_NAMES], dtype=np.float32)
-
     obs_jax = jnp.asarray(obs_flux_i, dtype=jnp.float32)
     err_jax = jnp.asarray(flux_err_i, dtype=jnp.float32)
 
     rng_key, init_key = jax.random.split(rng_key)
-    initial_samples = jax.random.uniform(
-        init_key,
-        (num_live, _P),
-        minval=jnp.asarray(lows_np),
-        maxval=jnp.asarray(highs_np),
-    )
+    initial_samples = sample_prior(init_key, num_live)
 
     state = nss_init_fn(initial_samples, obs_jax, err_jax)
     jax.block_until_ready(state)
@@ -480,6 +477,7 @@ def create_output_file(
     f.attrs["run_timestamp"] = datetime.now(timezone.utc).isoformat()
     f.attrs["n_galaxies"] = n_galaxies
     f.attrs["sampler"] = "nss"
+    f.attrs["nss_live_point_prior"] = "configured"
     for k, v in run_args.items():
         f.attrs[k] = v
     return f
@@ -513,10 +511,8 @@ def run_catalogue_nss(
     chain_jitter: float,
 ) -> None:
     """Run NSS fitting (and optional NUTS comparison) for each galaxy in the catalogue."""
-    N, n_bands = obs_flux.shape
+    N = len(galaxy_ids)
     band_names = [emulator.band_names[int(i)] for i in band_idx]
-    lows_np = np.array([PARAM_BOUNDS[p][0] for p in SPS_PARAM_NAMES], dtype=np.float32)
-    highs_np = np.array([PARAM_BOUNDS[p][1] for p in SPS_PARAM_NAMES], dtype=np.float32)
 
     print(f"\nNSS catalogue fit: {N} galaxies", flush=True)
     print(
@@ -533,6 +529,7 @@ def run_catalogue_nss(
             flush=True,
         )
 
+    sample_prior = build_prior_sampler(SPS_PARAM_NAMES, prior_specs, PARAM_BOUNDS)
     log_prior_fn = make_log_prior_fn(prior_specs)
     log_like_fn = make_log_likelihood_physical(emulator, band_idx, min_frac_err)
 
@@ -593,9 +590,7 @@ def run_catalogue_nss(
     rng, k0 = jax.random.split(rng)
     obs0 = jnp.asarray(obs_flux[0:1], dtype=jnp.float32)[0]
     err0 = jnp.asarray(flux_err[0:1], dtype=jnp.float32)[0]
-    live0 = jax.random.uniform(
-        k0, (num_live, _P), minval=jnp.asarray(lows_np), maxval=jnp.asarray(highs_np)
-    )
+    live0 = sample_prior(k0, num_live)
     _st = nss_init_fn(live0, obs0, err0)
     rng, _k = jax.random.split(rng)
     _st, _ = nss_step_fn(_k, _st, obs0, err0)
@@ -627,6 +622,7 @@ def run_catalogue_nss(
             num_live,
             termination,
             n_samples_out,
+            sample_prior=sample_prior,
         )
         nss_times.append(nss_t)
 

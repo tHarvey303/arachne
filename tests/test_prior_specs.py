@@ -6,12 +6,14 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from scipy.integrate import cumulative_trapezoid
 
 from arachne.priors.specs import (
     DEFAULT_PRIORS,
     SUPPORTED_DISTS,
     build_component_log_prior,
     build_log_prior,
+    build_prior_sampler,
     log_prior_1d,
     prior_config_template,
     resolve_prior_specs,
@@ -37,6 +39,57 @@ SPECS = {
     "b": {"dist": "studentt", "df": 2.0, "loc": 0.0, "scale": 0.3},
     "c": {"dist": "exponential", "scale": 0.5},
 }
+
+
+class TestPriorSampler:
+    """Live-point draws must follow the same bounded density as NSS moves."""
+
+    @pytest.mark.parametrize(
+        ("spec", "bounds"),
+        [
+            *_EVERY_DIST.values(),
+            ({"dist": "studentt", "df": 4.5, "loc": 0.4, "scale": 0.7}, (-0.3, 1.1)),
+            ({"dist": "studentt", "df": 35.0, "scale": 1.0}, (25.0, 32.0)),
+            ({"dist": "normal", "scale": 1.0}, (40.0, 41.0)),
+            ({"dist": "halfnormal", "scale": 1.0}, (-1.0, 1.0)),
+            ({"dist": "exponential", "scale": 0.5}, (-1.0, 1.0)),
+        ],
+        ids=[
+            *_EVERY_DIST,
+            "studentt-truncated",
+            "studentt-tail",
+            "normal-tail",
+            "halfnormal-signed",
+            "exponential-signed",
+        ],
+    )
+    def test_draw_quantiles_match_bounded_log_density(self, spec, bounds):
+        """Integrate the log-prior directly to verify the sampler's CDF transform."""
+        sample = build_prior_sampler(["x"], {"x": spec}, {"x": bounds})
+        key = jax.random.key(7)
+        n = 1024
+        draws = np.asarray(sample(key, n))
+        lo, hi = bounds
+        assert draws.dtype == np.float32
+        assert draws.shape == (n, 1)
+        assert np.all((lo <= draws) & (draws <= hi))
+
+        grid = np.linspace(lo, hi, 100_001)
+        log_p = np.asarray(jax.vmap(lambda x: log_prior_1d(spec, x, lo, hi))(grid), dtype=float)
+        cdf = cumulative_trapezoid(np.exp(log_p - log_p.max()), grid, initial=0)
+        actual_q = np.interp(draws[:, 0], grid, cdf / cdf[-1])
+        expected_q = jax.random.uniform(key, (n,), dtype=jnp.float32)
+        np.testing.assert_allclose(actual_q, expected_q, atol=1e-4, rtol=0)
+
+    def test_mixed_prior_columns_and_seed(self):
+        """Draws follow the requested parameter order and reproduce with the same key."""
+        sample = build_prior_sampler(["c", "b", "a"], SPECS, BOUNDS)
+        key = jax.random.PRNGKey(1)
+        draws = np.asarray(sample(key, 128))
+        np.testing.assert_array_equal(sample(key, 128), draws)
+        for i, name in enumerate(("c", "b", "a")):
+            lo, hi = BOUNDS[name]
+            assert np.all((lo <= draws[:, i]) & (draws[:, i] <= hi))
 
 
 class TestLogPrior1d:
@@ -120,9 +173,9 @@ class TestValidatePriorSpec:
     @pytest.mark.parametrize(
         "dist", ["normal", "studentt", "halfnormal", "exponential", "lognormal"]
     )
-    @pytest.mark.parametrize("scale", [0.0, -1.0])
-    def test_nonpositive_scale(self, dist, scale):
-        """Reject scale <= 0 for every scale-bearing dist."""
+    @pytest.mark.parametrize("scale", [0.0, -1.0, np.inf, np.nan])
+    def test_invalid_scale(self, dist, scale):
+        """Reject non-positive or non-finite scale for every scale-bearing dist."""
         with pytest.raises(ValueError, match="scale > 0"):
             validate_prior_spec("p", {"dist": dist, "df": 2.0, "scale": scale}, (0.1, 1.0))
 
@@ -131,11 +184,18 @@ class TestValidatePriorSpec:
         with pytest.raises(ValueError, match="scale > 0"):
             validate_prior_spec("p", {"dist": "normal"}, (0.0, 1.0))
 
-    @pytest.mark.parametrize("df", [0.0, -2.0])
-    def test_nonpositive_df(self, df):
-        """Student-t requires df > 0."""
+    @pytest.mark.parametrize("df", [0.0, -2.0, np.inf, np.nan])
+    def test_invalid_df(self, df):
+        """Student-t requires finite df > 0."""
         with pytest.raises(ValueError, match="df > 0"):
             validate_prior_spec("p", {"dist": "studentt", "df": df, "scale": 1.0}, (-1.0, 1.0))
+
+    @pytest.mark.parametrize("dist", ["normal", "studentt", "lognormal"])
+    def test_nonfinite_location(self, dist):
+        """The location of each location-scale prior must be finite."""
+        with pytest.raises(ValueError, match="finite loc"):
+            spec = {"dist": dist, "loc": np.nan, "scale": 1.0, "df": 2.0}
+            validate_prior_spec("p", spec, (0.1, 1.0))
 
     @pytest.mark.parametrize("dist", ["loguniform", "lognormal"])
     @pytest.mark.parametrize("lo", [0.0, -1.0])

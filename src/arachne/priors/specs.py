@@ -4,7 +4,7 @@ A prior *spec* is a small JSON-serialisable dict such as
 ``{"dist": "studentt", "df": 2, "loc": 0, "scale": 0.3}``.  This module owns
 the default specs for the ParrotEmulator parameter set, spec validation,
 merging of user overrides over the defaults, and the construction of
-JAX-traceable ``log_prior(x_phys)`` functions from a set of specs.
+log-prior functions and samplers from a set of specs.
 
 Supported ``dist`` values::
 
@@ -25,11 +25,9 @@ density over that domain: priors whose support extends beyond the bounds
 are implicitly truncated and the truncation normalisation is **dropped**.
 Furthermore ``halfnormal``, ``exponential`` and ``lognormal`` omit their
 untruncated normalising constants as well, while ``normal`` and
-``studentt`` include theirs.  Within-galaxy inference is exact either way;
-absolute log-density / ELBO / logZ values carry an unnormalised constant
-per parameter.  This matches the historical behaviour of
-``scripts/fit_catalogue.py`` byte-for-byte and must not be changed without
-invalidating comparisons against archived runs.
+``studentt`` include theirs. These constants affect absolute log-density and
+ELBO values. Catalogue NSS measures evidence relative to the normalised
+bounded prior by drawing its initial live points from it.
 """
 
 from __future__ import annotations
@@ -39,12 +37,14 @@ from collections.abc import Callable, Sequence
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 __all__ = [
     "DEFAULT_PRIORS",
     "SUPPORTED_DISTS",
     "build_component_log_prior",
     "build_log_prior",
+    "build_prior_sampler",
     "default_prior",
     "log_prior_1d",
     "prior_config_template",
@@ -119,8 +119,9 @@ def validate_prior_spec(name: str, spec: dict, bounds: tuple[float, float]) -> N
         bounds: ``(lo, hi)`` domain of the parameter.
 
     Raises:
-        ValueError: On an unknown ``dist``, a non-positive ``scale`` or ``df``,
-            or a ``loguniform`` / ``lognormal`` prior on a domain with ``lo <= 0``.
+        ValueError: On an unknown ``dist``, non-finite distribution parameters,
+            a non-positive ``scale`` or ``df``, or a ``loguniform`` / ``lognormal``
+            prior on a domain with ``lo <= 0``.
     """
     dist = spec.get("dist", "uniform").lower()
     lo, hi = bounds
@@ -129,10 +130,16 @@ def validate_prior_spec(name: str, spec: dict, bounds: tuple[float, float]) -> N
             f"{name}: unknown prior dist {dist!r}. Use one of {sorted(SUPPORTED_DISTS)}."
         )
     if dist in ("normal", "studentt", "halfnormal", "exponential", "lognormal"):
-        if float(spec.get("scale", 0.0)) <= 0.0:
-            raise ValueError(f"{name}: {dist} requires scale > 0.")
-    if dist == "studentt" and float(spec.get("df", 0.0)) <= 0.0:
-        raise ValueError(f"{name}: studentt requires df > 0.")
+        scale = float(spec.get("scale", 0.0))
+        if not math.isfinite(scale) or scale <= 0.0:
+            raise ValueError(f"{name}: {dist} requires scale > 0 and finite.")
+    if dist == "studentt":
+        df = float(spec.get("df", 0.0))
+        if not math.isfinite(df) or df <= 0.0:
+            raise ValueError(f"{name}: studentt requires df > 0 and finite.")
+    if dist in ("normal", "studentt", "lognormal"):
+        if not math.isfinite(float(spec.get("loc", 0.0))):
+            raise ValueError(f"{name}: {dist} requires finite loc.")
     if dist in ("loguniform", "lognormal") and lo <= 0.0:
         raise ValueError(f"{name}: {dist} requires the lower bound > 0 (bound_lo={lo}).")
     if dist in ("halfnormal", "exponential") and lo < 0.0:
@@ -289,6 +296,84 @@ def build_log_prior(
         return total
 
     return log_prior
+
+
+def _prior_quantile(name: str, spec: dict, lo: float, hi: float) -> Callable:
+    """Return the inverse CDF for the corresponding log-prior shape on [lo, hi]."""
+    dist = spec.get("dist", "uniform").lower()
+    if dist == "uniform":
+        return lambda u: lo + (hi - lo) * u
+    if dist == "loguniform":
+        log_lo, log_hi = math.log(lo), math.log(hi)
+        return lambda u: np.exp(log_lo + (log_hi - log_lo) * u)
+
+    scale = float(spec["scale"])
+    if dist == "exponential":
+        # The configured log-prior is -x/scale throughout the fit bounds.
+        mass = -math.expm1(-(hi - lo) / scale)
+        return lambda u: lo - scale * np.log1p(-mass * u)
+
+    from scipy import stats
+
+    # The halfnormal log-prior uses the zero-mean Gaussian shape over the
+    # full fit bounds, even when they include negative values.
+    loc = 0.0 if dist == "halfnormal" else float(spec.get("loc", 0.0))
+    if dist == "studentt":
+        t = stats.t(float(spec["df"]), loc=loc, scale=scale)
+        # Use survival probabilities in the upper tail to avoid subtracting from 1.
+        cdf, quantile = (t.sf, t.isf) if lo >= loc else (t.cdf, t.ppf)
+        p_lo, p_hi = cdf(lo), cdf(hi)
+        if p_lo == p_hi:
+            raise ValueError(f"{name}: Student-t prior mass is numerically zero in the fit bounds.")
+        return lambda u: quantile(p_lo * (1.0 - u) + p_hi * u)
+
+    a, b = (math.log(lo), math.log(hi)) if dist == "lognormal" else (lo, hi)
+    normal = stats.truncnorm((a - loc) / scale, (b - loc) / scale, loc=loc, scale=scale)
+    if dist == "lognormal":
+        return lambda u: np.exp(normal.ppf(u))
+    return normal.ppf
+
+
+def build_prior_sampler(
+    param_names: Sequence[str],
+    specs: dict[str, dict],
+    bounds: dict[str, tuple[float, float]],
+) -> Callable[[jax.Array, int], jax.Array]:
+    """Build ``sample_prior(key, n)`` for independent bounded physical parameters.
+
+    Returns float32 draws of shape ``(n, len(param_names))`` in the supplied
+    parameter order. This is for host-side initialisation. For mixed priors,
+    the inverse CDFs run on the CPU in float64, outside the JIT-compiled
+    likelihood and sampler transitions.
+    """
+    names = tuple(param_names)
+    limits = np.array([bounds[name] for name in names], dtype=np.float64).reshape(-1, 2)
+    lows, highs = limits.T
+    quantiles = []
+    for name, (lo, hi) in zip(names, limits, strict=True):
+        if not (math.isfinite(lo) and math.isfinite(hi) and lo < hi):
+            raise ValueError(f"{name}: prior sampling requires finite, increasing bounds.")
+        validate_prior_spec(name, specs[name], (lo, hi))
+        quantiles.append(_prior_quantile(name, specs[name], float(lo), float(hi)))
+    if all(specs[name].get("dist", "uniform").lower() == "uniform" for name in names):
+        lo_jax, hi_jax = jnp.asarray(lows, jnp.float32), jnp.asarray(highs, jnp.float32)
+
+        def sample_uniform(key, n):
+            return jax.random.uniform(key, (n, len(names)), jnp.float32, lo_jax, hi_jax)
+
+        return sample_uniform
+
+    def sample(key, n):
+        u = np.asarray(jax.random.uniform(key, (n, len(names)), jnp.float32), dtype=np.float64)
+        draws = np.column_stack([quantile(u[:, i]) for i, quantile in enumerate(quantiles)])
+        # Map the zero quantile to the exact lower bound even if a CDF rounded
+        # that endpoint to zero in its tail. Clipping also handles round-off.
+        draws = np.clip(np.where(u == 0.0, lows, draws), lows, highs)
+        if not np.isfinite(draws).all():
+            raise ValueError("Could not draw finite live points from the configured prior.")
+        return jnp.asarray(draws, dtype=jnp.float32)
+
+    return sample
 
 
 def sigmoid_log_jacobian(raw: jnp.ndarray, lows: jnp.ndarray, highs: jnp.ndarray) -> jnp.ndarray:

@@ -29,6 +29,12 @@ python scripts/fit_catalogue.py catalogue.fits bands_config.json --emulator $EMU
 `--print-config-template --emulator <ckpt>` prints a band-config JSON template (bands + default
 priors); see `scripts/configs/*.json` for worked examples.
 
+NSS draws the initial live points from the configured priors restricted to the fitted bounds.
+This covers `uniform`, `loguniform`, `normal`, `studentt`, `halfnormal`, `exponential`, and
+`lognormal`. Outputs record `nss_live_point_prior="configured"`. Earlier catalogue runs drew
+uniform live points even when the config specified non-uniform priors, so re-run those fits
+before comparing their evidence or posterior summaries.
+
 **Parameter set.** `fit_catalogue.py` fits the 12 parameters in its `SPS_PARAM_NAMES`
 (`redshift`, `log_mass`, `slope`, `fesc_lya`, `dust_bump_amplitude`, `log10metallicity`, `Av`,
 `logsfr_ratio_0..4`) within `PARAM_BOUNDS`. Any checkpoint can be passed to `--emulator`: it is
