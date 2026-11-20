@@ -23,7 +23,7 @@ Key features (both samplers)
 * Negative observed fluxes are kept (valid Gaussian measurements).
 * Configurable per-parameter priors (uniform, loguniform, normal,
   studentt, halfnormal, exponential, lognormal).
-* Reduced chi2 at the Pathfinder MAP (fit-quality flag).
+* Chi2 at the Pathfinder position, total and per band (fit-quality flag).
 
 Transform / prior contract (NUTS)
 ----------------------------------
@@ -97,7 +97,11 @@ NUTS output HDF5 layout
     /step_size          (N, C)          adapted NUTS step size per chain
     /divergent_frac     (N, C)          fraction of divergent transitions
     /rhat               (N, P)          split-R-hat per parameter (physical space)
-    /reduced_chi2_map   (N,)            reduced chi2 at the Pathfinder MAP
+    /chi2_map           (N,)            total chi2 at the Pathfinder position
+    /n_bands_used       (N,)            unmasked bands entering that chi2
+    /reduced_chi2_map   (N,)            chi2_map / (n_bands_used - P); NaN when
+                                        n_bands_used <= P (no degrees of freedom:
+                                        use chi2_map / n_bands_used instead)
     attrs: param_names, band_names, param_bounds_lo, param_bounds_hi,
            prior_spec (json), emulator_path, run_timestamp, n_galaxies,
            n_samples, n_warmup, n_chains, n_paths, batch_size, target_accept
@@ -215,6 +219,8 @@ MISSING_SIGMA: float = 1e10
 OBS_MASK_THRESH: float = MISSING_SIGMA * 0.5
 
 LOG2PI: float = math.log(2.0 * math.pi)
+# chi2 per band above which the run summary counts a fit as poor
+CHI2_PER_BAND_POOR: float = 3.0
 
 SPS_PARAM_NAMES: list[str] = [
     "redshift",
@@ -485,8 +491,26 @@ def build_batch_fns(
     eps0: float,
     target_accept: float,
     vmap_paths: bool = False,
+    path_select: str = "elbo",
+    adapt: str = "step",
+    diag_metric: bool = True,
 ) -> tuple:
-    """JIT-compile vmapped multi-path Pathfinder and multi-chain NUTS."""
+    """JIT-compile vmapped multi-path Pathfinder and multi-chain NUTS.
+
+    ``batch_pf`` returns, per galaxy, the selected path (position, inverse Hessian,
+    ELBO, ok flag) followed by every path's position, ELBO and log-posterior at its
+    position.  ``path_select`` chooses the path: ``"elbo"`` (highest ELBO, an estimate
+    of the mode's evidence) or ``"logp"`` (highest log-posterior).
+
+    ``adapt`` sets the NUTS warmup: ``"step"`` keeps the Pathfinder metric fixed and
+    adapts the step size only; ``"window"`` runs Stan-style window adaptation per chain
+    (step size and metric, diagonal or dense per ``diag_metric``), seeded with the
+    Pathfinder metric.
+    """
+    if adapt not in ("step", "window"):
+        raise ValueError(f"adapt must be 'step' or 'window', got {adapt!r}")
+    if path_select not in ("elbo", "logp"):
+        raise ValueError(f"path_select must be 'elbo' or 'logp', got {path_select!r}")
     eye = jnp.eye(n_params, dtype=jnp.float32)
 
     def _pf_one(obs_flux, flux_err, theta_init, rng_key):
@@ -498,20 +522,21 @@ def build_batch_fns(
         inv = 0.5 * (inv + inv.T) + 1e-8 * eye
         ok = jnp.isfinite(state.position).all() & jnp.isfinite(inv).all() & jnp.isfinite(state.elbo)
         elbo = jnp.where(ok, state.elbo, -jnp.inf)
-        return state.position, inv, elbo, ok
+        logp = jnp.where(ok, jnp.nan_to_num(lp(state.position), nan=-jnp.inf), -jnp.inf)
+        return state.position, inv, elbo, ok, logp
 
     def _pf_galaxy(obs_flux, flux_err, theta_inits, rng_keys):
         if vmap_paths:
-            pos, inv, elbo, ok = jax.vmap(_pf_one, in_axes=(None, None, 0, 0))(
+            pos, inv, elbo, ok, logp = jax.vmap(_pf_one, in_axes=(None, None, 0, 0))(
                 obs_flux, flux_err, theta_inits, rng_keys
             )
         else:
-            pos, inv, elbo, ok = jax.lax.map(
+            pos, inv, elbo, ok, logp = jax.lax.map(
                 lambda tk: _pf_one(obs_flux, flux_err, tk[0], tk[1]),
                 (theta_inits, rng_keys),
             )
-        j = jnp.argmax(elbo)
-        return pos[j], inv[j], elbo[j], ok[j]
+        j = jnp.argmax(elbo if path_select == "elbo" else logp)
+        return pos[j], inv[j], elbo[j], ok[j], pos, elbo, logp
 
     batch_pf = jax.jit(jax.vmap(_pf_galaxy, in_axes=(0, 0, 0, 0)))
 
@@ -540,7 +565,22 @@ def build_batch_fns(
         warm_key, sample_key = jax.random.split(rng_key)
         state = blackjax.nuts(lp, step_size=eps0, inverse_mass_matrix=inv_mass).init(theta_init)
 
-        if n_warmup > 0:
+        if n_warmup > 0 and adapt == "window":
+            from blackjax.adaptation.base import get_filter_adapt_info_fn
+
+            warmup = blackjax.window_adaptation(
+                blackjax.nuts,
+                lp,
+                is_mass_matrix_diagonal=diag_metric,
+                initial_inverse_mass_matrix=jnp.diagonal(inv_mass) if diag_metric else inv_mass,
+                initial_step_size=eps0,
+                target_acceptance_rate=target_accept,
+                adaptation_info_fn=get_filter_adapt_info_fn(),
+            )
+            (state, params), _ = warmup.run(warm_key, theta_init, num_steps=n_warmup)
+            eps_final = params["step_size"]
+            inv_mass = params["inverse_mass_matrix"]
+        elif n_warmup > 0:
 
             def warm_step(carry, k):
                 st, da = carry
@@ -784,7 +824,7 @@ def logmass_init_theta(
     return jnp.log(u / (1.0 - u))
 
 
-def reduced_chi2_at(
+def chi2_at(
     theta: np.ndarray,
     obs: np.ndarray,
     err: np.ndarray,
@@ -793,8 +833,8 @@ def reduced_chi2_at(
     lows: np.ndarray,
     highs: np.ndarray,
     min_frac_err: float = 0.0,
-) -> np.ndarray:
-    """Reduced chi2 at given unconstrained theta, per galaxy."""
+) -> tuple[np.ndarray, np.ndarray]:
+    """Total chi2 and number of unmasked bands at given unconstrained theta, per galaxy."""
     lows_j = jnp.asarray(lows)
     highs_j = jnp.asarray(highs)
     x = lows_j + (highs_j - lows_j) * jax.nn.sigmoid(jnp.asarray(theta))
@@ -804,8 +844,18 @@ def reduced_chi2_at(
     eff_err = np.maximum(err_np, min_frac_err * np.abs(obs_np)) if min_frac_err > 0 else err_np
     resid = (obs_np - pred) / eff_err
     chi2 = np.sum(mask * resid * resid, axis=1)
-    dof = np.maximum(mask.sum(axis=1) - len(SPS_PARAM_NAMES), 1)
-    return (chi2 / dof).astype(np.float32)
+    return chi2.astype(np.float32), mask.sum(axis=1).astype(np.int32)
+
+
+def reduced_chi2(chi2: np.ndarray, n_bands_used: np.ndarray) -> np.ndarray:
+    """chi2 / (n_bands - n_params), NaN where the fit has no degrees of freedom.
+
+    With as many free parameters as bands (12 broad bands, 12 SPS parameters) the
+    reduced chi2 is undefined; flooring the denominator at 1 reported the total chi2
+    as "reduced" and flagged good fits as poor.  Use chi2 per band there.
+    """
+    dof = np.asarray(n_bands_used) - len(SPS_PARAM_NAMES)
+    return np.where(dof > 0, chi2 / np.maximum(dof, 1), np.nan).astype(np.float32)
 
 
 def check_gradients(
@@ -946,6 +996,8 @@ def create_output_file_nuts(
     f.create_dataset("step_size", shape=(N, C), dtype=np.float32)
     f.create_dataset("divergent_frac", shape=(N, C), dtype=np.float32)
     f.create_dataset("rhat", shape=(N, P), dtype=np.float32)
+    f.create_dataset("chi2_map", shape=(N,), dtype=np.float32)
+    f.create_dataset("n_bands_used", shape=(N,), dtype=np.int32)
     f.create_dataset("reduced_chi2_map", shape=(N,), dtype=np.float32)
 
     if not pathfinder_only:
@@ -1039,8 +1091,19 @@ def run_catalogue(
     vmap_pf_paths: bool = False,
     diag_metric: bool = True,
     min_frac_err: float = 0.05,
+    init: str = "zgrid",
+    path_select: str = "elbo",
+    adapt: str = "step",
+    zgrid_nz: int = 140,
+    zgrid_zmax: float | None = None,
 ) -> None:
-    """Run Pathfinder+NUTS fitting for each galaxy in the catalogue."""
+    """Run Pathfinder+NUTS fitting for each galaxy in the catalogue.
+
+    ``init`` sets where the Pathfinder paths start: ``"zgrid"`` (the best separated
+    minima of a redshift x template chi-squared grid, see
+    :mod:`arachne.inference.redshift_grid`) or ``"seeds"`` (four fixed (z, A_V) seeds
+    plus random jitter, the behaviour before 2026-11-19).
+    """
     N, n_bands = obs_flux.shape
     P = len(SPS_PARAM_NAMES)
     band_names = [emulator.band_names[int(i)] for i in band_idx]
@@ -1057,7 +1120,7 @@ def run_catalogue(
     )
     print(
         f"  {mode_str}  |  eps0={eps0:.4g}  target_accept={target_accept}  "
-        f"pf_paths={pf_path_mode}  pf_samples={n_pf_samples}  "
+        f"pf_paths={pf_path_mode}  pf_samples={n_pf_samples}  adapt={adapt}  "
         f"metric={'diagonal' if diag_metric else 'dense'}"
     )
 
@@ -1072,7 +1135,25 @@ def run_catalogue(
         eps0,
         target_accept,
         vmap_paths=vmap_pf_paths,
+        path_select=path_select,
+        adapt=adapt,
+        diag_metric=diag_metric,
     )
+    grid = None
+    if init == "zgrid":
+        from arachne.inference.redshift_grid import redshift_grid
+
+        t_grid = time.perf_counter()
+        grid = redshift_grid(
+            emulator, band_idx, bounds=PARAM_BOUNDS, n_z=zgrid_nz, z_max=zgrid_zmax
+        )
+        print(
+            f"  redshift grid: {len(grid.templates)} templates x {len(grid.redshifts)} redshifts "
+            f"(z = {grid.redshifts[0]:.2f}-{grid.redshifts[-1]:.2f}) in "
+            f"{time.perf_counter() - t_grid:.1f}s; paths selected by {path_select}"
+        )
+    elif init != "seeds":
+        raise ValueError(f"init must be 'zgrid' or 'seeds', got {init!r}")
 
     h5 = create_output_file_nuts(
         output_path,
@@ -1090,6 +1171,13 @@ def run_catalogue(
         galaxy_ids,
         pathfinder_only,
     )
+    h5.attrs["init"] = init
+    h5.attrs["path_select"] = path_select
+    h5.attrs["adapt"] = adapt
+    h5.create_dataset("path_theta", shape=(N, n_paths, P), dtype=np.float32)
+    h5.create_dataset("path_elbo", shape=(N, n_paths), dtype=np.float32)
+    h5.create_dataset("path_logp", shape=(N, n_paths), dtype=np.float32)
+    h5.create_dataset("path_init_chi2", shape=(N, n_paths), dtype=np.float32)
 
     wq: queue.Queue = queue.Queue(maxsize=2)
 
@@ -1098,7 +1186,9 @@ def run_catalogue(
             item = wq.get()
             if item is None:
                 break
-            s, e, tmap, inv, elbo, pf_ok, samp, acc, step, divf, rhat, rchi2 = item
+            s, e, tmap, inv, elbo, pf_ok, samp, acc, step, divf, rhat, chi2, nb, paths = item
+            for key, arr in zip(("path_theta", "path_elbo", "path_logp", "path_init_chi2"), paths):
+                h5[key][s:e] = arr
             h5["theta_map"][s:e] = tmap
             h5["inv_mass"][s:e] = inv
             h5["elbo"][s:e] = elbo
@@ -1107,7 +1197,9 @@ def run_catalogue(
             h5["step_size"][s:e] = step
             h5["divergent_frac"][s:e] = divf
             h5["rhat"][s:e] = rhat
-            h5["reduced_chi2_map"][s:e] = rchi2
+            h5["chi2_map"][s:e] = chi2
+            h5["n_bands_used"][s:e] = nb
+            h5["reduced_chi2_map"][s:e] = reduced_chi2(chi2, nb)
             if samp is not None:
                 h5["theta_samples"][s:e] = samp
             wq.task_done()
@@ -1150,10 +1242,19 @@ def run_catalogue(
         # ---- multi-path Pathfinder: seeds at (z, Av) covering main populations ----
         path_inits = jax.random.normal(k_pinit, (batch_size, n_paths, P)) * init_jitter
         path_inits = path_inits.at[:, 0, :].set(0.0)
+        init_chi2 = np.full((batch_size, n_paths), np.nan, dtype=np.float32)
 
         _eff_err = jnp.maximum(err_jax, min_frac_err * jnp.abs(obs_jax))
         _mask_w = (err_jax < OBS_MASK_THRESH).astype(jnp.float32) / (_eff_err**2)
-        for _pi, (_z_s, _av_s) in enumerate(_SEEDS_Z_AV[:n_paths]):
+        if grid is not None:
+            # every path starts at one of the galaxy's best separated redshift minima
+            x0, init_chi2 = grid.starts(
+                obs_b, np.asarray(_eff_err), k=n_paths, valid=err_b < OBS_MASK_THRESH
+            )
+            _u = np.clip((x0 - lows_np) / (highs_np - lows_np), 1e-4, 1.0 - 1e-4)
+            path_inits = jnp.asarray(np.log(_u / (1.0 - _u)), dtype=jnp.float32)
+            init_chi2 = init_chi2.astype(np.float32)
+        for _pi, (_z_s, _av_s) in enumerate(_SEEDS_Z_AV[:n_paths] if grid is None else []):
             _x_ref = (
                 (0.5 * (lows + highs))
                 .at[REDSHIFT_IDX]
@@ -1176,7 +1277,13 @@ def run_catalogue(
             path_inits = path_inits.at[:, _pi, LOGMASS_IDX].set(jnp.log(_lm_u / (1 - _lm_u)))
 
         pf_keys = jax.random.split(k_pf, batch_size * n_paths).reshape(batch_size, n_paths, -1)
-        pos, inv, elbo, ok = batch_pf(obs_jax, err_jax, path_inits, pf_keys)
+        pos, inv, elbo, ok, p_pos, p_elbo, p_logp = batch_pf(obs_jax, err_jax, path_inits, pf_keys)
+        paths = (
+            np.asarray(p_pos)[:true],
+            np.asarray(p_elbo)[:true],
+            np.asarray(p_logp)[:true],
+            init_chi2[:true],
+        )
         pos = np.array(pos)
         inv = np.array(inv)
         elbo = np.asarray(elbo)
@@ -1192,7 +1299,7 @@ def run_catalogue(
         metric_id_fallback += n_id_fallback
         metric_floored += n_floored
 
-        red_chi2 = reduced_chi2_at(
+        chi2_b, nb_b = chi2_at(
             pos, obs_b, err_b, emulator, band_idx, lows_np, highs_np, min_frac_err=min_frac_err
         )
 
@@ -1240,7 +1347,9 @@ def run_catalogue(
                 step[:true],
                 divf[:true],
                 rhat[:true],
-                red_chi2[:true],
+                chi2_b[:true],
+                nb_b[:true],
+                paths,
             )
         )
 
@@ -1250,14 +1359,14 @@ def run_catalogue(
         if pathfinder_only:
             diag = (
                 f"pf_ok={np.mean(pf_ok[:true]):.1%}  "
-                f"redchi2_med={np.nanmedian(red_chi2[:true]):.1f}"
+                f"chi2/band_med={np.nanmedian(chi2_b[:true] / np.maximum(nb_b[:true], 1)):.2f}"
             )
         else:
             diag = (
                 f"accept={np.nanmean(accept[:true]):.2f}  "
                 f"div={np.nanmean(divf[:true]):.1%}  "
                 f"rhat<1.05={np.mean(np.nanmax(rhat[:true], axis=1) < 1.05):.1%}  "
-                f"redchi2_med={np.nanmedian(red_chi2[:true]):.1f}  "
+                f"chi2/band_med={np.nanmedian(chi2_b[:true] / np.maximum(nb_b[:true], 1)):.2f}  "
                 f"pf_ok={np.mean(pf_ok[:true]):.1%}"
             )
         print(
@@ -1271,16 +1380,21 @@ def run_catalogue(
 
     total = time.perf_counter() - t0
     pf_ok_all = np.asarray(h5["pathfinder_ok"][:])
-    rchi2_all = np.asarray(h5["reduced_chi2_map"][:])
-    finite_rchi2 = rchi2_all[np.isfinite(rchi2_all)]
+    nb_all = np.asarray(h5["n_bands_used"][:])
+    chi2pb_all = np.asarray(h5["chi2_map"][:]) / np.maximum(nb_all, 1)
+    finite_chi2pb = chi2pb_all[np.isfinite(chi2pb_all) & (nb_all > 0)]
     print(f"\n{'=' * 60}")
     print(f"Finished {N:,} galaxies in {total:.1f}s  ({N / total:.0f} gal/s)")
     print(f"  Pathfinder OK:    {pf_ok_all.sum():,}/{N}  ({pf_ok_all.mean():.1%})")
-    if finite_rchi2.size:
-        frac_bad = float(np.mean(finite_rchi2 > 10.0))
-        print(f"  Reduced chi2 @ MAP: median={np.median(finite_rchi2):.2f}  frac>10={frac_bad:.1%}")
+    if finite_chi2pb.size:
+        frac_bad = float(np.mean(finite_chi2pb > CHI2_PER_BAND_POOR))
+        print(
+            f"  chi2 per band @ Pathfinder position: median={np.median(finite_chi2pb):.2f}  "
+            f"frac>{CHI2_PER_BAND_POOR:g}={frac_bad:.1%}  "
+            f"(bands used: median {np.median(nb_all):.0f}, {len(SPS_PARAM_NAMES)} parameters)"
+        )
         if frac_bad > 0.1:
-            print("  !  Many galaxies have a poor MAP fit -- cut on reduced_chi2_map downstream.")
+            print("  !  Many galaxies have a poor fit -- cut on chi2_map / n_bands_used.")
     print(
         f"  Metric regularised (eigen-floored): {metric_floored:,}  |  "
         f"identity fallback: {metric_id_fallback:,}"
@@ -1520,6 +1634,27 @@ def main() -> None:
     nuts_grp.add_argument(
         "--n-paths", type=int, default=4, help="Pathfinder paths per galaxy (best ELBO selected)."
     )
+    nuts_grp.add_argument(
+        "--init",
+        choices=["zgrid", "seeds"],
+        default="zgrid",
+        help="Pathfinder starting points: 'zgrid' = each galaxy's best separated minima of a "
+        "redshift x template chi2 grid (mass solved analytically); 'seeds' = four fixed "
+        "(z, Av) seeds plus jitter (the old behaviour, which loses the z > 1.5 mode).",
+    )
+    nuts_grp.add_argument(
+        "--path-select",
+        choices=["elbo", "logp"],
+        default="elbo",
+        help="Which Pathfinder path seeds NUTS: highest ELBO or highest log-posterior.",
+    )
+    nuts_grp.add_argument("--zgrid-nz", type=int, default=140, help="Redshifts in the grid.")
+    nuts_grp.add_argument(
+        "--zgrid-zmax",
+        type=float,
+        default=None,
+        help="Upper redshift of the grid (default: the redshift bound).",
+    )
     nuts_grp.add_argument("--n-chains", type=int, default=2, help="NUTS chains per galaxy.")
     nuts_grp.add_argument(
         "--n-warmup", type=int, default=300, help="NUTS dual-averaging warmup steps (discarded)."
@@ -1543,6 +1678,13 @@ def main() -> None:
         "correlations). Default is the more stable diagonal metric.",
     )
     nuts_grp.add_argument("--target-accept", type=float, default=0.8)
+    nuts_grp.add_argument(
+        "--adapt",
+        choices=["step", "window"],
+        default="step",
+        help="NUTS warmup: 'step' = fixed Pathfinder metric, step size only; 'window' = "
+        "Stan-style window adaptation of step size and metric, seeded with the Pathfinder metric.",
+    )
     nuts_grp.add_argument(
         "--step-size",
         type=float,
@@ -1712,6 +1854,7 @@ def main() -> None:
         n_pf_samples=args.n_pf_samples,
         eps0=eps0,
         target_accept=args.target_accept,
+        adapt=args.adapt,
         init_jitter=args.init_jitter,
         chain_jitter=args.chain_jitter,
         seed=args.seed,
@@ -1719,6 +1862,10 @@ def main() -> None:
         vmap_pf_paths=args.vmap_pf_paths,
         diag_metric=not args.dense_metric,
         min_frac_err=min_frac_err,
+        init=args.init,
+        path_select=args.path_select,
+        zgrid_nz=args.zgrid_nz,
+        zgrid_zmax=args.zgrid_zmax,
     )
 
 
