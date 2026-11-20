@@ -97,6 +97,7 @@ NUTS output HDF5 layout
     /accept_rate        (N, C)          mean NUTS acceptance per chain
     /step_size          (N, C)          adapted NUTS step size per chain
     /divergent_frac     (N, C)          fraction of divergent transitions
+    /n_integration_steps (N, C)         total leapfrog steps over stored draws
     /rhat               (N, P)          split-R-hat per parameter (physical space)
     /chi2_map           (N,)            total chi2 at the Pathfinder position
     /n_bands_used       (N,)            unmasked bands entering that chi2
@@ -421,19 +422,25 @@ def load_emulator_and_band_indices(emulator_path: Path, band_names: list[str]) -
 # ---------------------------------------------------------------------------
 
 
-def make_log_posterior_fn(emulator, band_idx: np.ndarray, log_prior_fn, min_frac_err: float = 0.0):
+def make_log_posterior_fn(
+    emulator, band_idx: np.ndarray, log_prior_fn, min_frac_err: float = 0.0, coordinates=None
+):
     """Return log_posterior(theta, obs_flux, flux_err).
 
-    theta is in unconstrained space; physical = lo + (hi-lo)*sigmoid(theta).
-    Jacobian of the sigmoid transform is included so the sampler sees a flat
-    prior density in the physical domain.
+    The default map to physical space is a sigmoid. With either map the
+    Jacobian preserves the configured physical prior.
     """
     lows = jnp.array([PARAM_BOUNDS[p][0] for p in SPS_PARAM_NAMES], dtype=jnp.float32)
     highs = jnp.array([PARAM_BOUNDS[p][1] for p in SPS_PARAM_NAMES], dtype=jnp.float32)
     _bidx = jnp.array(band_idx, dtype=jnp.int32)
 
     def log_posterior(theta, obs_flux, flux_err):
-        x = lows + (highs - lows) * jax.nn.sigmoid(theta)
+        if coordinates is None:
+            x = lows + (highs - lows) * jax.nn.sigmoid(theta)
+            log_jac = sigmoid_log_jacobian(theta, lows, highs)
+        else:
+            x = coordinates.to_physical(theta)
+            log_jac = coordinates.log_det(theta)
         pred = emulator.predict(x[None, :])[0][_bidx]
         mask = (flux_err < OBS_MASK_THRESH).astype(theta.dtype)
         eff_err = (
@@ -443,7 +450,6 @@ def make_log_posterior_fn(emulator, band_idx: np.ndarray, log_prior_fn, min_frac
         )
         chi2 = jnp.sum(mask * (obs_flux - pred) ** 2 / eff_err**2)
         log_norm = jnp.sum(mask * (-0.5 * LOG2PI - jnp.log(eff_err)))
-        log_jac = sigmoid_log_jacobian(theta, lows, highs)
         return log_norm - 0.5 * chi2 + log_jac + log_prior_fn(x)
 
     return log_posterior
@@ -480,6 +486,27 @@ def make_log_likelihood_physical(emulator, band_idx: np.ndarray, min_frac_err: f
     return log_likelihood
 
 
+def build_catalogue_metric(emulator, band_idx, coordinates, prior_specs, min_frac_err):
+    """Build a batched, prior-regularised Gauss–Newton metric at the Pathfinder positions."""
+    from arachne.inference.catalogue_geometry import gauss_newton_metric
+
+    prior = build_prior_sampler(SPS_PARAM_NAMES, prior_specs, PARAM_BOUNDS)
+    raw = coordinates.from_physical(prior(jax.random.PRNGKey(0), 4096))
+    prior_sd = jnp.maximum(jnp.std(raw, axis=0), 1e-3)
+    band_idx = jnp.asarray(band_idx)
+
+    def bands(theta):
+        return emulator.predict(coordinates.to_physical(theta)[None, :])[0][band_idx]
+
+    def metric(theta, obs, err):
+        effective = jnp.maximum(err, min_frac_err * jnp.abs(obs))
+        jac = jax.jacfwd(bands)(theta)
+        jac = jnp.where((err < OBS_MASK_THRESH)[:, None], jac / effective[:, None], 0.0)
+        return gauss_newton_metric(jnp.where(jnp.isfinite(jac), jac, 0.0), prior_sd)
+
+    return jax.jit(jax.vmap(metric))
+
+
 # ---------------------------------------------------------------------------
 # NUTS — compiled batch functions
 # ---------------------------------------------------------------------------
@@ -497,6 +524,8 @@ def build_batch_fns(
     path_select: str = "elbo",
     adapt: str = "step",
     diag_metric: bool = True,
+    nuts_log_posterior_fn=None,
+    metric_shrinkage: float = 0.0,
 ) -> tuple:
     """JIT-compile vmapped multi-path Pathfinder and multi-chain NUTS.
 
@@ -505,15 +534,17 @@ def build_batch_fns(
     position.  ``path_select`` chooses the path: ``"elbo"`` (highest ELBO, an estimate
     of the mode's evidence) or ``"logp"`` (highest log-posterior).
 
-    ``adapt`` sets the NUTS warmup: ``"step"`` keeps the Pathfinder metric fixed and
+    ``adapt`` sets the NUTS warmup: ``"step"`` keeps the supplied initial metric fixed and
     adapts the step size only; ``"window"`` runs Stan-style window adaptation per chain
-    (step size and metric, diagonal or dense per ``diag_metric``), seeded with the
-    Pathfinder metric.
+    (step size and metric, diagonal or dense per ``diag_metric``). An optional
+    ``nuts_log_posterior_fn`` lets NUTS use different coordinates from Pathfinder.
     """
     if adapt not in ("step", "window"):
         raise ValueError(f"adapt must be 'step' or 'window', got {adapt!r}")
     if path_select not in ("elbo", "logp"):
         raise ValueError(f"path_select must be 'elbo' or 'logp', got {path_select!r}")
+    if nuts_log_posterior_fn is None:
+        nuts_log_posterior_fn = log_posterior_fn
     eye = jnp.eye(n_params, dtype=jnp.float32)
 
     def _pf_one(obs_flux, flux_err, theta_init, rng_key):
@@ -563,7 +594,7 @@ def build_batch_fns(
 
     def _nuts_one(obs_flux, flux_err, theta_init, inv_mass, rng_key):
         def lp(theta):
-            return log_posterior_fn(theta, obs_flux, flux_err)
+            return nuts_log_posterior_fn(theta, obs_flux, flux_err)
 
         warm_key, sample_key = jax.random.split(rng_key)
         state = blackjax.nuts(lp, step_size=eps0, inverse_mass_matrix=inv_mass).init(theta_init)
@@ -571,6 +602,7 @@ def build_batch_fns(
         if n_warmup > 0 and adapt == "window":
             from blackjax.adaptation.base import get_filter_adapt_info_fn
 
+            shrinkage = {"imm_shrinkage_to_previous": metric_shrinkage} if metric_shrinkage else {}
             warmup = blackjax.window_adaptation(
                 blackjax.nuts,
                 lp,
@@ -579,6 +611,7 @@ def build_batch_fns(
                 initial_step_size=eps0,
                 target_acceptance_rate=target_accept,
                 adaptation_info_fn=get_filter_adapt_info_fn(),
+                **shrinkage,
             )
             (state, params), _ = warmup.run(warm_key, theta_init, num_steps=n_warmup)
             eps_final = params["step_size"]
@@ -605,12 +638,14 @@ def build_batch_fns(
 
         def sample_step(st, k):
             st, info = kern.step(k, st)
-            return st, (st.position, info.acceptance_rate, info.is_divergent)
+            return st, (
+                st.position, info.acceptance_rate, info.is_divergent, info.num_integration_steps
+            )
 
-        _, (samples, ar, div) = jax.lax.scan(
+        _, (samples, ar, div, n_steps) = jax.lax.scan(
             sample_step, state, jax.random.split(sample_key, n_samples)
         )
-        return samples, jnp.mean(ar), eps_final, jnp.mean(div.astype(jnp.float32))
+        return samples, jnp.mean(ar), eps_final, jnp.mean(div.astype(jnp.float32)), n_steps.sum()
 
     nuts_chains = jax.vmap(_nuts_one, in_axes=(None, None, 0, None, 0))
     batch_nuts = jax.jit(jax.vmap(nuts_chains, in_axes=(0, 0, 0, 0, 0)))
@@ -997,6 +1032,7 @@ def create_output_file_nuts(
     f.create_dataset("reduced_chi2_map", shape=(N,), dtype=np.float32)
 
     if not pathfinder_only:
+        f.create_dataset("n_integration_steps", shape=(N, C), dtype=np.int32)
         r_s = _chunk_rows(bs, C * S * P * 4, N)
         f.create_dataset(
             "theta_samples", shape=(N, C, S, P), dtype=np.float32, chunks=(r_s, C, S, P), **ckw
@@ -1093,6 +1129,8 @@ def run_catalogue(
     adapt: str = "step",
     zgrid_nz: int = 140,
     zgrid_zmax: float | None = None,
+    geometry: str = "pathfinder",
+    metric_shrinkage: float | None = None,
 ) -> None:
     """Run Pathfinder+NUTS fitting for each galaxy in the catalogue.
 
@@ -1102,6 +1140,11 @@ def run_catalogue(
     plus random jitter, the behaviour before 2026-11-19).
     """
     N, n_bands = obs_flux.shape
+    if N == 0 or batch_size < 1:
+        raise ValueError("Catalogue and batch size must be non-empty.")
+    if geometry not in ("pathfinder", "gauss-newton"):
+        raise ValueError(f"Unknown NUTS geometry: {geometry!r}")
+    batch_size = min(batch_size, N)
     P = len(SPS_PARAM_NAMES)
     band_names = [emulator.band_names[int(i)] for i in band_idx]
     lows = jnp.array([PARAM_BOUNDS[p][0] for p in SPS_PARAM_NAMES], dtype=jnp.float32)
@@ -1118,11 +1161,26 @@ def run_catalogue(
     print(
         f"  {mode_str}  |  eps0={eps0:.4g}  target_accept={target_accept}  "
         f"pf_paths={pf_path_mode}  pf_samples={n_pf_samples}  adapt={adapt}  "
-        f"metric={'diagonal' if diag_metric else 'dense'}"
+        f"metric={'diagonal' if diag_metric and geometry == 'pathfinder' else 'dense'}"
     )
 
     log_prior_fn = make_log_prior_fn(prior_specs)
     log_post_fn = make_log_posterior_fn(emulator, band_idx, log_prior_fn, min_frac_err)
+    coordinates = metric_fn = nuts_log_post_fn = to_sigmoid = None
+    if geometry == "gauss-newton" and not pathfinder_only:
+        from arachne.inference.catalogue_geometry import CatalogueCoordinates
+
+        coordinates = CatalogueCoordinates(SPS_PARAM_NAMES, PARAM_BOUNDS, prior_specs)
+        metric_fn = build_catalogue_metric(
+            emulator, band_idx, coordinates, prior_specs, min_frac_err
+        )
+        nuts_log_post_fn = make_log_posterior_fn(
+            emulator, band_idx, log_prior_fn, min_frac_err, coordinates=coordinates
+        )
+        to_sigmoid = jax.jit(coordinates.to_sigmoid)
+    if metric_shrinkage is None:
+        metric_shrinkage = 50.0 if coordinates is not None and adapt == "window" else 0.0
+    print(f"  NUTS geometry={geometry}, window metric shrinkage={metric_shrinkage:g}")
     batch_pf, batch_nuts = build_batch_fns(
         log_post_fn,
         P,
@@ -1134,7 +1192,9 @@ def run_catalogue(
         vmap_paths=vmap_pf_paths,
         path_select=path_select,
         adapt=adapt,
-        diag_metric=diag_metric,
+        diag_metric=diag_metric and coordinates is None,
+        nuts_log_posterior_fn=nuts_log_post_fn,
+        metric_shrinkage=metric_shrinkage,
     )
     grid = None
     if init == "zgrid":
@@ -1171,6 +1231,10 @@ def run_catalogue(
     h5.attrs["init"] = init
     h5.attrs["path_select"] = path_select
     h5.attrs["adapt"] = adapt
+    h5.attrs["nuts_geometry"] = geometry
+    h5.attrs["metric_shrinkage"] = metric_shrinkage
+    if coordinates is not None:
+        h5.create_dataset("nuts_initial_metric", shape=(N, P, P), dtype=np.float32)
     h5.create_dataset("path_theta", shape=(N, n_paths, P), dtype=np.float32)
     h5.create_dataset("path_elbo", shape=(N, n_paths), dtype=np.float32)
     h5.create_dataset("path_logp", shape=(N, n_paths), dtype=np.float32)
@@ -1183,7 +1247,10 @@ def run_catalogue(
             item = wq.get()
             if item is None:
                 break
-            s, e, tmap, inv, elbo, pf_ok, samp, acc, step, divf, rhat, chi2, nb, paths = item
+            (
+                s, e, tmap, inv, elbo, pf_ok, samp, acc, step, divf, rhat, chi2, nb, paths,
+                n_steps, nuts_metric,
+            ) = item  # fmt: skip
             for key, arr in zip(("path_theta", "path_elbo", "path_logp", "path_init_chi2"), paths):
                 h5[key][s:e] = arr
             h5["theta_map"][s:e] = tmap
@@ -1199,6 +1266,9 @@ def run_catalogue(
             h5["reduced_chi2_map"][s:e] = reduced_chi2(chi2, nb)
             if samp is not None:
                 h5["theta_samples"][s:e] = samp
+                h5["n_integration_steps"][s:e] = n_steps
+            if nuts_metric is not None:
+                h5["nuts_initial_metric"][s:e] = nuts_metric
             wq.task_done()
 
     writer = threading.Thread(target=_writer, daemon=True)
@@ -1301,6 +1371,7 @@ def run_catalogue(
         )
 
         # ---- multi-chain NUTS ----
+        n_steps = nuts_metric = None
         if pathfinder_only:
             samples_out = None
             accept = np.zeros((batch_size, n_chains), dtype=np.float32)
@@ -1308,23 +1379,33 @@ def run_catalogue(
             divf = np.zeros((batch_size, n_chains), dtype=np.float32)
             rhat = np.full((batch_size, P), np.nan, dtype=np.float32)
         else:
-            # Geometry-aware chain jitter: scale by posterior std from Pathfinder metric
-            _inv_diag = jnp.diagonal(jnp.asarray(inv), axis1=-2, axis2=-1)
-            _pf_std = jnp.sqrt(jnp.clip(_inv_diag, 1e-6, None))
-            cjit = (
-                jax.random.normal(k_cinit, (batch_size, n_chains, P))
-                * chain_jitter
-                * _pf_std[:, None, :]
-            )
+            starts = jnp.asarray(pos)
+            sampling_metric = inv
+            if metric_fn is not None:
+                starts = coordinates.from_sigmoid(starts)
+                sampling_metric, _, _ = regularize_metric(
+                    np.asarray(metric_fn(starts, obs_jax, err_jax))
+                )
+                nuts_metric = sampling_metric[:true]
+            cjit = chain_jitter * jax.random.normal(k_cinit, (batch_size, n_chains, P))
+            if coordinates is not None:
+                # A marginal perturbation can leave the likelihood ridge along a stiff axis.
+                chol = jnp.linalg.cholesky(jnp.asarray(sampling_metric))
+                cjit = jnp.einsum("bij,bcj->bci", chol, cjit)
+            else:
+                diagonal = jnp.diagonal(jnp.asarray(inv), axis1=-2, axis2=-1)
+                cjit = cjit * jnp.sqrt(jnp.maximum(diagonal, 1e-6))[:, None, :]
             cjit = cjit.at[:, 0, :].set(0.0)
-            chain_inits = jnp.asarray(pos)[:, None, :] + cjit
+            chain_inits = starts[:, None, :] + cjit
             nuts_keys = jax.random.split(k_nuts, batch_size * n_chains).reshape(
                 batch_size, n_chains, -1
             )
-            samples_j, accept_j, step_j, divf_j = batch_nuts(
-                obs_jax, err_jax, chain_inits, jnp.asarray(inv), nuts_keys
+            samples_j, accept_j, step_j, divf_j, steps_j = batch_nuts(
+                obs_jax, err_jax, chain_inits, jnp.asarray(sampling_metric), nuts_keys
             )
-            samples_out = np.asarray(samples_j[:true])
+            samples_j = samples_j[:true]
+            samples_out = np.asarray(samples_j if to_sigmoid is None else to_sigmoid(samples_j))
+            n_steps = np.asarray(steps_j)[:true]
             accept = np.asarray(accept_j)
             step = np.asarray(step_j)
             divf = np.asarray(divf_j)
@@ -1347,6 +1428,8 @@ def run_catalogue(
                 chi2_b[:true],
                 nb_b[:true],
                 paths,
+                n_steps,
+                nuts_metric,
             )
         )
 
@@ -1619,6 +1702,13 @@ def main() -> None:
         help="First catalogue row to process (0-based). Use with --n-galaxies "
         "to divide a catalogue across parallel workers.",
     )
+    parser.add_argument(
+        "--redshift-range",
+        type=float,
+        nargs=2,
+        metavar=("LOW", "HIGH"),
+        help="Restrict the fitted redshift prior to an interval inside the emulator fit bounds.",
+    )
 
     # ---- NUTS arguments ----
     nuts_grp = parser.add_argument_group("NUTS options (--sampler nuts)")
@@ -1676,8 +1766,22 @@ def main() -> None:
         "--adapt",
         choices=["step", "window"],
         default="step",
-        help="NUTS warmup: 'step' = fixed Pathfinder metric, step size only; 'window' = "
-        "Stan-style window adaptation of step size and metric, seeded with the Pathfinder metric.",
+        help="NUTS warmup: 'step' = fixed metric and step-size adaptation; 'window' = "
+        "Stan-style window adaptation of step size and metric.",
+    )
+    nuts_grp.add_argument(
+        "--geometry",
+        choices=["pathfinder", "gauss-newton"],
+        default="pathfinder",
+        help="NUTS coordinates and initial metric. 'gauss-newton' uses a dense, prior-regularised "
+        "flux Jacobian metric and rescaled Student-t coordinates after Pathfinder.",
+    )
+    nuts_grp.add_argument(
+        "--metric-shrinkage",
+        type=float,
+        default=None,
+        help="With --adapt window, weight of the previous metric in each covariance update "
+        "(equivalent sample count). Defaults to 50 for gauss-newton and 0 for pathfinder.",
     )
     nuts_grp.add_argument(
         "--step-size",
@@ -1773,6 +1877,13 @@ def main() -> None:
     config = load_config(Path(args.config))
     obs_flux, flux_err, galaxy_ids = load_catalogue(Path(args.catalogue), config)
     emulator, band_idx = load_emulator_and_band_indices(emulator_path, list(config["bands"].keys()))
+    if args.redshift_range is not None:
+        low, high = args.redshift_range
+        z_min, z_max = PARAM_BOUNDS["redshift"]
+        if not z_min <= low < high <= z_max:
+            parser.error(f"--redshift-range must satisfy {z_min:g} <= LOW < HIGH <= {z_max:g}.")
+        PARAM_BOUNDS["redshift"] = (low, high)
+        print(f"Fit restricted to redshifts {low:g}–{high:g}.")
 
     if args.row_start > 0:
         start = min(args.row_start, len(galaxy_ids))
@@ -1822,6 +1933,10 @@ def main() -> None:
     # NUTS path
     if args.n_chains < 1 or args.n_paths < 1:
         parser.error("--n-chains and --n-paths must be >= 1.")
+    if args.metric_shrinkage is not None and (
+        not math.isfinite(args.metric_shrinkage) or args.metric_shrinkage < 0
+    ):
+        parser.error("--metric-shrinkage must be finite and >= 0.")
 
     log_prior_fn = make_log_prior_fn(config["resolved_priors"])
     eps0 = args.step_size if args.step_size > 0 else 0.5 / (len(SPS_PARAM_NAMES) ** 0.25)
@@ -1860,6 +1975,8 @@ def main() -> None:
         path_select=args.path_select,
         zgrid_nz=args.zgrid_nz,
         zgrid_zmax=args.zgrid_zmax,
+        geometry=args.geometry,
+        metric_shrinkage=args.metric_shrinkage,
     )
 
 
