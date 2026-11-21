@@ -56,4 +56,5 @@ outputs/demo/
 scripts/outputs/
 scripts/experiments/*.log
 outputs/mock_data/
+outputs/spatial_priors/
 

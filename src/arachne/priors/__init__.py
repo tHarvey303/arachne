@@ -9,6 +9,7 @@
 
 from arachne.priors.physical import IndependentUniformPrior, LogNormalPrior
 from arachne.priors.spatial import GradientPenaltyPrior, TotalVariationPrior
+from arachne.priors.spatial_calibration import load_spatial_calibration
 from arachne.priors.specs import (
     DEFAULT_PRIORS,
     SUPPORTED_DISTS,
@@ -32,6 +33,7 @@ __all__ = [
     "build_component_log_prior",
     "build_log_prior",
     "build_prior_sampler",
+    "load_spatial_calibration",
     "log_prior_1d",
     "prior_config_template",
     "resolve_prior_specs",
