@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+from collections.abc import Sequence
 from pathlib import Path
 
 
@@ -20,6 +21,7 @@ def load_spatial_calibration(
     redshift: float,
     re_pixels: float | None = None,
     kpc_per_pixel: float | None = None,
+    fields: Sequence[str] | None = None,
     sample_hyperparameters: bool = False,
     allow_extrapolation: bool = False,
 ) -> dict:
@@ -32,6 +34,7 @@ def load_spatial_calibration(
             radius-normalized length distribution.
         kpc_per_pixel: Physical pixel size in kpc. Selects the pooled physical length
             distribution. Supply exactly one of this and re_pixels.
+        fields: Subset of the transferable fields to load. The default selects all of them.
         sample_hyperparameters: Include population scatter as Gaussian priors on log
             length and amplitude. Otherwise use respective population medians.
         allow_extrapolation: Permit use outside the redshift interval in the file.
@@ -59,7 +62,11 @@ def load_spatial_calibration(
     if sample_hyperparameters:
         result["hyper_priors"] = {}
     nu = _positive(data["nu"], "nu")
-    for name in data["transferable_fields"]:
+    names = data["transferable_fields"] if fields is None else fields
+    unsupported = set(names) - set(data["transferable_fields"])
+    if unsupported:
+        raise ValueError(f"Fields without a direct calibration: {sorted(unsupported)}")
+    for name in names:
         field = data["fields"][name]
         length = field["length"][length_unit]
         amplitude = field["amplitude"]

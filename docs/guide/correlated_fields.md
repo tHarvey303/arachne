@@ -4,6 +4,8 @@ Per-pixel SPS parameter maps with Gaussian-random-field priors (`CorrelatedField
 
 `CorrelatedFieldMap` ([`src/arachne/spatial/correlated_field.py`](../../src/arachne/spatial/correlated_field.py))
 fits per-pixel SPS parameter maps of one resolved galaxy without decomposing it into components.
+The [empirical spatial priors study](../design/spatial_prior_calibration.md) provides optional
+residual Matérn scales measured from MaNGA and GalSyn maps, plus held-out recovery benchmarks.
 Every emulator parameter plays one of four roles: a **field** (a map with a Gaussian-random-field
 prior; the mass parameter must be one, `log_mass` *per pixel*, unbounded because the emulator is
 exactly linear in mass), a **global** (one scalar for every pixel, uniform within its bounds or

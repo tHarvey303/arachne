@@ -42,6 +42,8 @@ def orient_sfh_basis(basis, agebins):
     gradient = (formed_ssfr100(steps, agebins) - formed_ssfr100(-steps, agebins)) / 2e-4
     first = basis @ gradient
     sensitivity = np.linalg.norm(first)
+    if sensitivity == 0:
+        return basis, sensitivity
     first /= sensitivity
     rotation = np.array([first, [-first[1], first[0]]])
     return rotation @ basis, sensitivity
@@ -149,13 +151,13 @@ def benchmark(row, path, fit_emulator, test_emulator, calibration, args):
     neutral = {**demo.NEUTRAL_GLOBALS, **demo.NEUTRAL, **fixed}
     mass_mean = mass_map_from_image(obs, fit_emulator, neutral)
     # Estimate the radius from blurred fitted photometry, independent of the truth maps.
-    intensity = np.maximum(obs.flux[-1], 0)
+    intensity = np.where(obs.flux[-1] >= 2 * np.sqrt(obs.variance[-1]), obs.flux[-1], 0)
     yy, xx = np.indices(intensity.shape)
     x, y = (intensity * xx).sum() / intensity.sum(), (intensity * yy).sum() / intensity.sum()
     radii = np.hypot(xx - x, yy - y).ravel()
     order = np.argsort(radii)
     curve = np.cumsum(intensity.ravel()[order])
-    proxy_re = float(np.interp(curve[-1] / 2, curve, radii[order]))
+    proxy_re = max(0.5, float(np.interp(curve[-1] / 2, curve, radii[order])))
     priors = load_spatial_calibration(
         args.calibration, redshift=z, re_pixels=proxy_re, allow_extrapolation=True
     )

@@ -69,3 +69,5 @@ def test_requires_explicit_extrapolation_and_valid_units(calibration):
         load_spatial_calibration(calibration, redshift=2, re_pixels=8, kpc_per_pixel=0.2)
     with pytest.raises(ValueError, match="positive"):
         load_spatial_calibration(calibration, redshift=2, kpc_per_pixel=0)
+    with pytest.raises(ValueError, match="without a direct calibration"):
+        load_spatial_calibration(calibration, redshift=2, re_pixels=8, fields=["logssfr_100myr"])
