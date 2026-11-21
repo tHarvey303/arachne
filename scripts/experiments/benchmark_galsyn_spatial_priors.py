@@ -76,14 +76,20 @@ def mock_observation(path, galaxy, psf_dir, n, snr, rng):
         )
 
     mass = block_sum(galaxy["mass"])
-    truth = {
-        "Av": regrid_mean(galaxy["maps"]["Av"], galaxy["mass"]),
-        "log10metallicity": regrid_mean(galaxy["maps"]["log10metallicity"], galaxy["mass"]),
-        "logssfr_100myr": np.log10(
-            np.maximum(block_sum(galaxy["sfr100"]) / np.maximum(mass, 1), 1e-11)
-        ),
-    }
+    dust_on, dust_off = galaxy["v_flux_pair"]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        truth = {
+            "Av": -2.5 * np.log10(block_sum(dust_on) / block_sum(dust_off)),
+            "log10metallicity": np.log10(
+                regrid_mean(10.0 ** galaxy["maps"]["log10metallicity"], galaxy["mass"])
+            ),
+            "logssfr_100myr": np.log10(
+                np.maximum(block_sum(galaxy["sfr100"]) / np.maximum(mass, 1), 1e-11)
+            ),
+        }
     score = (mass >= 1.6e6) & (block_sum(galaxy["radius"]) / factor**2 <= 1.25 * galaxy["re_px"])
+    for image in truth.values():
+        score &= np.isfinite(image)
     if score.sum() < 10:
         raise ValueError(f"Insufficient resolved score area in {path.name}")
 

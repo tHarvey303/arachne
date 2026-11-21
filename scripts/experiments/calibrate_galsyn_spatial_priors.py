@@ -22,6 +22,7 @@ FIELD_UNITS = {"Av": "mag", "log10metallicity": "dex", "logssfr_100myr": "dex"}
 AMPLITUDE_BOUNDS = {"Av": (0.001, 3), "log10metallicity": (0.001, 2), "logssfr_100myr": (0.005, 3)}
 NUISANCE_FLOORS = {"Av": 0.01, "log10metallicity": 0.015, "logssfr_100myr": 0.05}
 SNAPSHOTS = (50, 33, 25)
+SSFR_FLOOR = 1e-11
 
 
 def download_drive(file_id, path):
@@ -105,7 +106,7 @@ def select_sample(index, history, per_group, seed):
     return sample
 
 
-def read_truth(path):
+def read_truth(path, ssfr_floor=SSFR_FLOOR):
     """Read intrinsic maps and obtain a projected half-stellar-mass radius."""
     with fits.open(path, memmap=False) as h:
         header = h[0].header
@@ -139,7 +140,7 @@ def read_truth(path):
     re_px = float(np.interp(cumulative[-1] / 2, cumulative, r[use][order]))
     with np.errstate(divide="ignore", invalid="ignore"):
         z_dex = np.log10(metal * 0.02)
-        ssfr = np.log10(np.maximum(sfr100 / mass, 1e-11))
+        ssfr = np.log10(np.maximum(sfr100 / mass, ssfr_floor))
         veff = -2.5 * np.log10(flux_d / flux_0)
     return {
         "maps": {"Av": veff, "log10metallicity": z_dex, "logssfr_100myr": ssfr},
@@ -151,11 +152,12 @@ def read_truth(path):
         "pixel_arcsec": scale,
         "center": (x, y),
         "mean_particle_av": av,
+        "v_flux_pair": (flux_d, flux_0),
         "z": z,
     }
 
 
-def measure_galaxy(galaxy, rng):
+def measure_galaxy(galaxy, rng, ssfr_floor=SSFR_FLOOR):
     """Measure intrinsic correlations above particle and pixel sampling scales."""
     r, re = galaxy["radius"], galaxy["re_px"]
     mass = galaxy["mass"]
@@ -177,7 +179,9 @@ def measure_galaxy(galaxy, rng):
     fits_by_field = fit_profiles(geom, maps, LENGTHS_RE * re, AMPLITUDE_BOUNDS)
     for name, result in fits_by_field.items():
         result["fraction_sfr_floor"] = (
-            float(np.mean(maps[name][0] <= -11)) if name == "logssfr_100myr" else None
+            float(np.mean(maps[name][0] <= np.log10(ssfr_floor)))
+            if name == "logssfr_100myr"
+            else None
         )
     return fits_by_field
 
@@ -190,7 +194,10 @@ def main():
     parser.add_argument("--outdir", type=Path, required=True)
     parser.add_argument("--per-group", type=int, default=10)
     parser.add_argument("--seed", type=int, default=261122)
+    parser.add_argument("--ssfr-floor", type=float, default=SSFR_FLOOR)
     args = parser.parse_args()
+    if not np.isfinite(args.ssfr_floor) or args.ssfr_floor <= 0:
+        parser.error("--ssfr-floor must be finite and positive")
     args.cache.mkdir(parents=True, exist_ok=True)
     args.outdir.mkdir(parents=True, exist_ok=True)
     manifest = args.outdir / "sample.json"
@@ -222,6 +229,7 @@ def main():
         "field_units": FIELD_UNITS,
         "transferable_fields": ["Av", "log10metallicity"],
         "measurement_error_floor": NUISANCE_FLOORS,
+        "ssfr_floor_per_year": args.ssfr_floor,
         "ell_over_re_grid": LENGTHS_RE.tolist(),
         "galaxies": [],
     }
@@ -230,9 +238,9 @@ def main():
         if not path.exists():
             print(row["id"], "unavailable", flush=True)
             continue
-        galaxy = read_truth(path)
+        galaxy = read_truth(path, args.ssfr_floor)
         rng = np.random.default_rng(np.random.SeedSequence([args.seed, *map(ord, row["id"])]))
-        fields = measure_galaxy(galaxy, rng)
+        fields = measure_galaxy(galaxy, rng, args.ssfr_floor)
         result["galaxies"].append(
             {
                 **row,

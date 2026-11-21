@@ -82,7 +82,10 @@ def main():
     parser.add_argument("--outdir", type=Path, required=True)
     parser.add_argument("--per-group", type=int, default=24)
     parser.add_argument("--seed", type=int, default=261121)
+    parser.add_argument("--error-floor-scale", type=float, default=1.0)
     args = parser.parse_args()
+    if not np.isfinite(args.error_floor_scale) or args.error_floor_scale <= 0:
+        parser.error("--error-floor-scale must be finite and positive")
     args.cache.mkdir(parents=True, exist_ok=True)
     args.outdir.mkdir(parents=True, exist_ok=True)
     catalogue = args.cache / CATALOGUE
@@ -98,7 +101,7 @@ def main():
     from pipe3d_field_measurements import measure_sample
 
     records = json.loads((args.outdir / "sample.json").read_text())
-    measure_sample(records, args.cache, args.outdir, catalogue, args.seed)
+    measure_sample(records, args.cache, args.outdir, catalogue, args.seed, args.error_floor_scale)
 
 
 if __name__ == "__main__":

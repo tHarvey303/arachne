@@ -104,7 +104,7 @@ def read_maps(path, target, template):
     }
 
 
-def extract_bins(galaxy, rng, max_bins=160):
+def extract_bins(galaxy, rng, max_bins=160, error_floor_scale=1):
     """Sample continuum bins within 1.5 Re and retain one measurement per bin."""
     seg, crop = galaxy["segmentation"], galaxy["crop"]
     labels = np.unique(seg[crop])
@@ -120,7 +120,7 @@ def extract_bins(galaxy, rng, max_bins=160):
     fields = {}
     for name, (values, errors) in galaxy["maps"].items():
         y = values[index]
-        sigma = np.hypot(errors[index], FLOORS[name])
+        sigma = np.hypot(errors[index], error_floor_scale * FLOORS[name])
         if name == "Av":
             # Keep the physical boundary in the aperture. The Gaussian fit is an approximation
             # when the upstream optimiser puts many distinct bins exactly on the same floor.
@@ -129,21 +129,21 @@ def extract_bins(galaxy, rng, max_bins=160):
     return geom, fields
 
 
-def measure_sample(records, cache, outdir, catalogue, seed):
+def measure_sample(records, cache, outdir, catalogue, seed, error_floor_scale=1):
     """Measure per-galaxy profile likelihoods with stable splits and bin sampling."""
     template = template_metadata(catalogue)
     result = {
         "version": 1,
         "nu": NU,
         "ell_over_re_grid": LENGTHS_RE.tolist(),
-        "measurement_error_floor": FLOORS,
+        "measurement_error_floor": {k: v * error_floor_scale for k, v in FLOORS.items()},
         "seed": seed,
         "galaxies": [],
     }
     for row in records:
         galaxy = read_maps(cache / row["file"], row, template)
         rng = np.random.default_rng(np.random.SeedSequence([seed, *map(ord, row["id"])]))
-        sample = extract_bins(galaxy, rng)
+        sample = extract_bins(galaxy, rng, error_floor_scale=error_floor_scale)
         beam_re = galaxy["fwhm_px"] / galaxy["re_px"]
         fields = {}
         if sample is not None:
