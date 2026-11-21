@@ -49,7 +49,7 @@ def read_maps(path, target, template):
             simplefilter("ignore", FITSFixedWarning)
             wcs = WCS(og).celestial
         pixel_arcsec = float(np.mean(proj_plane_pixel_scales(wcs)) * 3600)
-        x0, y0 = wcs.world_to_pixel_values(target["ra"], target["dec"])
+        x0, y0 = map(float, wcs.world_to_pixel_values(target["ra"], target["dec"]))
         av_plane = hdus["SSP"].header["FILE_11"]
         if "Av_ssp" not in av_plane or "mass weighted metallicity" not in (
             hdus["SSP"].header["DESC_9"].lower()
