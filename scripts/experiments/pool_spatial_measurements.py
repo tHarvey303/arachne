@@ -73,15 +73,16 @@ def summarize(measurements):
     training_z = [g["z"] for g in measurements["galaxies"] if g["split"] == "train"]
     result = {
         "version": 1,
-        "source": RELEASE,
+        "source": measurements.get("source", RELEASE),
         "nu": measurements["nu"],
         "redshift_range": [min(training_z), max(training_z)],
-        "transferable_fields": ["Av", "log10metallicity"],
+        "transferable_fields": measurements.get("transferable_fields", ["Av", "log10metallicity"]),
         "fields": {},
     }
-    for name, unit in FIELD_UNITS.items():
+    for name, unit in measurements.get("field_units", FIELD_UNITS).items():
         available = [g for g in measurements["galaxies"] if name in g["fields"]]
-        if name.startswith("sfh_"):
+        observational_sfh = name == "sfh_10_100_over_100_1000_myr"
+        if observational_sfh:
             available = [g for g in available if g["group"] == "active"]
         train = [g for g in available if g["split"] == "train"]
         test = [g for g in available if g["split"] == "test"]
@@ -101,14 +102,18 @@ def summarize(measurements):
                 models[length_unit]["test_score_delta_from_pooled_re"] = resample_score(
                     np.asarray(scores) - scores_re, rng
                 )
-        groups = {}
-        if not name.startswith("sfh_"):
-            for group in ("active", "low_activity"):
-                group_train = [g for g in train if g["group"] == group]
-                loc, scale = fit_lengths(group_train, name, cells, "re")
-                groups[group] = (loc, scale)
-            scores = [score_length(g, name, cells, groups[g["group"]], "re") for g in test]
-            models["activity_re"] = {
+        for key in ("group", "snapshot"):
+            if key not in train[0] or (key == "group" and observational_sfh):
+                continue
+            groups = {}
+            for group in sorted({g[key] for g in train}):
+                group_train = [g for g in train if g[key] == group]
+                if len(group_train) >= 3:
+                    groups[group] = fit_lengths(group_train, name, cells, "re")
+            if len(groups) < 2 or any(g[key] not in groups for g in test):
+                continue
+            scores = [score_length(g, name, cells, groups[g[key]], "re") for g in test]
+            models["activity_re" if key == "group" else "snapshot_re"] = {
                 "groups": {
                     group: {"median": float(np.exp(loc)), "log_scatter": scale}
                     for group, (loc, scale) in groups.items()
@@ -124,19 +129,23 @@ def summarize(measurements):
             if m["delta_null"] >= 4.5:
                 weights = length_weights(cells, *prior_re) * np.exp(m["log_likelihood"])
                 amplitudes.append(np.average(np.log(m["amplitude_profile"]), weights=weights))
-                if (
-                    0 < m["ci_low_index"] <= m["ci_high_index"] < len(ell) - 1
-                    and ell[m["ci_low_index"]] >= 0.25 * galaxy["beam_fwhm_over_re"]
-                ):
+                if 0 < m["ci_low_index"] <= m["ci_high_index"] < len(ell) - 1 and ell[
+                    m["ci_low_index"]
+                ] >= max(0.25 * galaxy["beam_fwhm_over_re"], galaxy.get("pixel_over_re", 0)):
                     resolved.append(galaxy["id"])
-        p16, p50, p84 = np.quantile(amplitudes, [0.16, 0.5, 0.84])
+        amplitude = None
+        if amplitudes:
+            p16, p50, p84 = np.quantile(amplitudes, [0.16, 0.5, 0.84])
+            amplitude = {"median": float(np.exp(p50)), "log_scatter": float((p84 - p16) / 2)}
+        else:
+            result["transferable_fields"] = [f for f in result["transferable_fields"] if f != name]
         result["fields"][name] = {
             "unit": unit,
             "n_train": len(train),
             "n_test": len(test),
             "n_train_detected": len(amplitudes),
             "n_train_bounded": len(resolved),
-            "amplitude": {"median": float(np.exp(p50)), "log_scatter": float((p84 - p16) / 2)},
+            "amplitude": amplitude,
             "length": models,
         }
     return result
