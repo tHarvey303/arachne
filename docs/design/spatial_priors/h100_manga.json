@@ -1,0 +1,326 @@
+{
+  "devices": [
+    "cuda:0"
+  ],
+  "snr": 40,
+  "galaxies": [
+    {
+      "id": "1-626658",
+      "plateifu": "8983-12701",
+      "file": "manga-8983-12701.Pipe3D.cube.fits.gz",
+      "url": "https://data.sdss.org/sas/dr17/manga/spectro/pipe3d/v3_1_1/3.1.1/8983/manga-8983-12701.Pipe3D.cube.fits.gz",
+      "split": "test",
+      "group": "active",
+      "z": 0.0253738,
+      "re_arcsec": 7.15699,
+      "re_kpc": 3.61380635174859,
+      "ra": 203.830208122,
+      "dec": 26.424780837,
+      "pa_deg": 167.7236,
+      "axis_ratio": 0.335948684188488,
+      "log_mass": 10.5620243382074,
+      "scoring_pixels": 85,
+      "baseline": {
+        "map_rmse": {
+          "Av": 0.07912154307217506,
+          "log10metallicity": 0.1269972357382366,
+          "log_mass": 0.08698748382727678,
+          "sfh_contrast": 0.9374310027431726
+        },
+        "withheld_rmse_in_noise_units": {
+          "HST/ACS_WFC.F475W": 1.4078578989444273,
+          "JWST/NIRCam.F182M": 1.3624177925410215
+        },
+        "fit_log_likelihood": -44643.74340213857,
+        "n_params": 2383,
+        "seconds": 66.32215984305367,
+        "converged": true,
+        "status": "converged",
+        "n_hvp": 814
+      },
+      "calibrated": {
+        "map_rmse": {
+          "Av": 0.2352292684338818,
+          "log10metallicity": 0.297654812103041,
+          "log_mass": 0.055133379931471556,
+          "sfh_contrast": 0.810138022797675
+        },
+        "withheld_rmse_in_noise_units": {
+          "HST/ACS_WFC.F475W": 1.2483314626425008,
+          "JWST/NIRCam.F182M": 1.3091086122741513
+        },
+        "fit_log_likelihood": -44231.535251344205,
+        "n_params": 5563,
+        "seconds": 218.75650048814714,
+        "converged": true,
+        "status": "converged",
+        "n_hvp": 3103
+      }
+    },
+    {
+      "id": "1-36897",
+      "plateifu": "8078-12705",
+      "file": "manga-8078-12705.Pipe3D.cube.fits.gz",
+      "url": "https://data.sdss.org/sas/dr17/manga/spectro/pipe3d/v3_1_1/3.1.1/8078/manga-8078-12705.Pipe3D.cube.fits.gz",
+      "split": "test",
+      "group": "active",
+      "z": 0.0249439,
+      "re_arcsec": 11.8501,
+      "re_kpc": 5.88546587876729,
+      "ra": 42.27915,
+      "dec": -0.90221,
+      "pa_deg": 241.697,
+      "axis_ratio": 0.393921716298134,
+      "log_mass": 9.82209706074806,
+      "scoring_pixels": 275,
+      "baseline": {
+        "map_rmse": {
+          "Av": 0.08633474579593926,
+          "log10metallicity": 0.18750415833307443,
+          "log_mass": 0.12561642894595726,
+          "sfh_contrast": 0.6904259777476807
+        },
+        "withheld_rmse_in_noise_units": {
+          "HST/ACS_WFC.F475W": 1.921060565186376,
+          "JWST/NIRCam.F182M": 1.401650497823122
+        },
+        "fit_log_likelihood": -34112.89144966115,
+        "n_params": 2383,
+        "seconds": 76.28729274123907,
+        "converged": true,
+        "status": "converged",
+        "n_hvp": 1534
+      },
+      "calibrated": {
+        "map_rmse": {
+          "Av": 0.10722144231019996,
+          "log10metallicity": 0.2033673876573238,
+          "log_mass": 0.10788584079171384,
+          "sfh_contrast": 0.6398082388231062
+        },
+        "withheld_rmse_in_noise_units": {
+          "HST/ACS_WFC.F475W": 1.250950438127514,
+          "JWST/NIRCam.F182M": 1.1852075126056736
+        },
+        "fit_log_likelihood": -33227.6497040783,
+        "n_params": 4779,
+        "seconds": 258.5679122651927,
+        "converged": true,
+        "status": "converged",
+        "n_hvp": 4242
+      }
+    },
+    {
+      "id": "1-294489",
+      "plateifu": "9894-12701",
+      "file": "manga-9894-12701.Pipe3D.cube.fits.gz",
+      "url": "https://data.sdss.org/sas/dr17/manga/spectro/pipe3d/v3_1_1/3.1.1/9894/manga-9894-12701.Pipe3D.cube.fits.gz",
+      "split": "test",
+      "group": "active",
+      "z": 0.023336,
+      "re_arcsec": 10.3793,
+      "re_kpc": 4.8182416641635,
+      "ra": 250.312960997,
+      "dec": 20.752210151,
+      "pa_deg": 237.702,
+      "axis_ratio": 0.477254837536491,
+      "log_mass": 9.80890385517872,
+      "scoring_pixels": 248,
+      "baseline": {
+        "map_rmse": {
+          "Av": 0.16883851575488243,
+          "log10metallicity": 0.3267589348423626,
+          "log_mass": 0.2205088216708589,
+          "sfh_contrast": 2.290942235422279
+        },
+        "withheld_rmse_in_noise_units": {
+          "HST/ACS_WFC.F475W": 2.787347709942405,
+          "JWST/NIRCam.F182M": 1.631285702087608
+        },
+        "fit_log_likelihood": -38534.12441202554,
+        "n_params": 2383,
+        "seconds": 264.3268805257976,
+        "converged": true,
+        "status": "converged",
+        "n_hvp": 9920
+      },
+      "calibrated": {
+        "map_rmse": {
+          "Av": 0.2862221468264799,
+          "log10metallicity": 0.4579526640239391,
+          "log_mass": 0.11624091937189855,
+          "sfh_contrast": 2.303330067393345
+        },
+        "withheld_rmse_in_noise_units": {
+          "HST/ACS_WFC.F475W": 1.8228042094123122,
+          "JWST/NIRCam.F182M": 1.262382723066201
+        },
+        "fit_log_likelihood": -37017.14783230313,
+        "n_params": 5029,
+        "seconds": 293.4755133627914,
+        "converged": true,
+        "status": "converged",
+        "n_hvp": 5000
+      }
+    },
+    {
+      "id": "1-335271",
+      "plateifu": "11968-12704",
+      "file": "manga-11968-12704.Pipe3D.cube.fits.gz",
+      "url": "https://data.sdss.org/sas/dr17/manga/spectro/pipe3d/v3_1_1/3.1.1/11968/manga-11968-12704.Pipe3D.cube.fits.gz",
+      "split": "test",
+      "group": "low_activity",
+      "z": 0.033779178,
+      "re_arcsec": 10.26119,
+      "re_kpc": 6.81637900732377,
+      "ra": 229.764139726,
+      "dec": 8.13876621113,
+      "pa_deg": 196.25339,
+      "axis_ratio": 0.252343272947511,
+      "log_mass": 11.2072115213285,
+      "scoring_pixels": 128,
+      "baseline": {
+        "map_rmse": {
+          "Av": 0.07528924818547035,
+          "log10metallicity": 0.11880168660392855,
+          "log_mass": 0.271388292983387,
+          "sfh_contrast": 3.021852227045055
+        },
+        "withheld_rmse_in_noise_units": {
+          "HST/ACS_WFC.F475W": 1.7838268371162846,
+          "JWST/NIRCam.F182M": 1.5594393161661357
+        },
+        "fit_log_likelihood": -47542.016644209514,
+        "n_params": 2383,
+        "seconds": 72.96026415610686,
+        "converged": false,
+        "status": "max_iter",
+        "n_hvp": 1341
+      },
+      "calibrated": {
+        "map_rmse": {
+          "Av": 0.31230345340555754,
+          "log10metallicity": 0.2993779953989637,
+          "log_mass": 0.19759936123909733,
+          "sfh_contrast": 2.6783177155885856
+        },
+        "withheld_rmse_in_noise_units": {
+          "HST/ACS_WFC.F475W": 1.312031240255553,
+          "JWST/NIRCam.F182M": 1.159462980902879
+        },
+        "fit_log_likelihood": -47183.262849806255,
+        "n_params": 5049,
+        "seconds": 135.67707367613912,
+        "converged": true,
+        "status": "converged",
+        "n_hvp": 1885
+      }
+    },
+    {
+      "id": "1-211519",
+      "plateifu": "12667-12705",
+      "file": "manga-12667-12705.Pipe3D.cube.fits.gz",
+      "url": "https://data.sdss.org/sas/dr17/manga/spectro/pipe3d/v3_1_1/3.1.1/12667/manga-12667-12705.Pipe3D.cube.fits.gz",
+      "split": "test",
+      "group": "low_activity",
+      "z": 0.032882314,
+      "re_arcsec": 10.096372,
+      "re_kpc": 6.55872130823195,
+      "ra": 249.446596411,
+      "dec": 36.1149676106,
+      "pa_deg": 160.727264,
+      "axis_ratio": 0.813286247786109,
+      "log_mass": 10.9128835080331,
+      "scoring_pixels": 407,
+      "baseline": {
+        "map_rmse": {
+          "Av": 0.07854708845563037,
+          "log10metallicity": 0.07053135063022899,
+          "log_mass": 0.0964529813489976,
+          "sfh_contrast": 1.3030876733166235
+        },
+        "withheld_rmse_in_noise_units": {
+          "HST/ACS_WFC.F475W": 1.605196856457172,
+          "JWST/NIRCam.F182M": 1.5868329900921674
+        },
+        "fit_log_likelihood": -42896.51213441267,
+        "n_params": 2383,
+        "seconds": 105.96165976813063,
+        "converged": true,
+        "status": "converged",
+        "n_hvp": 3054
+      },
+      "calibrated": {
+        "map_rmse": {
+          "Av": 0.40660752518276977,
+          "log10metallicity": 0.5017659909304303,
+          "log_mass": 0.1038652995383899,
+          "sfh_contrast": 0.9856702970987311
+        },
+        "withheld_rmse_in_noise_units": {
+          "HST/ACS_WFC.F475W": 1.254639299544198,
+          "JWST/NIRCam.F182M": 1.343727597084174
+        },
+        "fit_log_likelihood": -42318.855293843124,
+        "n_params": 5077,
+        "seconds": 250.54119884502143,
+        "converged": true,
+        "status": "converged",
+        "n_hvp": 3688
+      }
+    },
+    {
+      "id": "1-177478",
+      "plateifu": "7959-12703",
+      "file": "manga-7959-12703.Pipe3D.cube.fits.gz",
+      "url": "https://data.sdss.org/sas/dr17/manga/spectro/pipe3d/v3_1_1/3.1.1/7959/manga-7959-12703.Pipe3D.cube.fits.gz",
+      "split": "test",
+      "group": "low_activity",
+      "z": 0.0311406,
+      "re_arcsec": 10.7324,
+      "re_kpc": 6.64391656804076,
+      "ra": 256.765166396,
+      "dec": 31.4236932668,
+      "pa_deg": 219.777,
+      "axis_ratio": 0.403771792201174,
+      "log_mass": 10.9109021052649,
+      "scoring_pixels": 230,
+      "baseline": {
+        "map_rmse": {
+          "Av": 0.0777326788895285,
+          "log10metallicity": 0.11369789198345799,
+          "log_mass": 0.11339892831469046,
+          "sfh_contrast": 3.1738560968418854
+        },
+        "withheld_rmse_in_noise_units": {
+          "HST/ACS_WFC.F475W": 1.505294080960368,
+          "JWST/NIRCam.F182M": 1.4652715941484704
+        },
+        "fit_log_likelihood": -43714.80162525317,
+        "n_params": 2383,
+        "seconds": 73.46674745390192,
+        "converged": true,
+        "status": "converged",
+        "n_hvp": 1501
+      },
+      "calibrated": {
+        "map_rmse": {
+          "Av": 0.38326541037341516,
+          "log10metallicity": 0.42317403256137337,
+          "log_mass": 0.08630838855360955,
+          "sfh_contrast": 3.116899652483121
+        },
+        "withheld_rmse_in_noise_units": {
+          "HST/ACS_WFC.F475W": 1.180794328037551,
+          "JWST/NIRCam.F182M": 1.346803333305685
+        },
+        "fit_log_likelihood": -43311.69972121445,
+        "n_params": 4967,
+        "seconds": 232.8813538113609,
+        "converged": true,
+        "status": "converged",
+        "n_hvp": 3465
+      }
+    }
+  ]
+}

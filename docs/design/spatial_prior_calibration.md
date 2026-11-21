@@ -57,6 +57,13 @@ the diagonal with floors of 0.025 mag for attenuation and 0.025 dex for metallic
 A 0.20 dex working floor is used for the template SFH contrast. Correlated spectral-fit errors
 and the nonlinear response of the continuum fit to PSF mixing are outside this likelihood.
 
+Population fitting integrates each galaxy's length profile against a Gaussian in
+\(\log\ell\), with the end grid cells absorbing the unresolved tails. The log scatter is
+bounded from 0.30 to 1.50. The amplitude summary uses galaxies whose fitted residual
+component improved the restricted log likelihood by at least 4.5 nats. For those galaxies
+it averages the log-amplitude profile over length with the pooled radius model as a weight.
+The reported scatter comes from the 16th and 84th percentiles across galaxies.
+
 ### GalSyn simulations
 
 The 60 GalSyn DR1 TNG50 progenitors span snapshots 50, 33 and 25 (approximately \(z=1,2,3\)).
@@ -91,6 +98,48 @@ moved the recent-sSFR length from 0.278 to \(0.282R_e\) and the amplitude from 0
 `--ssfr-floor 1e-12`, respectively.
 [MaNGA sensitivity](spatial_priors/manga_sensitivity.json),
 [GalSyn sensitivity](spatial_priors/galsyn_sensitivity.json)
+
+## H100 recovery
+
+The controlled MaNGA benchmark fitted six held-out galaxies at S/N 40 on a 28×28 grid.
+The maps used to render the photometry retain the IFU and continuum-segment resolution.
+Only attenuation and stellar-metallicity hyperparameters changed between the two fits.
+Five pairs converged in both arms. The sixth baseline reached the Newton iteration limit,
+and its outputs are included in the results JSON.
+
+Among the five converged pairs, the median calibrated-to-baseline RMSE ratios were 2.97 for
+attenuation, 2.34 for stellar metallicity, 0.76 for log mass and 0.93 for the coarse SFH
+contrast. Both withheld bands improved in all five converged pairs, with median ratios of
+0.78 and 0.85. The empirical priors more than doubled the median number of coefficients
+from 2,383 to 5,029. Median fitting time increased from 76 to 251 seconds. These mock
+results demonstrate that better photometric prediction can coexist with worse physical
+map recovery under a posterior mode.
+[Per-galaxy MaNGA H100 results](spatial_priors/h100_manga.json)
+
+The GalSyn benchmark fitted the released mock images of six held-out galaxies, two per
+snapshot, on a 24×24 grid. Both arms used the same frequency cutoff at 15% of the sharpest
+band's PSF modulation transfer function, and the same dense Newton preconditioner recipe.
+Five pairs converged by the optimizer's stopping criterion. Both arms reached the iteration
+limit for the compact, low-activity galaxy at \(z\approx3\).
+
+| GalSyn metric | Median calibrated / baseline RMSE | Improved galaxies |
+| --- | ---: | ---: |
+| Attenuation map | 0.96 | 3/5 |
+| Stellar metallicity map | 1.64 | 2/5 |
+| Recent log sSFR map | 1.13 | 2/5 |
+| Attenuation after removing the per-galaxy map offset | 1.01 | 2/5 |
+| Stellar metallicity after removing the per-galaxy map offset | 0.93 | 5/5 |
+| Recent log sSFR after removing the per-galaxy map offset | 1.09 | 2/5 |
+| Withheld F182M photometry | 0.89 | 5/5 |
+| Withheld F335M photometry | 0.89 | 3/5 |
+
+In the converged GalSyn pairs, the median coefficient counts were 2,693 and 2,695, and the
+median fit took 59 seconds in either arm. The strongest case for using the calibrated
+model is as an opt-in check on relative metallicity structure or withheld-band prediction.
+Absolute metallicity and recent-SFH recovery were weaker. These recovery tests use
+single-start MAP fits and one noise draw per galaxy.
+Posterior coverage would require converged posterior draws and repeated noise realizations.
+[Per-galaxy GalSyn H100 results](spatial_priors/h100_galsyn.json)
 
 ## Applying a calibration
 

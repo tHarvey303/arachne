@@ -1,0 +1,399 @@
+{
+  "devices": [
+    "cuda:0"
+  ],
+  "snr": 40,
+  "preconditioner": "dense",
+  "galaxies": [
+    {
+      "id": "50-363059",
+      "lineage": "505100",
+      "snapshot": 50,
+      "group": "active",
+      "z": 0.99729422578194,
+      "file": "galsyn_tng50_shalo_50_363059.fits.gz",
+      "key": "1pGAQcQIRf-WtzhTF_2af7AUTK2MWwBgQ",
+      "log_mass": 10.213661966631122,
+      "log_ssfr_catalogue": -9.312671813008608,
+      "split": "test",
+      "re_kpc": 1.2583460280376597,
+      "beam_fwhm_over_re": 0.0,
+      "pixel_over_re": 0.19611613513818404,
+      "score_pixels": 129,
+      "re_proxy_arcsec": 0.15712406616108351,
+      "re_stellar_arcsec": 0.15297058540778352,
+      "ssfr_basis_sensitivity": 1.1170858624200999,
+      "pixel_arcsec": 0.03,
+      "k_max_rad_per_px": 1.8708750403183985,
+      "baseline": {
+        "map_rmse": {
+          "Av": 0.42473474943347556,
+          "log10metallicity": 0.1872697068716313,
+          "logssfr_100myr": 0.7598184023084656
+        },
+        "centered_map_rmse": {
+          "Av": 0.42256894222169494,
+          "log10metallicity": 0.10095931387229584,
+          "logssfr_100myr": 0.4342505834240775
+        },
+        "withheld_rmse_in_noise_units": {
+          "F182M": 1.4981567454207636,
+          "F335M": 1.3166549445301388
+        },
+        "fit_log_likelihood": -1345.5726865266784,
+        "converged": true,
+        "status": "converged",
+        "n_params": 2693,
+        "seconds": 73.55745581863448,
+        "n_hvp": 378
+      },
+      "calibrated": {
+        "map_rmse": {
+          "Av": 0.40757443392044,
+          "log10metallicity": 0.3076256561785834,
+          "logssfr_100myr": 0.4842423817883995
+        },
+        "centered_map_rmse": {
+          "Av": 0.32618353285273566,
+          "log10metallicity": 0.07065720303856055,
+          "logssfr_100myr": 0.3898973819411449
+        },
+        "withheld_rmse_in_noise_units": {
+          "F182M": 1.3327242441234048,
+          "F335M": 1.1220835299392715
+        },
+        "fit_log_likelihood": -1096.1254617034656,
+        "converged": true,
+        "status": "converged",
+        "n_params": 2695,
+        "seconds": 50.737949650269,
+        "n_hvp": 102
+      }
+    },
+    {
+      "id": "50-363879",
+      "lineage": "482889",
+      "snapshot": 50,
+      "group": "low_activity",
+      "z": 0.99729422578194,
+      "file": "galsyn_tng50_shalo_50_363879.fits.gz",
+      "key": "1rcUFwRXM7ej9Qa6DkLxhEqB9dGhfotsq",
+      "log_mass": 10.202882653919012,
+      "log_ssfr_catalogue": -10.373337994892873,
+      "split": "test",
+      "re_kpc": 1.2215083801755233,
+      "beam_fwhm_over_re": 0.0,
+      "pixel_over_re": 0.20203050891044214,
+      "score_pixels": 120,
+      "re_proxy_arcsec": 0.1577675431252406,
+      "re_stellar_arcsec": 0.14849242404917498,
+      "ssfr_basis_sensitivity": 1.1170858624200999,
+      "pixel_arcsec": 0.03,
+      "k_max_rad_per_px": 1.8708750403183985,
+      "baseline": {
+        "map_rmse": {
+          "Av": 0.3288832895798306,
+          "log10metallicity": 0.32208106807687253,
+          "logssfr_100myr": 0.5479803786728702
+        },
+        "centered_map_rmse": {
+          "Av": 0.2678103521355272,
+          "log10metallicity": 0.12407475921581453,
+          "logssfr_100myr": 0.4478391510115785
+        },
+        "withheld_rmse_in_noise_units": {
+          "F182M": 1.6797956463015766,
+          "F335M": 1.0221316520990569
+        },
+        "fit_log_likelihood": -3572.8801836701614,
+        "converged": true,
+        "status": "converged",
+        "n_params": 2693,
+        "seconds": 52.95848128199577,
+        "n_hvp": 261
+      },
+      "calibrated": {
+        "map_rmse": {
+          "Av": 0.7485209283745453,
+          "log10metallicity": 1.7127982735688276,
+          "logssfr_100myr": 0.619424634632307
+        },
+        "centered_map_rmse": {
+          "Av": 0.3651240198160118,
+          "log10metallicity": 0.11504710388320065,
+          "logssfr_100myr": 0.5793633491602247
+        },
+        "withheld_rmse_in_noise_units": {
+          "F182M": 1.4335761144378585,
+          "F335M": 1.0243435953288744
+        },
+        "fit_log_likelihood": -3488.196738352877,
+        "converged": true,
+        "status": "converged",
+        "n_params": 2695,
+        "seconds": 68.71690031792969,
+        "n_hvp": 686
+      }
+    },
+    {
+      "id": "33-223977",
+      "lineage": "63872",
+      "snapshot": 33,
+      "group": "active",
+      "z": 2.00202813925285,
+      "file": "galsyn_tng50_shalo_33_223977.fits.gz",
+      "key": "19_-mzsG7g3YGJHLzuNZUWAWq4ou_HMyk",
+      "log_mass": 9.711650770519265,
+      "log_ssfr_catalogue": -8.831379127176586,
+      "split": "test",
+      "re_kpc": 2.586020970836536,
+      "beam_fwhm_over_re": 0.0,
+      "pixel_over_re": 0.09950371902099892,
+      "score_pixels": 123,
+      "re_proxy_arcsec": 0.3066493419062178,
+      "re_stellar_arcsec": 0.30149626863362666,
+      "ssfr_basis_sensitivity": 1.0259185088305498,
+      "pixel_arcsec": 0.06,
+      "k_max_rad_per_px": 3.141592653589793,
+      "baseline": {
+        "map_rmse": {
+          "Av": 0.33109398502078907,
+          "log10metallicity": 1.903348172197968,
+          "logssfr_100myr": 0.47021880698246077
+        },
+        "centered_map_rmse": {
+          "Av": 0.3307709322767914,
+          "log10metallicity": 0.11638995249376324,
+          "logssfr_100myr": 0.32155297190372484
+        },
+        "withheld_rmse_in_noise_units": {
+          "F182M": 2.2719322574100174,
+          "F335M": 1.333964628817838
+        },
+        "fit_log_likelihood": 3340.7661122538675,
+        "converged": true,
+        "status": "converged",
+        "n_params": 5293,
+        "seconds": 58.60457986686379,
+        "n_hvp": 149
+      },
+      "calibrated": {
+        "map_rmse": {
+          "Av": 0.2759108862285677,
+          "log10metallicity": 1.8953504815846964,
+          "logssfr_100myr": 0.5505603937871055
+        },
+        "centered_map_rmse": {
+          "Av": 0.2706999690550092,
+          "log10metallicity": 0.11510910723853827,
+          "logssfr_100myr": 0.29345086446928886
+        },
+        "withheld_rmse_in_noise_units": {
+          "F182M": 2.2591922960790143,
+          "F335M": 1.1891197140486507
+        },
+        "fit_log_likelihood": 3950.9391398561124,
+        "converged": true,
+        "status": "converged",
+        "n_params": 5085,
+        "seconds": 62.83549830270931,
+        "n_hvp": 112
+      }
+    },
+    {
+      "id": "33-123607",
+      "lineage": "517899",
+      "snapshot": 33,
+      "group": "low_activity",
+      "z": 2.00202813925285,
+      "file": "galsyn_tng50_shalo_33_123607.fits.gz",
+      "key": "1aBlOvAQ7DA50nkvixl4sdkcM6Kiuk50K",
+      "log_mass": 10.660864529761607,
+      "log_ssfr_catalogue": -9.419083782596848,
+      "split": "test",
+      "re_kpc": 0.7719561121935885,
+      "beam_fwhm_over_re": 0.0,
+      "pixel_over_re": 0.3333333333333333,
+      "score_pixels": 45,
+      "re_proxy_arcsec": 0.1399828359665176,
+      "re_stellar_arcsec": 0.09,
+      "ssfr_basis_sensitivity": 1.0259185088305498,
+      "pixel_arcsec": 0.03,
+      "k_max_rad_per_px": 1.8708750403183985,
+      "baseline": {
+        "map_rmse": {
+          "Av": 0.9943580258405709,
+          "log10metallicity": 0.23328024328743877,
+          "logssfr_100myr": 0.3911719290824883
+        },
+        "centered_map_rmse": {
+          "Av": 0.5495838574630103,
+          "log10metallicity": 0.1138200934373005,
+          "logssfr_100myr": 0.2889052564861855
+        },
+        "withheld_rmse_in_noise_units": {
+          "F182M": 1.6944958070875065,
+          "F335M": 1.5827924209216195
+        },
+        "fit_log_likelihood": -2993.746503016533,
+        "converged": true,
+        "status": "converged",
+        "n_params": 2693,
+        "seconds": 47.93483238434419,
+        "n_hvp": 78
+      },
+      "calibrated": {
+        "map_rmse": {
+          "Av": 0.7457367013972155,
+          "log10metallicity": 2.073708464019838,
+          "logssfr_100myr": 0.3468910027615217
+        },
+        "centered_map_rmse": {
+          "Av": 0.5793728220266329,
+          "log10metallicity": 0.11178581861380227,
+          "logssfr_100myr": 0.31440255467971223
+        },
+        "withheld_rmse_in_noise_units": {
+          "F182M": 1.4808426833935417,
+          "F335M": 1.281065659052716
+        },
+        "fit_log_likelihood": -2909.0778226418042,
+        "converged": true,
+        "status": "converged",
+        "n_params": 2695,
+        "seconds": 47.79504406498745,
+        "n_hvp": 81
+      }
+    },
+    {
+      "id": "25-45530",
+      "lineage": "242789",
+      "snapshot": 25,
+      "group": "active",
+      "z": 3.00813107163038,
+      "file": "galsyn_tng50_shalo_25_45530.fits.gz",
+      "key": "1-vvYqrUyXdDaX8Jz31uB8xMO9UzZ5qOl",
+      "log_mass": 10.051350515592123,
+      "log_ssfr_catalogue": -8.6080706261906,
+      "split": "test",
+      "re_kpc": 1.8903999640638622,
+      "beam_fwhm_over_re": 0.0,
+      "pixel_over_re": 0.125,
+      "score_pixels": 79,
+      "re_proxy_arcsec": 0.28268411500212637,
+      "re_stellar_arcsec": 0.24,
+      "ssfr_basis_sensitivity": 0.9695023050721793,
+      "pixel_arcsec": 0.06,
+      "k_max_rad_per_px": 3.141592653589793,
+      "baseline": {
+        "map_rmse": {
+          "Av": 0.43952916813203047,
+          "log10metallicity": 1.9433551840499372,
+          "logssfr_100myr": 0.3048871275412965
+        },
+        "centered_map_rmse": {
+          "Av": 0.3651689134955052,
+          "log10metallicity": 0.11221053895656348,
+          "logssfr_100myr": 0.16335356984136157
+        },
+        "withheld_rmse_in_noise_units": {
+          "F182M": 2.4912180072507493,
+          "F335M": 1.3061399026459561
+        },
+        "fit_log_likelihood": 3205.498787065576,
+        "converged": true,
+        "status": "converged",
+        "n_params": 5293,
+        "seconds": 65.99042339203879,
+        "n_hvp": 287
+      },
+      "calibrated": {
+        "map_rmse": {
+          "Av": 0.4689819469712427,
+          "log10metallicity": 1.8499471293594012,
+          "logssfr_100myr": 0.3749586327500022
+        },
+        "centered_map_rmse": {
+          "Av": 0.36942745237144764,
+          "log10metallicity": 0.1009604651905552,
+          "logssfr_100myr": 0.20734678801960074
+        },
+        "withheld_rmse_in_noise_units": {
+          "F182M": 2.3139171281246615,
+          "F335M": 1.327067258953505
+        },
+        "fit_log_likelihood": 4075.367366563991,
+        "converged": true,
+        "status": "converged",
+        "n_params": 5395,
+        "seconds": 59.43804818112403,
+        "n_hvp": 150
+      }
+    },
+    {
+      "id": "25-48446",
+      "lineage": "429471",
+      "snapshot": 25,
+      "group": "low_activity",
+      "z": 3.00813107163038,
+      "file": "galsyn_tng50_shalo_25_48446.fits.gz",
+      "key": "1_2xVKfh9ibNoV-zgp_pOPcg0I5QJlc60",
+      "log_mass": 10.272445714810164,
+      "log_ssfr_catalogue": -8.998875484485364,
+      "split": "test",
+      "re_kpc": 0.47259999101596556,
+      "beam_fwhm_over_re": 0.0,
+      "pixel_over_re": 0.5,
+      "score_pixels": 21,
+      "re_proxy_arcsec": 0.1429413973720838,
+      "re_stellar_arcsec": 0.06,
+      "ssfr_basis_sensitivity": 0.9695023050721793,
+      "pixel_arcsec": 0.03,
+      "k_max_rad_per_px": 1.8708750403183985,
+      "baseline": {
+        "map_rmse": {
+          "Av": 1.444017062178328,
+          "log10metallicity": 0.24082684103816332,
+          "logssfr_100myr": 0.458833987577029
+        },
+        "centered_map_rmse": {
+          "Av": 0.9454445296846654,
+          "log10metallicity": 0.16513267853487754,
+          "logssfr_100myr": 0.26965818283484266
+        },
+        "withheld_rmse_in_noise_units": {
+          "F182M": 4.465265665533129,
+          "F335M": 2.354843473709435
+        },
+        "fit_log_likelihood": 6520.3177458545015,
+        "converged": false,
+        "status": "max_iter",
+        "n_params": 2693,
+        "seconds": 67.82610572641715,
+        "n_hvp": 1248
+      },
+      "calibrated": {
+        "map_rmse": {
+          "Av": 1.1551063681062974,
+          "log10metallicity": 0.19725539473738726,
+          "logssfr_100myr": 0.272278270191819
+        },
+        "centered_map_rmse": {
+          "Av": 0.7345995275654048,
+          "log10metallicity": 0.13584197620664762,
+          "logssfr_100myr": 0.26008696846088625
+        },
+        "withheld_rmse_in_noise_units": {
+          "F182M": 3.5202780755362775,
+          "F335M": 2.2890620882821877
+        },
+        "fit_log_likelihood": 6715.091875999785,
+        "converged": false,
+        "status": "max_iter",
+        "n_params": 2695,
+        "seconds": 91.54131694883108,
+        "n_hvp": 1422
+      }
+    }
+  ]
+}
