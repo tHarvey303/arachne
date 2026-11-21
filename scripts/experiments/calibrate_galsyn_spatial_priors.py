@@ -23,6 +23,7 @@ AMPLITUDE_BOUNDS = {"Av": (0.001, 3), "log10metallicity": (0.001, 2), "logssfr_1
 NUISANCE_FLOORS = {"Av": 0.01, "log10metallicity": 0.015, "logssfr_100myr": 0.05}
 SNAPSHOTS = (50, 33, 25)
 SSFR_FLOOR = 1e-11
+FSPS_Z_SUN = 0.019
 
 
 def download_drive(file_id, path):
@@ -139,7 +140,7 @@ def read_truth(path, ssfr_floor=SSFR_FLOOR):
     cumulative = np.cumsum(mass[use][order])
     re_px = float(np.interp(cumulative[-1] / 2, cumulative, r[use][order]))
     with np.errstate(divide="ignore", invalid="ignore"):
-        z_dex = np.log10(metal * 0.02)
+        z_dex = np.log10(metal * FSPS_Z_SUN)
         ssfr = np.log10(np.maximum(sfr100 / mass, ssfr_floor))
         veff = -2.5 * np.log10(flux_d / flux_0)
     return {

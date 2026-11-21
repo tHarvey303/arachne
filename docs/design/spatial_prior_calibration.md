@@ -68,9 +68,11 @@ within 20 kpc. The map fits use pixels within \(1.5R_e\) with sufficient local m
 particle shot noise. The recent-sSFR diagnostic floors the maps at \(10^{-11}\,\mathrm{yr}^{-1}\).
 Effective dust is the attenuation from the matched dust-on and dust-off maps in the NIRCam
 band closest to rest-frame V. The photometry was rendered by GalSyn with FSPS and a
-particle-based dust column, independently of the Arachne emulator.
+particle-based dust column, independently of the Arachne emulator. Metallicities use the
+FSPS reference mass fraction of 0.019 when converting from solar units.
 [GalSyn DR1](https://github.com/aabdurrouf/GalSyn_dr1),
-[Abdurro'uf et al.](https://arxiv.org/abs/2603.23986)
+[Abdurro'uf et al.](https://arxiv.org/abs/2603.23986),
+[GalSyn FSPS implementation](https://github.com/aabdurrouf/GalSyn/blob/main/galsyn/galsyn_run_fsps.py)
 
 ### Resolution check
 
@@ -79,6 +81,16 @@ the images, and averaged them through irregular 2×2 continuum bins. The median 
 were 0.66, 2.19 and 4.20 pixels for injections of 0.65, 2 and 4 pixels. The shortest case hit
 a searched length limit in 14 of 16 realizations. The MaNGA and GalSyn tables use both
 profile bounds and a resolution threshold when counting two-sided lengths.
+
+Doubling MaNGA's assumed per-bin error floors moved the pooled dust break length from
+0.119 to \(0.124R_e\) and amplitude from 0.293 to 0.278 mag. The corresponding stellar
+metallicity length moved from 0.046 to \(0.057R_e\), with four two-sided measurements
+under either setting. Lowering the GalSyn sSFR floor to \(10^{-12}\,\mathrm{yr}^{-1}\)
+moved the recent-sSFR length from 0.278 to \(0.282R_e\) and the amplitude from 0.291 to
+0.314 dex. These reruns reuse the sample manifests and use `--error-floor-scale 2` and
+`--ssfr-floor 1e-12`, respectively.
+[MaNGA sensitivity](spatial_priors/manga_sensitivity.json),
+[GalSyn sensitivity](spatial_priors/galsyn_sensitivity.json)
 
 ## Applying a calibration
 

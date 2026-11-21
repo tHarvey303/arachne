@@ -1,0 +1,278 @@
+{
+  "version": 1,
+  "source": "MaNGA DR17 pyPipe3D v3_1_1/3.1.1",
+  "nu": 1.5,
+  "redshift_range": [
+    0.0138431,
+    0.0518427
+  ],
+  "transferable_fields": [
+    "Av",
+    "log10metallicity"
+  ],
+  "fields": {
+    "Av": {
+      "unit": "mag",
+      "n_train": 36,
+      "n_test": 12,
+      "n_train_detected": 34,
+      "n_train_bounded": 14,
+      "amplitude": {
+        "median": 0.27767345283124073,
+        "log_scatter": 0.578017423662827
+      },
+      "radial_slope_per_re_quantiles": [
+        -0.06852053241866364,
+        -0.004514047014287207,
+        0.06113630001554108
+      ],
+      "length": {
+        "re": {
+          "median": 0.12411337989583193,
+          "log_scatter": 0.9240441430528559,
+          "test_mean_score": -1.0345135858335575
+        },
+        "kpc": {
+          "median": 0.8109422369319044,
+          "log_scatter": 1.0347004028122113,
+          "test_mean_score": -1.0748399683988918,
+          "test_score_delta_from_pooled_re": {
+            "mean": -0.04032638256533446,
+            "bootstrap_95pct": [
+              -0.13042785784927402,
+              0.045602458307359685
+            ]
+          }
+        },
+        "activity_re": {
+          "groups": {
+            "active": {
+              "median": 0.09580629395319858,
+              "log_scatter": 0.9752532454833196
+            },
+            "low_activity": {
+              "median": 0.15692057679856516,
+              "log_scatter": 0.85751707771733
+            }
+          },
+          "test_score_delta_from_pooled_re": {
+            "mean": -0.007408542088743873,
+            "bootstrap_95pct": [
+              -0.11294705674880808,
+              0.1083324021358116
+            ]
+          }
+        },
+        "log_mass_re": {
+          "groups": {
+            "at_or_above_median": {
+              "median": 0.11798230620333965,
+              "log_scatter": 0.5665019341289426
+            },
+            "below_median": {
+              "median": 0.12186925749990343,
+              "log_scatter": 1.2678423476081302
+            }
+          },
+          "test_score_delta_from_pooled_re": {
+            "mean": -0.1832395521761485,
+            "bootstrap_95pct": [
+              -0.4041449071920264,
+              -0.008066782963907568
+            ]
+          },
+          "training_median_threshold": 10.8152251771031
+        },
+        "axis_ratio_re": {
+          "groups": {
+            "at_or_above_median": {
+              "median": 0.13332610271528103,
+              "log_scatter": 1.1741400941495548
+            },
+            "below_median": {
+              "median": 0.11658024140350047,
+              "log_scatter": 0.6951140097079901
+            }
+          },
+          "test_score_delta_from_pooled_re": {
+            "mean": 0.030674521192380694,
+            "bootstrap_95pct": [
+              -0.05768029372914642,
+              0.1295043543876189
+            ]
+          },
+          "training_median_threshold": 0.398275293180777
+        }
+      }
+    },
+    "log10metallicity": {
+      "unit": "dex",
+      "n_train": 36,
+      "n_test": 12,
+      "n_train_detected": 32,
+      "n_train_bounded": 4,
+      "amplitude": {
+        "median": 0.35441093120773287,
+        "log_scatter": 0.7954892240537169
+      },
+      "radial_slope_per_re_quantiles": [
+        -0.21542167086048852,
+        -0.0633723732809406,
+        0.023143711774671748
+      ],
+      "length": {
+        "re": {
+          "median": 0.05671537470770383,
+          "log_scatter": 1.0893573532599152,
+          "test_mean_score": -0.6567799546458798
+        },
+        "kpc": {
+          "median": 0.38931525527322874,
+          "log_scatter": 0.9878345118793868,
+          "test_mean_score": -0.7287829634863652,
+          "test_score_delta_from_pooled_re": {
+            "mean": -0.07200300884048545,
+            "bootstrap_95pct": [
+              -0.14493701081583615,
+              0.0008939455530601437
+            ]
+          }
+        },
+        "activity_re": {
+          "groups": {
+            "active": {
+              "median": 0.07143397455190395,
+              "log_scatter": 0.3
+            },
+            "low_activity": {
+              "median": 0.044382304546601296,
+              "log_scatter": 1.5
+            }
+          },
+          "test_score_delta_from_pooled_re": {
+            "mean": 0.09779151068835003,
+            "bootstrap_95pct": [
+              -0.05840605129068951,
+              0.23428179101951155
+            ]
+          }
+        },
+        "log_mass_re": {
+          "groups": {
+            "at_or_above_median": {
+              "median": 0.039702621992864374,
+              "log_scatter": 1.5
+            },
+            "below_median": {
+              "median": 0.07129820545673872,
+              "log_scatter": 0.5950042853651423
+            }
+          },
+          "test_score_delta_from_pooled_re": {
+            "mean": 0.12197210529735036,
+            "bootstrap_95pct": [
+              0.03336590664887984,
+              0.20939857469121573
+            ]
+          },
+          "training_median_threshold": 10.8152251771031
+        },
+        "axis_ratio_re": {
+          "groups": {
+            "at_or_above_median": {
+              "median": 0.04969564126173177,
+              "log_scatter": 0.6008361765097767
+            },
+            "below_median": {
+              "median": 0.07341038308735227,
+              "log_scatter": 1.2594792665752381
+            }
+          },
+          "test_score_delta_from_pooled_re": {
+            "mean": 0.023605662109632303,
+            "bootstrap_95pct": [
+              -0.05334598111828768,
+              0.09356743208099416
+            ]
+          },
+          "training_median_threshold": 0.398275293180777
+        }
+      }
+    },
+    "sfh_10_100_over_100_1000_myr": {
+      "unit": "dex",
+      "n_train": 18,
+      "n_test": 6,
+      "n_train_detected": 15,
+      "n_train_bounded": 2,
+      "amplitude": {
+        "median": 1.462843668873696,
+        "log_scatter": 0.4610501534934516
+      },
+      "radial_slope_per_re_quantiles": [
+        -0.2203851209277029,
+        0.07623164427000222,
+        0.35734359316243974
+      ],
+      "length": {
+        "re": {
+          "median": 0.05804839881059744,
+          "log_scatter": 0.468037417240684,
+          "test_mean_score": -0.9100878602632428
+        },
+        "kpc": {
+          "median": 0.32085044293906256,
+          "log_scatter": 0.36635336895539244,
+          "test_mean_score": -0.9599620026522026,
+          "test_score_delta_from_pooled_re": {
+            "mean": -0.04987414238895981,
+            "bootstrap_95pct": [
+              -0.4062270916277588,
+              0.1872184925504291
+            ]
+          }
+        },
+        "log_mass_re": {
+          "groups": {
+            "at_or_above_median": {
+              "median": 0.04123818323308956,
+              "log_scatter": 0.7186306314022096
+            },
+            "below_median": {
+              "median": 0.06941989616262316,
+              "log_scatter": 0.3003356274944907
+            }
+          },
+          "test_score_delta_from_pooled_re": {
+            "mean": 0.10487593335967475,
+            "bootstrap_95pct": [
+              -0.22774906136749842,
+              0.345262971529602
+            ]
+          },
+          "training_median_threshold": 10.038916279257851
+        },
+        "axis_ratio_re": {
+          "groups": {
+            "at_or_above_median": {
+              "median": 0.06582287577428879,
+              "log_scatter": 0.3
+            },
+            "below_median": {
+              "median": 0.04382449008194682,
+              "log_scatter": 0.7317557037260537
+            }
+          },
+          "test_score_delta_from_pooled_re": {
+            "mean": 0.14604049851689385,
+            "bootstrap_95pct": [
+              -0.08325091703264229,
+              0.35307400478933754
+            ]
+          },
+          "training_median_threshold": 0.4088296119690525
+        }
+      }
+    }
+  }
+}
