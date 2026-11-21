@@ -19,7 +19,8 @@ from scipy.signal import fftconvolve
 from arachne import ForwardModel, ObservationCube, PSFModel, load_emulator, mass_map_from_image
 from arachne.data.units import flux_to_nJy
 from arachne.inference.initialisation import find_map
-from arachne.inference.newton import trust_region_newton
+from arachne.inference.laplace import make_hessian_fn
+from arachne.inference.newton import dense_preconditioner, trust_region_newton
 from arachne.postprocess.recipe import continuity_agebins
 from arachne.priors.spatial_calibration import load_spatial_calibration
 from arachne.psf.resolution import psf_k_max
@@ -181,9 +182,15 @@ def benchmark(row, path, fit_emulator, test_emulator, calibration, args):
         adam = find_map(
             forward, jnp.zeros(forward.n_params), n_rounds=3, steps_per_round=200, final_steps=250
         )
+        theta = adam.theta.astype(jnp.float64)
+        preconditioner = None
+        if args.preconditioner == "dense":
+            hessian = make_hessian_fn(forward, chunk_size=64)(theta)
+            preconditioner = dense_preconditioner(hessian)
         polish = trust_region_newton(
             lambda theta: -forward.log_posterior(theta),
-            adam.theta.astype(jnp.float64),
+            theta,
+            preconditioner=preconditioner,
             max_iter=args.newton_steps,
             max_cg=130,
             verbose=False,
@@ -238,6 +245,7 @@ def main():
         p.add_argument(f"--{name}", type=Path, required=True)
     p.add_argument("--size", type=int, default=28)
     p.add_argument("--newton-steps", type=int, default=85)
+    p.add_argument("--preconditioner", choices=("dense", "identity"), default="dense")
     p.add_argument("--snr", type=float, default=40)
     p.add_argument("--mtf", type=float, default=0.15)
     p.add_argument("--per-snapshot", type=int, default=2)
@@ -255,7 +263,12 @@ def main():
     held = load_emulator(
         args.emulator, params=demo.SPS_PARAM_NAMES, bands=[f"JWST/NIRCam.{b}" for b in TEST_BANDS]
     )
-    result = {"devices": list(map(str, jax.devices())), "snr": args.snr, "galaxies": []}
+    result = {
+        "devices": list(map(str, jax.devices())),
+        "snr": args.snr,
+        "preconditioner": args.preconditioner,
+        "galaxies": [],
+    }
     for snap in sorted({r["snapshot"] for r in eligible}, reverse=True):
         rows = [r for r in eligible if r["snapshot"] == snap]
         rows = [

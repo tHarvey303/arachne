@@ -29,6 +29,12 @@ metallicity lengths improved the mean test profile score by 0.05 nats per galaxy
 benchmark prescription. A pooled dust length in kpc scored +0.41 nats per GalSyn galaxy with
 an interval of −0.12 to +0.97.
 
+Exploratory splits at the training median stellar mass gave small test-score gains in
+GalSyn for dust (+0.10 nats per galaxy) and recent sSFR (+0.05). Mass, redshift and galaxy
+size vary together in this progenitor sample. The calibration files record these tests
+and the MaNGA projected axis-ratio splits. Differences between the MaNGA and GalSyn scales
+also reflect tracer, footprint and effective-radius definitions.
+
 ### MaNGA observations
 
 The 48-galaxy IFU sample used pyPipe3D v3_1_1/3.1.1, QCFLAG 0, 127-fibre observations,

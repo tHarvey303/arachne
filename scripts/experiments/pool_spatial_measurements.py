@@ -68,6 +68,7 @@ def resample_score(differences, rng):
 def summarize(measurements):
     """Compare pooled and activity-conditioned distributions in kpc and R_e."""
     rng = np.random.default_rng(measurements["seed"])
+    exploratory_rng = np.random.default_rng(702)
     ell = np.asarray(measurements["ell_over_re_grid"])
     cells = 0.5 * (np.log(ell[1:]) + np.log(ell[:-1]))
     training_z = [g["z"] for g in measurements["galaxies"] if g["split"] == "train"]
@@ -86,6 +87,8 @@ def summarize(measurements):
             available = [g for g in available if g["group"] == "active"]
         train = [g for g in available if g["split"] == "train"]
         test = [g for g in available if g["split"] == "test"]
+        if len(train) < 3 or not test:
+            raise ValueError(f"{name} needs at least three training and one test galaxy")
         models = {}
         for length_unit in ("re", "kpc"):
             prior = fit_lengths(train, name, cells, length_unit)
@@ -102,26 +105,40 @@ def summarize(measurements):
                 models[length_unit]["test_score_delta_from_pooled_re"] = resample_score(
                     np.asarray(scores) - scores_re, rng
                 )
-        for key in ("group", "snapshot"):
+        for key in ("group", "snapshot", "log_mass", "axis_ratio"):
             if key not in train[0] or (key == "group" and observational_sfh):
                 continue
+            threshold = (
+                float(np.median([g[key] for g in train]))
+                if key in ("log_mass", "axis_ratio")
+                else None
+            )
+
+            def subgroup(galaxy):
+                if threshold is None:
+                    return galaxy[key]
+                return "below_median" if galaxy[key] < threshold else "at_or_above_median"
+
             groups = {}
-            for group in sorted({g[key] for g in train}):
-                group_train = [g for g in train if g[key] == group]
+            for group in sorted({subgroup(g) for g in train}):
+                group_train = [g for g in train if subgroup(g) == group]
                 if len(group_train) >= 3:
                     groups[group] = fit_lengths(group_train, name, cells, "re")
-            if len(groups) < 2 or any(g[key] not in groups for g in test):
+            if len(groups) < 2 or any(subgroup(g) not in groups for g in test):
                 continue
-            scores = [score_length(g, name, cells, groups[g[key]], "re") for g in test]
-            models["activity_re" if key == "group" else "snapshot_re"] = {
+            scores = [score_length(g, name, cells, groups[subgroup(g)], "re") for g in test]
+            comparison = {
                 "groups": {
                     group: {"median": float(np.exp(loc)), "log_scatter": scale}
                     for group, (loc, scale) in groups.items()
                 },
                 "test_score_delta_from_pooled_re": resample_score(
-                    np.asarray(scores) - scores_re, rng
+                    np.asarray(scores) - scores_re, rng if threshold is None else exploratory_rng
                 ),
             }
+            if threshold is not None:
+                comparison["training_median_threshold"] = threshold
+            models["activity_re" if key == "group" else f"{key}_re"] = comparison
         amplitudes = []
         resolved = []
         for galaxy in train:
@@ -146,6 +163,9 @@ def summarize(measurements):
             "n_train_detected": len(amplitudes),
             "n_train_bounded": len(resolved),
             "amplitude": amplitude,
+            "radial_slope_per_re_quantiles": np.quantile(
+                [g["fields"][name]["slope_per_re"] for g in train], [0.16, 0.50, 0.84]
+            ).tolist(),
             "length": models,
         }
     return result
