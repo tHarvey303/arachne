@@ -407,7 +407,7 @@ def spiral_truth(n, rng):
 
 def build_model(n, mass_mean, mean_values=None, corr_scale=1.0, nu=1.5, fixed=None,
                 hyper=False, couple=False, amp_scale=1.0, sfh_prior=None,
-                pinned=None, fields=None, k_max=None):  # fmt: skip
+                pinned=None, fields=None, k_max=None, mass_prior=None):  # fmt: skip
     """CorrelatedFieldMap with the demo's hyperparameters.
 
     ``fields`` defaults to FIELDS (the fit); pass TRUTH_FIELDS for the truth model.  Latent
@@ -423,6 +423,7 @@ def build_model(n, mass_mean, mean_values=None, corr_scale=1.0, nu=1.5, fixed=No
     passes ``()``) fields get amplitude and level sigma 1e-3 around a zero mean: held at 0.
     ``k_max`` (rad/px) truncates every field's basis: the mass field keeps every mode below
     it (more detail for mass), the others also keep the usual 0.99 variance cut.
+    ``mass_prior`` optionally sets the mass field's (amplitude, level sigma) in dex.
     """
     fields = FIELDS if fields is None else list(fields)
     pinned = PINNED if pinned is None else pinned
@@ -470,6 +471,12 @@ def build_model(n, mass_mean, mean_values=None, corr_scale=1.0, nu=1.5, fixed=No
         # A_V must come after its sources: reorder fields so it is last.
         free_couplings = {"Av": {s: 0.5 for s in sources}}
     field_order = [k for k in fields if k != "Av"] + ["Av"] if couple else fields
+    amplitudes = {
+        k: 1e-3 if k in pinned else amp_scale * v for k, v in AMPLITUDES.items() if k in fields
+    }
+    level_sigmas = {k: 1e-3 if k in pinned else v for k, v in LEVEL_SIGMAS.items() if k in fields}
+    if mass_prior is not None:
+        amplitudes["log_mass"], level_sigmas["log_mass"] = mass_prior
     return CorrelatedFieldMap(
         image_shape=(n, n),
         emulator_param_names=SPS_PARAM_NAMES,
@@ -479,12 +486,8 @@ def build_model(n, mass_mean, mean_values=None, corr_scale=1.0, nu=1.5, fixed=No
         fixed_params=fixed,
         corr_lengths=ells,
         nus={k: (1.5 if k == "log_mass" else nu) for k in fields},
-        amplitudes={
-            k: 1e-3 if k in pinned else amp_scale * v for k, v in AMPLITUDES.items() if k in fields
-        },
-        level_sigmas={
-            k: 1e-3 if k in pinned else v for k, v in LEVEL_SIGMAS.items() if k in fields
-        },
+        amplitudes=amplitudes,
+        level_sigmas=level_sigmas,
         mean_maps=means,
         field_marginals=marginals,
         pixel_scale=PIXEL_SCALE,

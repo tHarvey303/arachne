@@ -34,6 +34,7 @@ import argparse
 import json
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import jax
@@ -50,6 +51,11 @@ import real_data_utils as rdu  # noqa: E402
 
 from arachne import ForwardModel, ObservationCube, PSFModel, load_emulator  # noqa: E402
 from arachne.data.dja import fetch_dja_cutout, load_dja_cutout  # noqa: E402
+from arachne.inference.field_initialisation import (  # noqa: E402
+    coarse_field_start,
+    project_mass_start,
+    smooth_mass_reference,
+)
 from arachne.psf.resolution import psf_k_max  # noqa: E402
 from arachne.results.io import write_content  # noqa: E402
 from arachne.results.regions import detection_region  # noqa: E402
@@ -300,7 +306,14 @@ def main():
     ap.add_argument("--hyper", action="store_true")
     ap.add_argument("--couple", action="store_true")
     ap.add_argument("--k-max-mtf", type=float, default=0.0)
-    ap.add_argument("--mass-start", choices=["image", "template"], default="image")
+    ap.add_argument(
+        "--mass-start",
+        choices=["image", "template", "image-seed", "coarse"],
+        default="image",
+        help="'image' and 'template' set the image-derived mass prior centre. "
+        "'image-seed' and 'coarse' use a shared broad smooth mass prior, with a "
+        "single-band or PSF-aware multiband seed respectively.",
+    )
     ap.add_argument("--rounds", type=int, default=4)
     ap.add_argument("--steps", type=int, default=500)
     ap.add_argument("--quick", action="store_true")
@@ -416,11 +429,17 @@ def main():
         print(f"SFH basis singular values {np.array2string(s_vals, precision=4)}")
 
     ref = {**demo.NEUTRAL_GLOBALS, **demo.NEUTRAL, **demo.FIXED}
+    profile_prior = args.mass_start in ("image-seed", "coarse")
+    mass_prior = None
     if args.mass_start == "template":
         ms = template_mass_map(
             obs, emulator, ref, [{}, *default_sfh_dust_templates()], smooth_sigma_px=1.0
         )
         mass_mean = ms.log_mass
+    elif profile_prior:
+        prior_total = float(emulator.spec.defaults["log_mass"])
+        mass_mean = smooth_mass_reference(obs.image_shape, prior_total)
+        mass_prior = (0.75, 2.0)
     else:
         mass_mean = mass_map_from_image(
             obs, emulator, ref, band=len(demo.BANDS) - 1, smooth_sigma_px=1.0
@@ -434,10 +453,32 @@ def main():
         hyper=args.hyper,
         couple=args.couple,
         k_max=k_max,
+        mass_prior=mass_prior,
     )
     print(model.summary())
     fm = ForwardModel.build(obs, psf, model, emulator, model_error_frac=frac.astype(np.float32))
     theta0 = model.initial_theta(global_values=demo.NEUTRAL_GLOBALS)
+    start_info = None
+    if profile_prior:
+        start_time = time.monotonic()
+        if args.mass_start == "coarse":
+            sps_fields = [
+                f
+                for f in model.field_names
+                if (f == "Av" or f.startswith(("sfh_", "logsfr_ratio"))) and f not in demo.PINNED
+            ]
+            theta0, start_info = coarse_field_start(fm, theta0, psf, segment, sps_fields)
+        else:
+            valid = (np.asarray(obs.mask) > 0) & np.isfinite(obs.flux)
+            masked = replace(obs, flux=np.where(valid, obs.flux, 0.0))
+            if np.any(masked.flux[-1] > 0):
+                target = mass_map_from_image(masked, emulator, ref)
+                theta0 = project_mass_start(model, theta0, target)
+                start_info = {"status": "fitted"}
+            else:
+                start_info = {"status": "no_positive_reference_flux"}
+        start_info["runtime_s"] = time.monotonic() - start_time
+        print(f"{args.mass_start} warm start: {start_info}")
     pstd_model = demo.prior_map_std(model, 400, jax.random.PRNGKey(args.seed + 200))
     names = list(model.param_map_names)
 
@@ -538,6 +579,15 @@ def main():
         "couple": args.couple,
         "k_max": k_max,
         "mass_start": args.mass_start,
+        "warm_start": start_info,
+        "smooth_mass_prior": {
+            "total_log_mass": prior_total,
+            "re_px": min(obs.image_shape) / 8,
+            "amplitude_dex": mass_prior[0],
+            "level_sigma_dex": mass_prior[1],
+        }
+        if profile_prior
+        else None,
         "posterior": args.posterior,
         "n_starts": args.n_starts,
         "best_start": i_best,

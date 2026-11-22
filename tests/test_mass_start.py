@@ -7,8 +7,16 @@ import jax.numpy as jnp
 import numpy as np
 
 from arachne.data.observation import ObservationCube
+from arachne.data.psf import PSFModel
 from arachne.emulator.base import SPSEmulator
-from arachne.spatial.correlated_field import mass_map_from_image
+from arachne.forward_model.pipeline import ForwardModel
+from arachne.inference.field_initialisation import (
+    coarse_field_start,
+    project_mass_start,
+    smooth_mass_reference,
+)
+from arachne.psf.convolution import PSFConvolver
+from arachne.spatial.correlated_field import CorrelatedFieldMap, mass_map_from_image
 from arachne.spatial.mass_start import (
     MassStart,
     default_sfh_dust_templates,
@@ -116,3 +124,59 @@ def test_correction_zero_at_low_snr():
     # an unreachable cut disables the correction everywhere
     off = template_mass_map(obs, emu, REF, TEMPLATES, snr_min=1e9)
     assert np.all(off.correction == 0.0)
+
+
+def test_coarse_psf_start_recovers_mass_and_dust_with_fixed_prior():
+    """Unequal PSFs and a masked contaminant leave the seed and posterior well defined."""
+    n = 24
+    yy, xx = np.indices((n, n))
+    r = np.hypot((yy - 11.5) / 4.0, (xx - 11.5) / 5.0)
+    truth_mass = 7.5 - 1.67835 * r / np.log(10)
+    truth_av = 0.7 + 0.6 * np.exp(-0.5 * r**2)
+    truth_ratio = -0.3 + 0.15 * np.exp(-0.5 * r**2)
+    emu = ToyEmu(_param_names=NAMES, _band_names=BANDS)
+    rows = np.stack([np.full_like(r, 2.0), truth_mass, truth_av, truth_ratio], axis=-1)
+    intrinsic = emu.predict(jnp.asarray(rows.reshape(-1, len(NAMES)))).T.reshape(-1, n, n)
+    ky, kx = np.mgrid[-6:7, -6:7]
+    widths = np.linspace(0.6, 1.7, len(BANDS))[:, None, None]
+    kernels = np.exp(-0.5 * (ky**2 + kx**2) / widths**2)
+    psf = PSFModel(kernels / kernels.sum(axis=(1, 2), keepdims=True), BANDS)
+    flux = np.array(PSFConvolver(psf, (n, n))(intrinsic))
+    flux[:, 4, 4] = 1e5
+    mask = np.ones_like(flux)
+    mask[:, 4, 4] = 0
+    obs = ObservationCube(flux, np.full_like(flux, 0.04), mask, BANDS, 0.05)
+    model = CorrelatedFieldMap(
+        (n, n),
+        NAMES,
+        {"Av": (0.0, 4.0), "logsfr_ratio_0": (-4.0, 4.0)},
+        field_params=["log_mass", "Av", "logsfr_ratio_0"],
+        fixed_params={"redshift": 2.0},
+        mean_maps={**REF, "log_mass": smooth_mass_reference((n, n), 9.5)},
+        amplitudes={"log_mass": 0.75, "Av": 0.3, "logsfr_ratio_0": 0.5},
+    )
+    fm = ForwardModel.build(obs, psf, model, emu, model_error_frac=0.05)
+    neutral = model.initial_theta()
+    prior_maps = np.array(model.field_maps(neutral))
+    prior_value = float(model.log_prior(neutral))
+    seed, info = coarse_field_start(fm, neutral, psf, r < 2.5, ["Av", "logsfr_ratio_0"])
+    image = ObservationCube(np.where(mask, flux, 0.0), obs.variance, mask, BANDS, 0.05)
+    baseline = project_mass_start(model, neutral, mass_map_from_image(image, emu, REF))
+    assert info["status"] == "fitted"
+    assert info["profile_steps"] > 0
+    assert len(info["regional_bands"]) >= 3
+    assert info["regional_steps"] > 0
+    assert fm.log_posterior(seed) > fm.log_posterior(baseline)
+    mass, av, _ = np.asarray(model.field_maps(seed))
+    region = r < 2.0
+    baseline_mass = np.asarray(model.field_maps(baseline))[0]
+    assert np.std((mass - truth_mass)[region]) < np.std((baseline_mass - truth_mass)[region])
+    assert np.mean(av[r < 0.6]) > np.mean(av[(r > 1.5) & region])
+    np.testing.assert_array_equal(model.field_maps(neutral), prior_maps)
+    assert model.log_prior(neutral) == prior_value
+
+    no_data = ObservationCube(flux, obs.variance, np.zeros_like(mask), BANDS, 0.05)
+    empty_fm = ForwardModel.build(no_data, psf, model, emu)
+    unchanged, info = coarse_field_start(empty_fm, neutral, psf, r < 2.5, ["Av"])
+    assert info["status"] == "no_usable_aperture"
+    np.testing.assert_array_equal(unchanged, neutral)

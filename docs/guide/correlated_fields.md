@@ -150,3 +150,27 @@ merge0}`, `--sfh-prior`, `--free-globals`, `--mass-start {image,template,wiener}
 configuration, MAP and start statistics against the truth, per-start `modes`, `laplace`/
 `geovi` and `nuts` blocks with coverage per map and the total mass), `maps.npz`,
 `laplace.npz`, `figures/` and the results bundle `results.h5`.
+
+## Initialising real-image fits
+
+The DJA driver can seed the resolved fit with a PSF-aware multiband fit.
+
+```bash
+python examples/fit_correlated_field_dja.py --target goods-s-mediumjwst_33151 \
+    --emulator emu.eqx --psf-dir psfs/DJA-gds-v7.2-0.05 --mass-start coarse
+```
+
+`coarse` fits the target-aperture SED to seed the dust and SFH levels, then optimises an
+intrinsic elliptical Sérsic mass profile and the same levels on the image grid with each
+band's PSF, mask and model-error floor. It projects the mass profile into the field's level
+and Fourier coefficients. For resolved targets it uses inner and outer colours to initialise
+smooth radial changes in mass, dust and SFH. This step requires at least three common bands
+with S/N ≥ 10 in both apertures and a fitted semiminor effective radius at least twice each
+band's PSF half-energy radius, with a minimum of two pixels.
+
+`--mass-start image-seed` uses the smoothed reddest band at neutral SPS values for comparison.
+Both modes use the same exponential mass prior centred on the cutout, with reference
+`R_e = min(H, W) / 8`, the emulator's default formed mass scale, a 2 dex level scatter and
+a 0.75 dex Matérn amplitude in log mass. The warm-start maps set the starting parameters.
+`metrics.json` records the prior settings, start runtime and coarse fit diagnostics.
+The default `image` and optional `template` modes use image-derived mass prior centres.
